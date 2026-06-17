@@ -13,9 +13,31 @@ const ZAPI_CLIENT_TOKEN = Deno.env.get("ZAPI_CLIENT_TOKEN")!;
 
 const db = createClient(SUPABASE_URL, SERVICE_ROLE);
 
+// Janela de sessao: depois desse silencio, a proxima mensagem reinicia a coleta.
+const JANELA_MS = 5 * 60 * 1000;
+
+function escolher(arr: string[]): string {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// Variacoes pra nao repetir sempre a mesma frase.
+const FALLBACK_MIDIA = [
+  "Recebi sua mensagem! Por aqui eu so consigo ler texto. Pode me escrever a resposta?",
+  "Opa! Esse tipo de arquivo eu ainda nao leio. Me manda por texto que eu sigo com voce.",
+  "Valeu por mandar! Mas eu so entendo texto por enquanto. Pode digitar pra mim?",
+  "Recebi! So que eu leio mesmo e mensagem de texto. Me conta por escrito?",
+];
+
+const SAUDACOES_RETORNO = [
+  "Oi de novo",
+  "Que bom te ver de volta",
+  "Opa, voce de novo por aqui",
+  "E ai, de volta",
+];
+
 async function sendText(phone: string, message: string) {
   const url = `https://api.z-api.io/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}/send-text`;
-  await fetch(url, {
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -23,6 +45,13 @@ async function sendText(phone: string, message: string) {
     },
     body: JSON.stringify({ phone, message }),
   });
+  // Confere a resposta da Z-API e loga quando nao for 2xx (sem interromper o fluxo).
+  if (!res.ok) {
+    const corpo = await res.text().catch(() => "");
+    console.error(
+      `Z-API send-text falhou: status=${res.status} corpo=${corpo}`,
+    );
+  }
 }
 
 // Envia a resposta e grava a mensagem enviada.
@@ -82,15 +111,22 @@ Deno.serve(async (req: Request) => {
 
   const fromMe = body.fromMe === true;
   const isGroup = body.isGroup === true;
+  const isStatusReply = body.isStatusReply === true;
+  const isReaction = body.reaction != null || body.type === "ReactionCallback";
   const phone = typeof body.phone === "string" ? body.phone : "";
   const instanceId = typeof body.instanceId === "string" ? body.instanceId : "";
   const texto =
     (body.text as { message?: string } | undefined)?.message?.trim() ?? "";
   const audioUrl = (body.audio as { audioUrl?: string } | undefined)?.audioUrl;
+  const isAudio = !!audioUrl;
+  const isTexto = texto.length > 0;
+  // Qualquer outra midia (imagem, video, documento, figurinha, localizacao, contato).
+  const isMidia = !isAudio && !isTexto;
 
-  // 1. Ignora mensagens proprias, de grupo, e o que nao for texto/audio.
-  if (fromMe || isGroup || !phone) return new Response("ok", { status: 200 });
-  if (!texto && !audioUrl) return new Response("ok", { status: 200 });
+  // 1. Ignora apenas: mensagens proprias, de grupo, reacoes e respostas de status.
+  if (fromMe || isGroup || isStatusReply || isReaction || !phone) {
+    return new Response("ok", { status: 200 });
+  }
 
   // 2. Identifica a radio pelo instanceId (fallback: unica radio ativa na v1).
   let { data: radio } = await db
@@ -135,17 +171,32 @@ Deno.serve(async (req: Request) => {
     .update({ ultimo_contato_em: new Date().toISOString() })
     .eq("id", ouvinteId);
 
-  // 4. Acha ou cria a conversa aberta. Atualiza ultima_atividade_em.
-  let { data: conversa } = await db
+  // 4. Janela de sessao: acha a conversa mais recente ANTES de atualizar atividade.
+  const { data: recente } = await db
     .from("conversas")
     .select("*")
     .eq("ouvinte_id", ouvinteId)
-    .eq("status", "aberta")
-    .order("iniciada_em", { ascending: false })
+    .order("ultima_atividade_em", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (!conversa) {
-    const etapaInicial = ouvinte.nome ? "concluido" : "inicio";
+
+  const aberta = recente && recente.status === "aberta" ? recente : null;
+  const intervaloMs = recente
+    ? Date.now() - new Date(recente.ultima_atividade_em as string).getTime()
+    : Infinity;
+
+  let conversa = aberta;
+  // Continua a conversa aberta so se a ultima atividade foi dentro da janela.
+  if (!aberta || intervaloMs > JANELA_MS) {
+    // Nova rodada. Encerra conversa aberta antiga parada, se houver.
+    if (aberta) {
+      await db
+        .from("conversas")
+        .update({ status: "encerrada", encerrada_em: new Date().toISOString() })
+        .eq("id", aberta.id);
+    }
+    // Ja tem nome: reinicio (pula o nome). Sem nome: inicio (pede o nome).
+    const etapaInicial = ouvinte.nome ? "reinicio" : "inicio";
     const { data: nova } = await db
       .from("conversas")
       .insert({ radio_id: radioId, ouvinte_id: ouvinteId, etapa: etapaInicial })
@@ -165,19 +216,25 @@ Deno.serve(async (req: Request) => {
     conversa_id: conversaId,
     radio_id: radioId,
     direcao: "recebida",
-    tipo: audioUrl ? "audio" : "texto",
+    tipo: isAudio ? "audio" : isTexto ? "texto" : "outro",
     conteudo: texto || null,
     audio_url: audioUrl ?? null,
   });
 
   // 7. Audio na v1: registra e pede para digitar. // TODO: transcrever com Gemini na fase 2.
-  if (audioUrl && !texto) {
+  if (isAudio) {
     await reply(
       phone,
       conversaId,
       radioId,
       "Recebi seu audio! Por enquanto eu so consigo ler texto. Pode me responder digitando?",
     );
+    return new Response("ok", { status: 200 });
+  }
+
+  // Qualquer outra midia: ja registrada como "outro", responde pedindo texto.
+  if (isMidia) {
+    await reply(phone, conversaId, radioId, escolher(FALLBACK_MIDIA));
     return new Response("ok", { status: 200 });
   }
 
@@ -195,6 +252,30 @@ Deno.serve(async (req: Request) => {
         `Oi! Aqui e o atendimento da ${radioNome}. Pra voce participar, me conta seu nome completo?`,
       );
       await setEtapa("nome");
+      break;
+    }
+
+    case "reinicio": {
+      // Ouvinte que volta apos a janela: ja tem nome, recoleta a partir do local.
+      // A mensagem que disparou a rodada nao e consumida como resposta.
+      const saud = escolher(SAUDACOES_RETORNO);
+      if (ddd === "11") {
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          `${saud}, ${ouvinte.nome}! Bora atualizar rapidinho. Em qual bairro voce esta agora?`,
+        );
+        await setEtapa("bairro");
+      } else {
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          `${saud}, ${ouvinte.nome}! Bora atualizar rapidinho. Me diz sua cidade e estado agora (ex: Campinas, SP).`,
+        );
+        await setEtapa("cidade");
+      }
       break;
     }
 
