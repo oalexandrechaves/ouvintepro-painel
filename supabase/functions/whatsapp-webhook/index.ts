@@ -159,7 +159,7 @@ Resposta do ouvinte: """${texto}"""
   return await geminiJSON<{ cidade: string; estado: string | null }>(prompt);
 }
 
-// Grava uma musica canonica.
+// Grava uma musica canonica e devolve o id inserido (ou null).
 async function gravarMusica(
   radioId: string,
   ouvinteId: string,
@@ -167,8 +167,8 @@ async function gravarMusica(
   artista: string | null,
   titulo: string | null,
   textoOriginal: string,
-) {
-  await db.from("musicas").insert({
+): Promise<string | null> {
+  const { data } = await db.from("musicas").insert({
     radio_id: radioId,
     ouvinte_id: ouvinteId,
     sentimento,
@@ -177,7 +177,8 @@ async function gravarMusica(
     texto_original: textoOriginal,
     // mantem a coluna "nome" preenchida pra compatibilidade: titulo, senao artista, senao cru
     nome: titulo ?? artista ?? textoOriginal,
-  });
+  }).select("id").single();
+  return (data?.id as string) ?? null;
 }
 
 // Processa uma resposta de lista (ama/rejeita): grava completos e devolve artistas pendentes.
@@ -186,15 +187,16 @@ async function processarLista(
   ouvinteId: string,
   sentimento: "ama" | "rejeita",
   texto: string,
-): Promise<string[]> {
+): Promise<{ pendentes: string[]; ids: string[] }> {
   const itens = await interpretarLista(texto);
   const pendentes: string[] = [];
+  const ids: string[] = [];
   if (itens && itens.length > 0) {
     for (const it of itens) {
       if (it.tipo === "artista" && it.artista) {
         pendentes.push(it.artista);
       } else {
-        await gravarMusica(
+        const id = await gravarMusica(
           radioId,
           ouvinteId,
           sentimento,
@@ -202,15 +204,24 @@ async function processarLista(
           it.musica ?? null,
           it.texto_original ?? texto,
         );
+        if (id) ids.push(id);
       }
     }
   } else {
     // Fallback sem IA: grava cru, split por virgula/quebra.
     for (const s of splitLista(texto)) {
-      await gravarMusica(radioId, ouvinteId, sentimento, null, null, s);
+      const id = await gravarMusica(
+        radioId,
+        ouvinteId,
+        sentimento,
+        null,
+        null,
+        s,
+      );
+      if (id) ids.push(id);
     }
   }
-  return pendentes;
+  return { pendentes, ids };
 }
 
 // Janela de sessao: depois desse silencio, a proxima mensagem reinicia a coleta.
@@ -345,6 +356,104 @@ function calcularIdade(iso: string): number {
   return idade;
 }
 
+// Desfaz a ultima resposta gravada (usado quando o ouvinte corrige).
+async function desfazerUltimo(
+  ouvinteId: string,
+  ultimo: { etapa?: string; ids?: string[] } | null | undefined,
+) {
+  if (!ultimo?.etapa) return;
+  switch (ultimo.etapa) {
+    case "nome":
+      await db.from("ouvintes").update({ nome: null }).eq("id", ouvinteId);
+      break;
+    case "bairro":
+      await db.from("ouvintes").update({ bairro: null, zona: null }).eq(
+        "id",
+        ouvinteId,
+      );
+      break;
+    case "cidade":
+      await db.from("ouvintes").update({ cidade: null, estado: null }).eq(
+        "id",
+        ouvinteId,
+      );
+      break;
+    case "aniversario":
+      await db.from("ouvintes").update({
+        data_nascimento: null,
+        idade: null,
+        faixa_etaria: null,
+      }).eq("id", ouvinteId);
+      break;
+    case "musicas_ama":
+    case "musicas_rejeita":
+    case "musica_pendente":
+      if (ultimo.ids?.length) {
+        await db.from("musicas").delete().in("id", ultimo.ids);
+      }
+      break;
+    case "outras_radios":
+      if (ultimo.ids?.length) {
+        await db.from("radios_concorrentes").delete().in("id", ultimo.ids);
+      }
+      break;
+  }
+}
+
+// Texto da pergunta de cada etapa (pra repergunta em correcao/conversa).
+function perguntaDaEtapa(
+  etapa: string,
+  _ouvinte: { nome?: string | null },
+  _ddd: string,
+  _radioNome: string,
+): string {
+  switch (etapa) {
+    case "nome":
+      return "Pra você participar, me conta seu nome completo?";
+    case "bairro":
+      return "Em qual bairro você mora?";
+    case "cidade":
+      return "Me diz sua cidade e estado (ex: Campinas, SP).";
+    case "aniversario":
+      return "Qual a sua data de nascimento?";
+    case "musicas_ama":
+      return "Quais músicas você mais ama ouvir? Pode mandar várias.";
+    case "musicas_rejeita":
+      return "Tem alguma música que você não gosta de jeito nenhum?";
+    case "outras_radios":
+      return "Além da nossa, quais outras rádios você costuma escutar?";
+    default:
+      return "Pode me contar?";
+  }
+}
+
+type Intencao = {
+  intencao: "resposta" | "correcao" | "conversa";
+  tipo_correcao: "gosto" | "nao_gosto" | null;
+  fala: string | null;
+};
+
+// Classifica se a mensagem do ouvinte e resposta, correcao ou conversa.
+async function classificarIntencao(
+  pergunta: string,
+  texto: string,
+): Promise<Intencao | null> {
+  const prompt = `
+Você é o cérebro de um atendimento de rádio por WhatsApp. O bot acabou de perguntar ao ouvinte: "${pergunta}".
+O ouvinte respondeu: """${texto}""".
+Classifique a mensagem do ouvinte em uma de três intenções:
+- "resposta": ele está respondendo a pergunta normalmente.
+- "correcao": ele está dizendo que o bot entendeu errado, ou corrigindo algo anterior (ex.: "não é isso", "você entendeu errado", "na verdade eu gosto", "é Tatuapé, não Santana").
+- "conversa": ele fez uma pergunta, comentário ou brincadeira que não é resposta direta (ex.: "por que você quer saber?", "kkkk", "quem é você?").
+Se a mensagem puder ser uma resposta válida à pergunta, prefira "resposta".
+Se for "correcao" sobre gostar ou não de música, defina tipo_correcao como "gosto" ou "nao_gosto"; caso contrário, null.
+Se for "conversa", escreva em "fala" uma resposta curta, simpática e direta ao ouvinte, de uma frase, sem travessão.
+Responda APENAS com JSON, sem texto fora do JSON:
+{"intencao":"resposta|correcao|conversa","tipo_correcao":"gosto|nao_gosto ou null","fala":"frase ou null"}
+`;
+  return await geminiJSON<Intencao>(prompt);
+}
+
 Deno.serve(async (req: Request) => {
   let body: Record<string, unknown>;
   try {
@@ -370,6 +479,21 @@ Deno.serve(async (req: Request) => {
   // 1. Ignora apenas: mensagens proprias, de grupo, reacoes e respostas de status.
   if (fromMe || isGroup || isStatusReply || isReaction || !phone) {
     return new Response("ok", { status: 200 });
+  }
+
+  // 1b. Idempotencia: ignora entrega duplicada da Z-API (mesmo messageId).
+  const messageId = typeof body.messageId === "string" ? body.messageId : "";
+  if (messageId) {
+    const { error } = await db
+      .from("webhook_dedup")
+      .insert({ message_id: messageId });
+    if (error) {
+      if (error.code === "23505") {
+        // entrega duplicada: ja processamos essa mensagem, ignora.
+        return new Response("ok", { status: 200 });
+      }
+      console.error(`dedup erro: ${error.code} ${error.message}`);
+    }
   }
 
   // 2. Identifica a radio pelo instanceId (fallback: unica radio ativa na v1).
@@ -487,6 +611,88 @@ Deno.serve(async (req: Request) => {
   const setEtapa = (e: string) =>
     db.from("conversas").update({ etapa: e }).eq("id", conversaId);
 
+  // 5b. Camada de intencao: entende se a mensagem e resposta, correcao ou conversa.
+  const ETAPAS_RESPOSTA = new Set([
+    "nome",
+    "bairro",
+    "cidade",
+    "aniversario",
+    "musicas_ama",
+    "musicas_rejeita",
+    "musica_pendente",
+    "outras_radios",
+  ]);
+
+  if (isTexto && ETAPAS_RESPOSTA.has(etapa)) {
+    const ctxAtual = (conversa.contexto as Record<string, unknown> | null) ?? {};
+    const perguntaAtual = etapa === "musica_pendente"
+      ? `Qual música de ${
+        ((ctxAtual.fila as string[] | undefined) ?? [])[0] ?? "do artista"
+      } você citou?`
+      : perguntaDaEtapa(etapa, ouvinte, ddd, radioNome);
+
+    const intent = await classificarIntencao(perguntaAtual, texto);
+
+    if (intent && intent.intencao === "conversa") {
+      const fala = intent.fala || "Boa!";
+      await reply(phone, conversaId, radioId, `${fala} ${perguntaAtual}`);
+      return new Response("ok", { status: 200 });
+    }
+
+    if (intent && intent.intencao === "correcao") {
+      const ultimo = ctxAtual.ultimo as
+        | { etapa?: string; ids?: string[] }
+        | undefined;
+
+      // Caso 1: trocar gosto/nao gosto da ultima musica.
+      if (
+        (intent.tipo_correcao === "gosto" ||
+          intent.tipo_correcao === "nao_gosto") &&
+        ultimo?.ids?.length
+      ) {
+        const novo = intent.tipo_correcao === "gosto" ? "ama" : "rejeita";
+        await db.from("musicas").update({ sentimento: novo }).in(
+          "id",
+          ultimo.ids,
+        );
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          `Corrigido, anotei que você ${
+            novo === "ama" ? "gosta" : "não curte"
+          }. ${perguntaAtual}`,
+        );
+        return new Response("ok", { status: 200 });
+      }
+
+      // Caso 2: correcao generica. Desfaz a ultima resposta e repergunta a etapa.
+      if (ultimo?.etapa) {
+        await desfazerUltimo(ouvinteId, ultimo);
+        const novoCtx = { ...ctxAtual, ultimo: null };
+        await db.from("conversas").update({
+          etapa: ultimo.etapa,
+          contexto: novoCtx,
+        }).eq("id", conversaId);
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          `Sem problema, vamos corrigir. ${
+            perguntaDaEtapa(ultimo.etapa, ouvinte, ddd, radioNome)
+          }`,
+        );
+        return new Response("ok", { status: 200 });
+      }
+
+      // Sem "ultimo" registrado: so repergunta a atual.
+      await reply(phone, conversaId, radioId, `Vamos de novo: ${perguntaAtual}`);
+      return new Response("ok", { status: 200 });
+    }
+
+    // intencao "resposta" (ou classificador indisponivel): segue pro switch normal.
+  }
+
   switch (etapa) {
     case "inicio": {
       await reply(
@@ -526,6 +732,10 @@ Deno.serve(async (req: Request) => {
     case "nome": {
       const nomeLimpo = titleCasePtBr(limparPrefixoNome(texto)) || texto.trim();
       await db.from("ouvintes").update({ nome: nomeLimpo }).eq("id", ouvinteId);
+      const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
+      await db.from("conversas").update({
+        contexto: { ...ctx, ultimo: { etapa: "nome" } },
+      }).eq("id", conversaId);
       if (ddd === "11") {
         await reply(
           phone,
@@ -567,6 +777,12 @@ Deno.serve(async (req: Request) => {
         .from("ouvintes")
         .update({ bairro: bairroFinal, zona })
         .eq("id", ouvinteId);
+      {
+        const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
+        await db.from("conversas").update({
+          contexto: { ...ctx, ultimo: { etapa: "bairro" } },
+        }).eq("id", conversaId);
+      }
       await reply(
         phone,
         conversaId,
@@ -593,6 +809,12 @@ Deno.serve(async (req: Request) => {
         .from("ouvintes")
         .update({ cidade, estado })
         .eq("id", ouvinteId);
+      {
+        const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
+        await db.from("conversas").update({
+          contexto: { ...ctx, ultimo: { etapa: "cidade" } },
+        }).eq("id", conversaId);
+      }
       await reply(
         phone,
         conversaId,
@@ -612,9 +834,11 @@ Deno.serve(async (req: Request) => {
           (conversa.contexto as { dataTentativa?: boolean } | null)
             ?.dataTentativa === true;
         if (!jaTentou) {
+          const ctx = (conversa.contexto as Record<string, unknown> | null) ??
+            {};
           await db
             .from("conversas")
-            .update({ contexto: { dataTentativa: true } })
+            .update({ contexto: { ...ctx, dataTentativa: true } })
             .eq("id", conversaId);
           await reply(
             phone,
@@ -639,11 +863,10 @@ Deno.serve(async (req: Request) => {
         break;
       }
 
-      // Limpa eventual flag de tentativa antes de seguir.
-      await db.from("conversas").update({ contexto: null }).eq(
-        "id",
-        conversaId,
-      );
+      // Limpa a flag de tentativa e marca a ultima resposta (descarta dataTentativa).
+      await db.from("conversas").update({
+        contexto: { ultimo: { etapa: "aniversario" } },
+      }).eq("id", conversaId);
 
       const idade = calcularIdade(iso);
       const { data: faixa } = await db
@@ -673,15 +896,24 @@ Deno.serve(async (req: Request) => {
     }
 
     case "musicas_ama": {
-      const pendentes = await processarLista(radioId, ouvinteId, "ama", texto);
+      const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
+      const { pendentes, ids } = await processarLista(
+        radioId,
+        ouvinteId,
+        "ama",
+        texto,
+      );
+      const ultimo = { etapa: "musicas_ama", ids, sentimento: "ama" };
       if (pendentes.length > 0) {
         await db
           .from("conversas")
           .update({
             contexto: {
+              ...ctx,
               fila: pendentes,
               sentimento: "ama",
               proxima: "musicas_rejeita",
+              ultimo,
             },
           })
           .eq("id", conversaId);
@@ -693,6 +925,10 @@ Deno.serve(async (req: Request) => {
         );
         await setEtapa("musica_pendente");
       } else {
+        await db
+          .from("conversas")
+          .update({ contexto: { ...ctx, ultimo } })
+          .eq("id", conversaId);
         await reply(
           phone,
           conversaId,
@@ -705,20 +941,24 @@ Deno.serve(async (req: Request) => {
     }
 
     case "musicas_rejeita": {
-      const pendentes = await processarLista(
+      const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
+      const { pendentes, ids } = await processarLista(
         radioId,
         ouvinteId,
         "rejeita",
         texto,
       );
+      const ultimo = { etapa: "musicas_rejeita", ids, sentimento: "rejeita" };
       if (pendentes.length > 0) {
         await db
           .from("conversas")
           .update({
             contexto: {
+              ...ctx,
               fila: pendentes,
               sentimento: "rejeita",
               proxima: "outras_radios",
+              ultimo,
             },
           })
           .eq("id", conversaId);
@@ -730,6 +970,10 @@ Deno.serve(async (req: Request) => {
         );
         await setEtapa("musica_pendente");
       } else {
+        await db
+          .from("conversas")
+          .update({ contexto: { ...ctx, ultimo } })
+          .eq("id", conversaId);
         await reply(
           phone,
           conversaId,
@@ -769,7 +1013,19 @@ Deno.serve(async (req: Request) => {
 
       const r = await interpretarMusicaDoArtista(texto, artista);
       const titulo = r?.musica ?? texto;
-      await gravarMusica(radioId, ouvinteId, sentimento, artista, titulo, texto);
+      const id = await gravarMusica(
+        radioId,
+        ouvinteId,
+        sentimento,
+        artista,
+        titulo,
+        texto,
+      );
+      const ultimo = {
+        etapa: "musica_pendente",
+        ids: id ? [id] : [],
+        sentimento,
+      };
 
       // Monta complemento com sugestoes so se a IA ficou em duvida.
       let extra = "";
@@ -786,7 +1042,9 @@ Deno.serve(async (req: Request) => {
       if (fila.length > 0) {
         await db
           .from("conversas")
-          .update({ contexto: { fila, sentimento, proxima: ctx.proxima } })
+          .update({
+            contexto: { ...ctx, fila, sentimento, proxima: ctx.proxima, ultimo },
+          })
           .eq("id", conversaId);
         await reply(
           phone,
@@ -796,7 +1054,8 @@ Deno.serve(async (req: Request) => {
         );
         // permanece em musica_pendente
       } else {
-        await db.from("conversas").update({ contexto: null }).eq(
+        // Fim da fila: limpa fila/proxima mas preserva ultimo (pra correcao).
+        await db.from("conversas").update({ contexto: { ultimo } }).eq(
           "id",
           conversaId,
         );
@@ -823,24 +1082,33 @@ Deno.serve(async (req: Request) => {
 
     case "outras_radios": {
       const radios = await interpretarRadios(texto);
+      const ids: string[] = [];
       if (radios && radios.length > 0) {
-        await db.from("radios_concorrentes").insert(
+        const { data } = await db.from("radios_concorrentes").insert(
           radios.map((r) => ({
             radio_id: radioId,
             ouvinte_id: ouvinteId,
             nome_radio: r.texto_original,
             nome_canonico: r.nome_canonico,
           })),
-        );
+        ).select("id");
+        for (const row of data ?? []) ids.push(row.id as string);
       } else {
         for (const s of splitLista(texto)) {
-          await db.from("radios_concorrentes").insert({
+          const { data } = await db.from("radios_concorrentes").insert({
             radio_id: radioId,
             ouvinte_id: ouvinteId,
             nome_radio: s,
             nome_canonico: null,
-          });
+          }).select("id").single();
+          if (data?.id) ids.push(data.id as string);
         }
+      }
+      {
+        const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
+        await db.from("conversas").update({
+          contexto: { ...ctx, ultimo: { etapa: "outras_radios", ids } },
+        }).eq("id", conversaId);
       }
       await db
         .from("ouvintes")
