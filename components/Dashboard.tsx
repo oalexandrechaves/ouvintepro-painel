@@ -74,6 +74,15 @@ export default function Dashboard({ data }: { data: PainelData }) {
               value={mode}
               onChange={(v) => setMode(v as DisplayMode)}
             />
+            <form action="/api/logout" method="post">
+              <button
+                type="submit"
+                className="rounded-xl border border-white/10 bg-ink-900/60 px-3 py-1.5 text-sm font-medium text-mist-400 transition-colors hover:text-mist-50"
+                title="Sair"
+              >
+                Sair
+              </button>
+            </form>
           </div>
         </header>
 
