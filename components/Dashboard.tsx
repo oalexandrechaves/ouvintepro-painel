@@ -2,15 +2,8 @@
 
 import Image from "next/image";
 import { useState } from "react";
-import {
-  cadastrosPorPeriodo,
-  faixaEtaria,
-  hotlink,
-  kpis,
-  musicas,
-  zonas,
-} from "@/lib/mockData";
 import type { DisplayMode, Periodo } from "@/lib/mockData";
+import type { PainelData } from "@/lib/queries";
 import AreaCadastros from "./AreaCadastros";
 import Background from "./Background";
 import BarList from "./BarList";
@@ -36,9 +29,11 @@ const corValor: Record<string, string> = {
   "neon-gold": "text-neon-gold",
 };
 
-export default function Dashboard() {
+export default function Dashboard({ data }: { data: PainelData }) {
+  const { kpis, cadastrosPorPeriodo, zonas, faixaEtaria, musicas, hotlink } = data;
   const [periodo, setPeriodo] = useState<Periodo>("30dias");
   const [mode, setMode] = useState<DisplayMode>("numero");
+  const serieArea = cadastrosPorPeriodo[periodo] ?? [];
 
   return (
     <div className="relative min-h-screen bg-grid">
@@ -111,7 +106,7 @@ export default function Dashboard() {
                 {periodos.find((p) => p.id === periodo)?.label}
               </span>
             </div>
-            <AreaCadastros data={cadastrosPorPeriodo[periodo]} />
+            <AreaCadastros data={serieArea} />
           </div>
 
           <div className="glass p-6">

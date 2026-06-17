@@ -1,0 +1,4 @@
+project_id = "ouvintepro-painel"
+
+[functions.whatsapp-webhook]
+verify_jwt = false
