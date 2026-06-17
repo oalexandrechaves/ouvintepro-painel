@@ -60,8 +60,9 @@ async function interpretarLista(texto: string): Promise<ItemMusica[] | null> {
 Voce interpreta respostas de ouvintes de uma radio brasileira (foco em sertanejo e musica popular) sobre musicas.
 O ouvinte escreveu, em linguagem informal e as vezes com erros de digitacao, o que ele citou.
 Tarefa: extrair os itens citados e, para cada um, dizer se e uma MUSICA, um ARTISTA, ou MUSICA E ARTISTA juntos.
-Corrija a grafia para a forma canonica conhecida (ex.: "marilia mendonca" vira "Marilia Mendonca"; "evidencias" vira "Evidencias").
+Corrija a grafia para a forma canonica conhecida (ex.: "marilia mendonca" vira "Marília Mendonça"; "evidencias" vira "Evidências").
 Use seu conhecimento de musica brasileira. Nao invente itens que o ouvinte nao citou.
+Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Responda APENAS com JSON, sem nenhum texto fora do JSON, neste formato:
 {"itens":[{"texto_original":"...","tipo":"musica|artista|musica_e_artista|desconhecido","artista":"Forma Canonica ou null","musica":"Forma Canonica ou null","confianca":0.0}]}
 
@@ -87,6 +88,7 @@ O ouvinte de uma radio disse que curte o artista "${artista}" e agora respondeu 
 A resposta pode ter erro de grafia ou nome aproximado. Identifique a musica mais provavel de ${artista} e corrija para a forma canonica.
 Se nao tiver certeza, traga ate 3 sugestoes de musicas famosas de ${artista}.
 Use seu conhecimento de musica brasileira. Nao invente musicas que nao sejam de ${artista}.
+Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Responda APENAS com JSON, sem nenhum texto fora do JSON, neste formato:
 {"musica":"Forma Canonica ou null","confianca":0.0,"sugestoes":["...","...","..."]}
 
@@ -103,6 +105,7 @@ async function interpretarRadios(texto: string): Promise<ItemRadio[] | null> {
 O ouvinte citou radios que costuma escutar, em texto informal e com possiveis erros.
 Extraia cada radio citada e normalize o nome para uma forma canonica consistente (ex.: "98 fm", "radio 98" viram "98 FM").
 Nao invente radios que o ouvinte nao citou.
+Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Responda APENAS com JSON, sem texto fora do JSON, neste formato:
 {"radios":[{"texto_original":"...","nome_canonico":"Forma Canonica ou null"}]}
 
@@ -117,6 +120,7 @@ async function interpretarData(texto: string): Promise<string | null> {
   const prompt = `
 O ouvinte respondeu a data de nascimento em texto livre, que pode estar por extenso, abreviada, com ou sem separadores, ou com erros.
 Converta para o formato ISO AAAA-MM-DD. Se vier so o ano, use 01-01 para dia e mes. Se for impossivel identificar uma data, retorne null.
+Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Responda APENAS com JSON, sem texto fora do JSON: {"iso":"AAAA-MM-DD ou null"}
 Resposta do ouvinte: """${texto}"""
 `;
@@ -133,6 +137,7 @@ async function interpretarBairro(
 O ouvinte informou em qual bairro da cidade de Sao Paulo (capital) ele esta, em texto informal e possivelmente com erros de grafia.
 Identifique o bairro na forma canonica e a zona da cidade: uma de "Norte", "Sul", "Leste", "Oeste", "Centro".
 Se nao reconhecer como bairro de Sao Paulo capital, use zona "Outras".
+Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Nao invente. Responda APENAS com JSON, sem texto fora do JSON:
 {"bairro":"Forma Canonica","zona":"Norte|Sul|Leste|Oeste|Centro|Outras"}
 Resposta do ouvinte: """${texto}"""
@@ -147,6 +152,7 @@ async function interpretarCidade(
   const prompt = `
 O ouvinte informou cidade e estado dele, em texto informal.
 Devolva a cidade na forma canonica e a sigla do estado (UF, 2 letras) quando der pra inferir, senao null.
+Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Responda APENAS com JSON, sem texto fora do JSON: {"cidade":"Forma Canonica","estado":"UF ou null"}
 Resposta do ouvinte: """${texto}"""
 `;
