@@ -112,6 +112,47 @@ Resposta do ouvinte: """${texto}"""
   return out?.radios ?? null;
 }
 
+// Interpreta data de nascimento em texto livre. Retorna ISO AAAA-MM-DD ou null.
+async function interpretarData(texto: string): Promise<string | null> {
+  const prompt = `
+O ouvinte respondeu a data de nascimento em texto livre, que pode estar por extenso, abreviada, com ou sem separadores, ou com erros.
+Converta para o formato ISO AAAA-MM-DD. Se vier so o ano, use 01-01 para dia e mes. Se for impossivel identificar uma data, retorne null.
+Responda APENAS com JSON, sem texto fora do JSON: {"iso":"AAAA-MM-DD ou null"}
+Resposta do ouvinte: """${texto}"""
+`;
+  const out = await geminiJSON<{ iso: string | null }>(prompt);
+  const iso = out?.iso ?? null;
+  return iso && /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso : null;
+}
+
+// Interpreta bairro de Sao Paulo capital e devolve forma canonica + zona.
+async function interpretarBairro(
+  texto: string,
+): Promise<{ bairro: string; zona: string } | null> {
+  const prompt = `
+O ouvinte informou em qual bairro da cidade de Sao Paulo (capital) ele esta, em texto informal e possivelmente com erros de grafia.
+Identifique o bairro na forma canonica e a zona da cidade: uma de "Norte", "Sul", "Leste", "Oeste", "Centro".
+Se nao reconhecer como bairro de Sao Paulo capital, use zona "Outras".
+Nao invente. Responda APENAS com JSON, sem texto fora do JSON:
+{"bairro":"Forma Canonica","zona":"Norte|Sul|Leste|Oeste|Centro|Outras"}
+Resposta do ouvinte: """${texto}"""
+`;
+  return await geminiJSON<{ bairro: string; zona: string }>(prompt);
+}
+
+// Interpreta "cidade, UF" em texto livre.
+async function interpretarCidade(
+  texto: string,
+): Promise<{ cidade: string; estado: string | null } | null> {
+  const prompt = `
+O ouvinte informou cidade e estado dele, em texto informal.
+Devolva a cidade na forma canonica e a sigla do estado (UF, 2 letras) quando der pra inferir, senao null.
+Responda APENAS com JSON, sem texto fora do JSON: {"cidade":"Forma Canonica","estado":"UF ou null"}
+Resposta do ouvinte: """${texto}"""
+`;
+  return await geminiJSON<{ cidade: string; estado: string | null }>(prompt);
+}
+
 // Grava uma musica canonica.
 async function gravarMusica(
   radioId: string,
@@ -175,17 +216,17 @@ function escolher(arr: string[]): string {
 
 // Variacoes pra nao repetir sempre a mesma frase.
 const FALLBACK_MIDIA = [
-  "Recebi sua mensagem! Por aqui eu so consigo ler texto. Pode me escrever a resposta?",
-  "Opa! Esse tipo de arquivo eu ainda nao leio. Me manda por texto que eu sigo com voce.",
-  "Valeu por mandar! Mas eu so entendo texto por enquanto. Pode digitar pra mim?",
-  "Recebi! So que eu leio mesmo e mensagem de texto. Me conta por escrito?",
+  "Recebi sua mensagem! Por aqui eu só consigo ler texto. Pode me escrever a resposta?",
+  "Opa! Esse tipo de arquivo eu ainda não leio. Me manda por texto que eu sigo com você.",
+  "Valeu por mandar! Mas eu só entendo texto por enquanto. Pode digitar pra mim?",
+  "Recebi! Só que eu leio mesmo é mensagem de texto. Me conta por escrito?",
 ];
 
 const SAUDACOES_RETORNO = [
   "Oi de novo",
   "Que bom te ver de volta",
-  "Opa, voce de novo por aqui",
-  "E ai, de volta",
+  "Opa, você de novo por aqui",
+  "E aí, de volta",
 ];
 
 async function sendText(phone: string, message: string) {
@@ -231,17 +272,61 @@ function splitLista(texto: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-// Aceita DD/MM/AAAA, DD-MM-AAAA e DD/MM/AA. Retorna ISO yyyy-mm-dd ou null.
+// Title case em portugues, mantendo particulas em minusculo (exceto na 1a palavra).
+const PARTICULAS = new Set([
+  "de", "da", "do", "das", "dos", "e", "di", "du", "dal", "del", "della",
+  "van", "von", "y",
+]);
+function titleCasePtBr(texto: string): string {
+  const limpo = texto.trim().replace(/\s+/g, " ").toLowerCase();
+  if (!limpo) return texto.trim();
+  return limpo
+    .split(" ")
+    .map((palavra, i) => {
+      if (i > 0 && PARTICULAS.has(palavra)) return palavra;
+      return palavra.charAt(0).toUpperCase() + palavra.slice(1);
+    })
+    .join(" ");
+}
+
+// Remove prefixos comuns antes do nome ("meu nome e", "me chamo", "sou o"...).
+function limparPrefixoNome(texto: string): string {
+  return texto
+    .trim()
+    .replace(
+      /^(meu nome (é|eh|e)|me chamo|eu sou o|eu sou a|eu sou|sou o|sou a|sou|aqui (é|eh|e)|pode chamar de)\s+/i,
+      "",
+    )
+    .trim();
+}
+
+// Normaliza pra comparacao sem acento e sem caixa.
+function normalizarSemAcento(s: string): string {
+  return s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+// Aceita DD/MM/AAAA, DD-MM-AAAA, DD/MM/AA, com espaco, ou sem separador (8 ou 6 digitos).
 function parseAniversario(texto: string): string | null {
-  const m = texto.trim().match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  const t = texto.trim();
+  let m: RegExpMatchArray | null = t.match(
+    /^(\d{1,2})[\/\-.\s](\d{1,2})[\/\-.\s](\d{2,4})$/,
+  );
+  if (!m) {
+    const d = t.replace(/\D/g, "");
+    if (d.length === 8) {
+      m = [t, d.slice(0, 2), d.slice(2, 4), d.slice(4, 8)] as RegExpMatchArray;
+    } else if (d.length === 6) {
+      m = [t, d.slice(0, 2), d.slice(2, 4), d.slice(4, 6)] as RegExpMatchArray;
+    }
+  }
   if (!m) return null;
   const dia = parseInt(m[1], 10);
   const mes = parseInt(m[2], 10);
   let ano = parseInt(m[3], 10);
   if (m[3].length === 2) ano += ano <= 25 ? 2000 : 1900;
   if (mes < 1 || mes > 12 || dia < 1 || dia > 31) return null;
-  const d = new Date(Date.UTC(ano, mes - 1, dia));
-  if (d.getUTCMonth() !== mes - 1 || d.getUTCDate() !== dia) return null;
+  const dt = new Date(Date.UTC(ano, mes - 1, dia));
+  if (dt.getUTCMonth() !== mes - 1 || dt.getUTCDate() !== dia) return null;
   return `${ano}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
 }
 
@@ -380,7 +465,7 @@ Deno.serve(async (req: Request) => {
       phone,
       conversaId,
       radioId,
-      "Recebi seu audio! Por enquanto eu so consigo ler texto. Pode me responder digitando?",
+      "Recebi seu áudio! Por enquanto eu só consigo ler texto. Pode me responder digitando?",
     );
     return new Response("ok", { status: 200 });
   }
@@ -402,7 +487,7 @@ Deno.serve(async (req: Request) => {
         phone,
         conversaId,
         radioId,
-        `Oi! Aqui e o atendimento da ${radioNome}. Pra voce participar, me conta seu nome completo?`,
+        `Oi! Aqui é o atendimento da ${radioNome}. Pra você participar, me conta seu nome completo?`,
       );
       await setEtapa("nome");
       break;
@@ -417,7 +502,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          `${saud}, ${ouvinte.nome}! Bora atualizar rapidinho. Em qual bairro voce esta agora?`,
+          `${saud}, ${ouvinte.nome}! Bora atualizar rapidinho. Em qual bairro você está agora?`,
         );
         await setEtapa("bairro");
       } else {
@@ -433,16 +518,22 @@ Deno.serve(async (req: Request) => {
     }
 
     case "nome": {
-      await db.from("ouvintes").update({ nome: texto }).eq("id", ouvinteId);
+      const nomeLimpo = titleCasePtBr(limparPrefixoNome(texto)) || texto.trim();
+      await db.from("ouvintes").update({ nome: nomeLimpo }).eq("id", ouvinteId);
       if (ddd === "11") {
-        await reply(phone, conversaId, radioId, `Prazer, ${texto}! Em qual bairro voce mora?`);
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          `Prazer, ${nomeLimpo}! Em qual bairro você mora?`,
+        );
         await setEtapa("bairro");
       } else {
         await reply(
           phone,
           conversaId,
           radioId,
-          `Prazer, ${texto}! Me diz sua cidade e estado (ex: Campinas, SP).`,
+          `Prazer, ${nomeLimpo}! Me diz sua cidade e estado (ex: Campinas, SP).`,
         );
         await setEtapa("cidade");
       }
@@ -450,30 +541,48 @@ Deno.serve(async (req: Request) => {
     }
 
     case "bairro": {
-      const { data: bz } = await db
-        .from("bairros_zonas")
-        .select("zona")
-        .ilike("bairro", texto)
-        .maybeSingle();
-      const zona = bz?.zona ?? "Outras";
+      let bairroFinal = titleCasePtBr(texto);
+      let zona = "Outras";
+      const ia = await interpretarBairro(texto);
+      if (ia && ia.bairro) {
+        bairroFinal = ia.bairro;
+        zona = ia.zona || "Outras";
+      } else {
+        const alvo = normalizarSemAcento(texto);
+        const { data: seeds } = await db
+          .from("bairros_zonas")
+          .select("bairro, zona");
+        const achou = (seeds ?? []).find(
+          (b) => normalizarSemAcento(b.bairro as string) === alvo,
+        );
+        if (achou) zona = achou.zona as string;
+      }
       await db
         .from("ouvintes")
-        .update({ bairro: texto, zona })
+        .update({ bairro: bairroFinal, zona })
         .eq("id", ouvinteId);
       await reply(
         phone,
         conversaId,
         radioId,
-        "Show! Qual a sua data de nascimento? (formato DD/MM/AAAA)",
+        "Show! Qual a sua data de nascimento?",
       );
       await setEtapa("aniversario");
       break;
     }
 
     case "cidade": {
-      const partes = texto.split(",").map((s) => s.trim());
-      const cidade = partes[0] || texto;
-      const estado = partes[1] ? partes[1].slice(0, 2).toUpperCase() : null;
+      let cidade = "";
+      let estado: string | null = null;
+      const ia = await interpretarCidade(texto);
+      if (ia && ia.cidade) {
+        cidade = ia.cidade;
+        estado = ia.estado ? ia.estado.slice(0, 2).toUpperCase() : null;
+      } else {
+        const partes = texto.split(",").map((s) => s.trim());
+        cidade = titleCasePtBr(partes[0] || texto);
+        estado = partes[1] ? partes[1].slice(0, 2).toUpperCase() : null;
+      }
       await db
         .from("ouvintes")
         .update({ cidade, estado })
@@ -482,23 +591,54 @@ Deno.serve(async (req: Request) => {
         phone,
         conversaId,
         radioId,
-        "Show! Qual a sua data de nascimento? (formato DD/MM/AAAA)",
+        "Show! Qual a sua data de nascimento?",
       );
       await setEtapa("aniversario");
       break;
     }
 
     case "aniversario": {
-      const iso = parseAniversario(texto);
+      let iso = parseAniversario(texto);
+      if (!iso) iso = await interpretarData(texto);
+
       if (!iso) {
+        const jaTentou =
+          (conversa.contexto as { dataTentativa?: boolean } | null)
+            ?.dataTentativa === true;
+        if (!jaTentou) {
+          await db
+            .from("conversas")
+            .update({ contexto: { dataTentativa: true } })
+            .eq("id", conversaId);
+          await reply(
+            phone,
+            conversaId,
+            radioId,
+            "Não peguei direito a data. Pode mandar assim, por exemplo: 28/01/1995?",
+          );
+          break; // continua em aniversario
+        }
+        // Segunda falha: segue sem data, sem travar.
+        await db.from("conversas").update({ contexto: null }).eq(
+          "id",
+          conversaId,
+        );
         await reply(
           phone,
           conversaId,
           radioId,
-          "Nao entendi a data. Pode mandar no formato DD/MM/AAAA? (ex: 25/12/1990)",
+          "Tudo bem, seguimos. Quais músicas você mais ama ouvir? Pode mandar várias.",
         );
+        await setEtapa("musicas_ama");
         break;
       }
+
+      // Limpa eventual flag de tentativa antes de seguir.
+      await db.from("conversas").update({ contexto: null }).eq(
+        "id",
+        conversaId,
+      );
+
       const idade = calcularIdade(iso);
       const { data: faixa } = await db
         .from("faixas_etarias")
@@ -520,7 +660,7 @@ Deno.serve(async (req: Request) => {
         phone,
         conversaId,
         radioId,
-        "Quais musicas voce mais ama ouvir? Pode mandar varias separadas por virgula.",
+        "Quais músicas você mais ama ouvir? Pode mandar várias.",
       );
       await setEtapa("musicas_ama");
       break;
@@ -543,7 +683,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          `Boa! E qual musica de ${pendentes[0]} voce mais curte?`,
+          `Boa! E qual música de ${pendentes[0]} você mais curte?`,
         );
         await setEtapa("musica_pendente");
       } else {
@@ -551,7 +691,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          "E tem alguma musica que voce nao gosta de jeito nenhum?",
+          "E tem alguma música que você não gosta de jeito nenhum?",
         );
         await setEtapa("musicas_rejeita");
       }
@@ -580,7 +720,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          `Entendi! E qual musica de ${pendentes[0]} te incomoda mais?`,
+          `Entendi! E qual música de ${pendentes[0]} te incomoda mais?`,
         );
         await setEtapa("musica_pendente");
       } else {
@@ -588,7 +728,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          "Ultima pergunta: alem da nossa, quais outras radios voce costuma escutar?",
+          "Última pergunta: além da nossa, quais outras rádios você costuma escutar?",
         );
         await setEtapa("outras_radios");
       }
@@ -615,7 +755,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          "Ultima pergunta: alem da nossa, quais outras radios voce costuma escutar?",
+          "Última pergunta: além da nossa, quais outras rádios você costuma escutar?",
         );
         await setEtapa("outras_radios");
         break;
@@ -630,7 +770,7 @@ Deno.serve(async (req: Request) => {
       if (
         r && (r.confianca ?? 0) < 0.6 && r.sugestoes && r.sugestoes.length > 0
       ) {
-        extra = ` Anotei "${titulo}". Se eu errei, de ${artista} tambem tocam: ${
+        extra = ` Anotei "${titulo}". Se eu errei, de ${artista} também tocam: ${
           r.sugestoes.slice(0, 2).join(", ")
         }.`;
       }
@@ -646,7 +786,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          `Show!${extra} E de ${fila[0]}, qual musica?`,
+          `Show!${extra} E de ${fila[0]}, qual música?`,
         );
         // permanece em musica_pendente
       } else {
@@ -659,7 +799,7 @@ Deno.serve(async (req: Request) => {
             phone,
             conversaId,
             radioId,
-            `Show!${extra} E tem alguma musica que voce nao gosta de jeito nenhum?`,
+            `Show!${extra} E tem alguma música que você não gosta de jeito nenhum?`,
           );
           await setEtapa("musicas_rejeita");
         } else {
@@ -667,7 +807,7 @@ Deno.serve(async (req: Request) => {
             phone,
             conversaId,
             radioId,
-            `Show!${extra} Ultima pergunta: alem da nossa, quais outras radios voce costuma escutar?`,
+            `Show!${extra} Última pergunta: além da nossa, quais outras rádios você costuma escutar?`,
           );
           await setEtapa("outras_radios");
         }
