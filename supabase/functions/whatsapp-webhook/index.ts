@@ -16,34 +16,46 @@ const GEMINI_MODEL = "gemini-2.5-flash-lite"; // se der 404 algum dia, tentar "g
 const db = createClient(SUPABASE_URL, SERVICE_ROLE);
 
 // Chama o Gemini esperando JSON puro de volta. Retorna null em qualquer falha.
-async function geminiJSON<T>(prompt: string): Promise<T | null> {
+// Da uma segunda tentativa em falha transitoria (429 ou 5xx) antes de desistir.
+async function geminiJSON<T>(prompt: string, tentativas = 2): Promise<T | null> {
   if (!GEMINI_API_KEY) return null;
-  try {
-    const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-        },
-      }),
-    });
-    if (!res.ok) {
-      console.error(`Gemini falhou: status=${res.status}`);
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      const url =
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseMimeType: "application/json",
+            temperature: 0.2,
+          },
+        }),
+      });
+      if (!res.ok) {
+        console.error(`Gemini falhou: status=${res.status} (tentativa ${i + 1})`);
+        if ((res.status === 429 || res.status >= 500) && i < tentativas - 1) {
+          await new Promise((r) => setTimeout(r, 1200));
+          continue;
+        }
+        return null;
+      }
+      const data = await res.json();
+      const txt = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!txt) return null;
+      return JSON.parse(txt) as T;
+    } catch (e) {
+      console.error(`Gemini excecao (tentativa ${i + 1}): ${e}`);
+      if (i < tentativas - 1) {
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
       return null;
     }
-    const data = await res.json();
-    const txt = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!txt) return null;
-    return JSON.parse(txt) as T;
-  } catch (e) {
-    console.error(`Gemini excecao: ${e}`);
-    return null;
   }
+  return null;
 }
 
 type ItemMusica = {
@@ -61,6 +73,8 @@ Voce interpreta respostas de ouvintes de uma radio brasileira (foco em sertanejo
 O ouvinte escreveu, em linguagem informal e as vezes com erros de digitacao, o que ele citou.
 Tarefa: extrair os itens citados e, para cada um, dizer se e uma MUSICA, um ARTISTA, ou MUSICA E ARTISTA juntos.
 Corrija a grafia para a forma canonica conhecida (ex.: "marilia mendonca" vira "Marília Mendonça"; "evidencias" vira "Evidências").
+Se o ouvinte citar apenas o nome de um cantor, dupla ou banda, sem musica, classifique como "artista" e nunca como "desconhecido".
+Use seu conhecimento de musica brasileira para reconhecer o artista mesmo escrito de forma informal ou incompleta (ex.: "ze neto" e Zé Neto & Cristiano; "maiara e maraisa" e Maiara & Maraisa).
 Use seu conhecimento de musica brasileira. Nao invente itens que o ouvinte nao citou.
 Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Responda APENAS com JSON, sem nenhum texto fora do JSON, neste formato:
@@ -699,7 +713,7 @@ Deno.serve(async (req: Request) => {
         phone,
         conversaId,
         radioId,
-        `Oi! Aqui é o atendimento da ${radioNome}. Pra você participar, me conta seu nome completo?`,
+        `Oi! Aqui é a ${radioNome}. Pra você participar de todas as promoções da rádio, me conta seu nome completo?`,
       );
       await setEtapa("nome");
       break;

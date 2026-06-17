@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import { useState } from "react";
 import type { DisplayMode, Periodo } from "@/lib/mockData";
 import type { PainelData } from "@/lib/queries";
@@ -8,6 +7,7 @@ import AreaCadastros from "./AreaCadastros";
 import Background from "./Background";
 import BarList from "./BarList";
 import CountUp from "./CountUp";
+import PainelExtra from "./PainelExtra";
 import Ranking from "./Ranking";
 
 const periodos: { id: Periodo; label: string }[] = [
@@ -43,23 +43,17 @@ export default function Dashboard({ data }: { data: PainelData }) {
         {/* Topo */}
         <header className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-4">
-            <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-ink-850">
-              <Image
-                src="/ouvintepro.PNG"
-                alt="Logo OuvintePro"
-                fill
-                sizes="48px"
-                className="object-contain p-1.5"
-                priority
-              />
-            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/logo-nativa.svg"
+              alt="Rede Nativa"
+              className="h-12 w-auto shrink-0"
+            />
             <div>
-              <h1 className="text-2xl font-bold leading-tight sm:text-3xl">
-                <span className="text-gradient">OuvintePro</span>
+              <h1 className="text-xl font-bold leading-tight sm:text-2xl">
+                <span className="text-gradient">Rede Nativa</span>
               </h1>
-              <p className="text-sm text-mist-300">
-                Rádio Cidade FM · 102,7
-              </p>
+              <p className="text-sm text-mist-300">Painel de ouvintes</p>
             </div>
           </div>
 
@@ -177,9 +171,12 @@ export default function Dashboard({ data }: { data: PainelData }) {
           </div>
         </section>
 
+        {/* Painel expandido (filtros, rankings, zonas, radios, lista de ouvintes) */}
+        <PainelExtra mode={mode} />
+
         {/* Rodapé */}
         <footer className="mt-10 border-t border-white/5 pt-6 text-center text-xs text-mist-400">
-          OuvintePro · Dados e Conexão na Rádio · dados ilustrativos no MVP
+          Rede Nativa · powered by OuvintePro · Dados e Conexão na Rádio
         </footer>
       </main>
     </div>
