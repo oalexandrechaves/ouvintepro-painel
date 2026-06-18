@@ -114,22 +114,60 @@ Resposta do ouvinte: """${texto}"""
   return await geminiJSON<MusicaDoArtista>(prompt);
 }
 
-type ItemRadio = { texto_original: string; nome_canonico: string | null };
+// Busca musica/artista em catalogo gratuito (sem chave): iTunes -> Deezer.
+// Tira o trabalho pesado do Gemini, que vira so reforco. Custo zero.
+async function buscarMusicaCatalogo(
+  termo: string,
+): Promise<{ artista: string; titulo: string } | null> {
+  const q = termo.trim();
+  if (!q) return null;
 
-// Normaliza nomes de radios concorrentes ("98 fm", "radio 98" -> "98 FM").
-async function interpretarRadios(texto: string): Promise<ItemRadio[] | null> {
-  const prompt = `
-O ouvinte citou radios que costuma escutar, em texto informal e com possiveis erros.
-Extraia cada radio citada e normalize o nome para uma forma canonica consistente (ex.: "98 fm", "radio 98" viram "98 FM").
-Nao invente radios que o ouvinte nao citou.
-Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
-Responda APENAS com JSON, sem texto fora do JSON, neste formato:
-{"radios":[{"texto_original":"...","nome_canonico":"Forma Canonica ou null"}]}
+  // 1) iTunes Search (BR), sem chave.
+  try {
+    const u =
+      `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&country=BR&media=music&entity=song&limit=1&lang=pt_br`;
+    const r = await fetch(u);
+    if (r.ok) {
+      const j = await r.json();
+      const hit = j?.results?.[0];
+      if (hit?.artistName && hit?.trackName) {
+        return { artista: hit.artistName, titulo: hit.trackName };
+      }
+    }
+  } catch (_) { /* ignora e tenta a proxima fonte */ }
 
-Resposta do ouvinte: """${texto}"""
-`;
-  const out = await geminiJSON<{ radios: ItemRadio[] }>(prompt);
-  return out?.radios ?? null;
+  // 2) Deezer Search, sem chave.
+  try {
+    const u = `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=1`;
+    const r = await fetch(u);
+    if (r.ok) {
+      const j = await r.json();
+      const hit = j?.data?.[0];
+      if (hit?.artist?.name && hit?.title) {
+        return { artista: hit.artist.name, titulo: hit.title };
+      }
+    }
+  } catch (_) { /* ignora */ }
+
+  return null;
+}
+
+// Normaliza pra chave de apelido (sem acento, minusculo, espacos colapsados).
+function normaliza(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ").trim();
+}
+
+// Resolve nome de radio concorrente pela tabela de apelidos (deterministico).
+async function resolverRadio(texto: string): Promise<string> {
+  const n = normaliza(texto);
+  const { data } = await db.from("radios_alias").select("nome_canonico").eq(
+    "alias_normalizado",
+    n,
+  ).maybeSingle();
+  if (data?.nome_canonico) return data.nome_canonico as string;
+  // Fallback: title case do que o ouvinte escreveu (agrupa por esse texto).
+  return texto.trim().replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 // Interpreta data de nascimento em texto livre. Retorna ISO AAAA-MM-DD ou null.
@@ -206,11 +244,28 @@ async function processarLista(
   sentimento: "ama" | "rejeita",
   texto: string,
 ): Promise<{ pendentes: string[]; ids: string[] }> {
-  const itens = await interpretarLista(texto);
+  const itens = splitLista(texto);
   const pendentes: string[] = [];
   const ids: string[] = [];
-  if (itens && itens.length > 0) {
-    for (const it of itens) {
+  for (const item of itens) {
+    // 1) Catalogo gratuito (principal): iTunes -> Deezer.
+    const cat = await buscarMusicaCatalogo(item);
+    if (cat) {
+      const id = await gravarMusica(
+        radioId,
+        ouvinteId,
+        sentimento,
+        cat.artista,
+        cat.titulo,
+        item,
+      );
+      if (id) ids.push(id);
+      continue;
+    }
+    // 2) Gemini como reforco (por item), no plano gratuito.
+    const interp = await interpretarLista(item);
+    const it = interp && interp[0];
+    if (it) {
       if (it.tipo === "artista" && it.artista) {
         pendentes.push(it.artista);
       } else {
@@ -220,21 +275,19 @@ async function processarLista(
           sentimento,
           it.artista ?? null,
           it.musica ?? null,
-          it.texto_original ?? texto,
+          it.texto_original ?? item,
         );
         if (id) ids.push(id);
       }
-    }
-  } else {
-    // Fallback sem IA: grava cru, split por virgula/quebra.
-    for (const s of splitLista(texto)) {
+    } else {
+      // 3) Ultimo caso: grava cru (artista null, titulo = item).
       const id = await gravarMusica(
         radioId,
         ouvinteId,
         sentimento,
         null,
-        null,
-        s,
+        item,
+        item,
       );
       if (id) ids.push(id);
     }
@@ -300,11 +353,14 @@ async function reply(
   });
 }
 
+// Separa itens por quebra de linha, virgula, ponto-e-virgula ou barra.
+// NUNCA por " e " (nao quebra "Edson e Hudson", "Vitor e Leo"). Max 5 itens.
 function splitLista(texto: string): string[] {
   return texto
-    .split(/[\n,]+/)
+    .split(/[\n,;/]+/)
     .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+    .filter((s) => s.length > 0)
+    .slice(0, 5);
 }
 
 // Title case em portugues, mantendo particulas em minusculo (exceto na 1a palavra).
@@ -1082,8 +1138,10 @@ Deno.serve(async (req: Request) => {
         break;
       }
 
-      const r = await interpretarMusicaDoArtista(texto, artista);
-      const titulo = r?.musica ?? texto;
+      // Catalogo gratuito primeiro; Gemini so se nao achar.
+      const cat = await buscarMusicaCatalogo(`${artista} ${texto}`);
+      const r = cat ? null : await interpretarMusicaDoArtista(texto, artista);
+      const titulo = cat?.titulo ?? r?.musica ?? texto;
       const id = await gravarMusica(
         radioId,
         ouvinteId,
@@ -1152,28 +1210,17 @@ Deno.serve(async (req: Request) => {
     }
 
     case "outras_radios": {
-      const radios = await interpretarRadios(texto);
+      // Canoniza cada radio pela tabela de apelidos (deterministico, sem IA).
       const ids: string[] = [];
-      if (radios && radios.length > 0) {
-        const { data } = await db.from("radios_concorrentes").insert(
-          radios.map((r) => ({
-            radio_id: radioId,
-            ouvinte_id: ouvinteId,
-            nome_radio: r.texto_original,
-            nome_canonico: r.nome_canonico,
-          })),
-        ).select("id");
-        for (const row of data ?? []) ids.push(row.id as string);
-      } else {
-        for (const s of splitLista(texto)) {
-          const { data } = await db.from("radios_concorrentes").insert({
-            radio_id: radioId,
-            ouvinte_id: ouvinteId,
-            nome_radio: s,
-            nome_canonico: null,
-          }).select("id").single();
-          if (data?.id) ids.push(data.id as string);
-        }
+      for (const item of splitLista(texto)) {
+        const nomeCanonico = await resolverRadio(item);
+        const { data } = await db.from("radios_concorrentes").insert({
+          radio_id: radioId,
+          ouvinte_id: ouvinteId,
+          nome_radio: item,
+          nome_canonico: nomeCanonico,
+        }).select("id").single();
+        if (data?.id) ids.push(data.id as string);
       }
       {
         const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};

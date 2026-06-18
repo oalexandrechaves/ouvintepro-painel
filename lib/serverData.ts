@@ -57,16 +57,22 @@ const vazio: PainelExtra = {
   ouvintes: [],
 };
 
-// Conta ocorrencias por chave e devolve ranking desc.
+// Conta ocorrencias agrupando por chave canonica (minusculo, sem acento),
+// exibindo o primeiro rotulo visto. Devolve ranking desc.
 function ranking(itens: (string | null | undefined)[], limite = 10): SerieItem[] {
-  const mapa = new Map<string, number>();
+  const mapa = new Map<string, { label: string; valor: number }>();
   for (const it of itens) {
-    const chave = (it ?? "").trim();
-    if (!chave) continue;
-    mapa.set(chave, (mapa.get(chave) ?? 0) + 1);
+    const raw = (it ?? "").trim();
+    if (!raw) continue;
+    const key = raw.toLowerCase().normalize("NFD").replace(
+      /[\u0300-\u036f]/g,
+      "",
+    );
+    const cur = mapa.get(key);
+    if (cur) cur.valor += 1;
+    else mapa.set(key, { label: raw, valor: 1 });
   }
-  return Array.from(mapa.entries())
-    .map(([label, valor]) => ({ label, valor }))
+  return Array.from(mapa.values())
     .sort((a, b) => b.valor - a.valor)
     .slice(0, limite);
 }
