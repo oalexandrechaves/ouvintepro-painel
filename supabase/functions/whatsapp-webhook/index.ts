@@ -391,6 +391,27 @@ function limparPrefixoNome(texto: string): string {
     .trim();
 }
 
+// Mensagens que sao cumprimento/ruido e nunca devem ser gravadas como nome.
+const SAUDACOES_NAO_NOME = new Set([
+  "oi", "ola", "alo", "opa", "salve", "hey", "hi", "hello",
+  "bom dia", "boa tarde", "boa noite", "boa madrugada",
+  "e ai", "eai", "eae", "fala", "fala ai",
+  "tudo bem", "tudo bom", "td bem", "td bom", "tudo certo", "tudo otimo",
+  "blz", "beleza", "suave", "de boa",
+  "sim", "nao", "ok", "okay", "entao", "entendi", "certo", "uai",
+  "kk", "kkk", "kkkk", "rs", "rsrs", "haha", "hahaha", "hehe",
+  "oi tudo bem", "ola tudo bem", "oi bom dia", "quem e voce", "quem e",
+]);
+
+// Remove uma saudacao no inicio da frase (oi, ola, opa, bom dia...) pra sobrar o nome.
+function removerSaudacaoInicial(texto: string): string {
+  let t = texto.trim().replace(/^[\s,.!?-]+/, "");
+  const padrao =
+    /^(oi|ol[aá]|al[oô]|opa|salve|e a[ií]|eai|eae|fala|hey|hi|hello|bom dia|boa tarde|boa noite)\b[\s,!.\-]*/i;
+  t = t.replace(padrao, "").trim();
+  return t;
+}
+
 // Normaliza pra comparacao sem acento e sem caixa.
 function normalizarSemAcento(s: string): string {
   return s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -812,7 +833,28 @@ Deno.serve(async (req: Request) => {
     }
 
     case "nome": {
-      const nomeLimpo = titleCasePtBr(limparPrefixoNome(texto)) || texto.trim();
+      // Tira saudacao do inicio e prefixos tipo "meu nome e".
+      const semSaud = removerSaudacaoInicial(texto);
+      const baseNome = limparPrefixoNome(semSaud || texto);
+      const chave = normalizarSemAcento(baseNome);
+      const soLetras = baseNome.replace(/[^A-Za-zÀ-ÿ]/g, "");
+
+      // Nao parece nome: vazio, saudacao pura, ou quase sem letras.
+      const naoEhNome = baseNome.trim().length === 0 ||
+        SAUDACOES_NAO_NOME.has(chave) ||
+        soLetras.length < 2;
+
+      if (naoEhNome) {
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          "Antes da gente começar, como você se chama? Pode mandar seu nome.",
+        );
+        break; // permanece em "nome", sem avancar
+      }
+
+      const nomeLimpo = titleCasePtBr(baseNome) || baseNome.trim();
       const pn = nomeLimpo.trim().split(/\s+/)[0] || nomeLimpo;
       await db.from("ouvintes").update({ nome: nomeLimpo }).eq("id", ouvinteId);
       const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
