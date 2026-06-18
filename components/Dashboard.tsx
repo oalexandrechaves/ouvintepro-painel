@@ -42,19 +42,18 @@ export default function Dashboard({ data }: { data: PainelData }) {
       <main className="relative z-10 mx-auto max-w-6xl px-5 py-8 sm:px-8 sm:py-12">
         {/* Topo */}
         <header className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-4">
+          <div className="flex flex-col gap-1.5">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src="/logo-nativa.svg"
+              src="/logo-nativa.png"
               alt="Rede Nativa"
-              className="h-12 w-auto shrink-0"
+              onError={(e) => {
+                const img = e.currentTarget as HTMLImageElement;
+                if (!img.src.endsWith(".svg")) img.src = "/logo-nativa.svg";
+              }}
+              className="h-14 w-auto shrink-0"
             />
-            <div>
-              <h1 className="text-xl font-bold leading-tight sm:text-2xl">
-                <span className="text-gradient">Rede Nativa</span>
-              </h1>
-              <p className="text-sm text-mist-300">Painel de ouvintes</p>
-            </div>
+            <p className="text-sm text-mist-300">Painel de ouvintes</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
@@ -81,7 +80,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
         </header>
 
         {/* KPIs */}
-        <section className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <section className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {kpis.map((kpi) => (
             <div key={kpi.label} className="glass p-5">
               <p className="text-sm text-mist-300">{kpi.label}</p>
@@ -113,7 +112,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
           </div>
 
           <div className="glass p-6">
-            <h2 className="mb-5 text-lg font-semibold">Distribuição por zona</h2>
+            <h2 className="mb-5 text-lg font-semibold">Zonas</h2>
             <BarList serie={zonas} mode={mode} />
           </div>
         </section>
@@ -126,7 +125,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
           </div>
 
           <div className="glass p-6">
-            <h2 className="mb-5 text-lg font-semibold">Músicas mais amadas</h2>
+            <h2 className="mb-5 text-lg font-semibold">Músicas preferidas</h2>
             <Ranking serie={musicas} mode={mode} />
           </div>
 

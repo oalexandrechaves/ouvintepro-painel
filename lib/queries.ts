@@ -39,6 +39,7 @@ export async function getPainelData(): Promise<PainelData> {
   try {
     const [
       kpiRes,
+      resumoRes,
       zonasRes,
       faixaRes,
       musicasRes,
@@ -46,6 +47,7 @@ export async function getPainelData(): Promise<PainelData> {
       ...series
     ] = await Promise.all([
       sb.rpc("painel_kpis", { p_periodo: "ano" }),
+      sb.from("painel_ouvintes_resumo").select("total, cadastrados").single(),
       sb.from("painel_zonas").select("label, valor"),
       sb.from("painel_faixa_etaria").select("label, valor"),
       sb.from("painel_musicas_amadas").select("label, valor"),
@@ -56,6 +58,9 @@ export async function getPainelData(): Promise<PainelData> {
     ]);
 
     const k = Array.isArray(kpiRes.data) ? kpiRes.data[0] : kpiRes.data;
+    const resumo = resumoRes.data as
+      | { total: number; cadastrados: number }
+      | null;
     const h = hotlinkRes.data as
       | { acessos: number; conversoes: number; taxa: number }
       | null;
@@ -67,10 +72,9 @@ export async function getPainelData(): Promise<PainelData> {
     });
 
     const kpis: Kpi[] = [
-      { label: "Ouvintes cadastrados", valor: k?.ouvintes_total ?? 0, delta: "atualizado", cor: "neon-pink" },
-      { label: "Novos no período", valor: k?.novos_periodo ?? 0, delta: "neste ano", cor: "neon-violet" },
-      { label: "Conversas hoje", valor: k?.conversas_hoje ?? 0, delta: "tempo real", cor: "neon-cyan" },
-      { label: "Cliques no hotlink", valor: k?.hotlink_acessos ?? 0, delta: "acessos", detalhe: "atribuição comercial", cor: "neon-gold" },
+      { label: "Ouvintes já cadastrados", valor: resumo?.cadastrados ?? 0, delta: "concluíram o cadastro", cor: "neon-pink" },
+      { label: "Ouvintes novos", valor: k?.novos_periodo ?? 0, delta: "neste ano", cor: "neon-violet" },
+      { label: "Total de ouvintes", valor: resumo?.total ?? 0, delta: "todos os registros", cor: "neon-cyan" },
     ];
 
     return {

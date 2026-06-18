@@ -110,6 +110,8 @@ interface OuvinteEmbed {
 export async function getPainelExtra(
   faixa: number | null,
   zona: string | null,
+  de: string | null = null,
+  ate: string | null = null,
 ): Promise<PainelExtra> {
   const sb = getServiceClient();
   if (!sb) return vazio;
@@ -137,6 +139,9 @@ export async function getPainelExtra(
       .limit(2000);
     if (faixa) q = q.eq("faixa_etaria", faixa);
     if (zona) q = q.eq("zona", zona);
+    // Filtro por data de cadastro (primeiro_contato_em).
+    if (de) q = q.gte("primeiro_contato_em", `${de}T00:00:00.000Z`);
+    if (ate) q = q.lte("primeiro_contato_em", `${ate}T23:59:59.999Z`);
 
     const { data, error } = await q;
     if (error) throw error;

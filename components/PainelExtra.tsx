@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { formatValue, somaSerie } from "@/lib/mockData";
 import type { DisplayMode, SerieItem } from "@/lib/mockData";
+import DateRange from "./DateRange";
 import Ranking from "./Ranking";
 
 interface OuvinteRow {
@@ -47,6 +48,8 @@ function dataPtBr(iso: string | null): string {
 export default function PainelExtra({ mode }: { mode: DisplayMode }) {
   const [faixa, setFaixa] = useState("todas");
   const [zona, setZona] = useState("todas");
+  const [periodoIni, setPeriodoIni] = useState<string | null>(null);
+  const [periodoFim, setPeriodoFim] = useState<string | null>(null);
   const [data, setData] = useState<Extra | null>(null);
   const [carregando, setCarregando] = useState(true);
   const [zonaAberta, setZonaAberta] = useState<string | null>(null);
@@ -55,7 +58,10 @@ export default function PainelExtra({ mode }: { mode: DisplayMode }) {
   useEffect(() => {
     let ativo = true;
     setCarregando(true);
-    const qs = new URLSearchParams({ faixa, zona }).toString();
+    const params: Record<string, string> = { faixa, zona };
+    if (periodoIni) params.de = periodoIni;
+    if (periodoFim) params.ate = periodoFim;
+    const qs = new URLSearchParams(params).toString();
     fetch(`/api/painel?${qs}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
@@ -70,7 +76,7 @@ export default function PainelExtra({ mode }: { mode: DisplayMode }) {
     return () => {
       ativo = false;
     };
-  }, [faixa, zona]);
+  }, [faixa, zona, periodoIni, periodoFim]);
 
   const faixasOpts = useMemo(
     () => [
@@ -112,6 +118,14 @@ export default function PainelExtra({ mode }: { mode: DisplayMode }) {
             ]}
             label="Zona"
           />
+          <DateRange
+            inicio={periodoIni}
+            fim={periodoFim}
+            onChange={(i, f) => {
+              setPeriodoIni(i);
+              setPeriodoFim(f);
+            }}
+          />
         </div>
       </div>
 
@@ -128,16 +142,16 @@ export default function PainelExtra({ mode }: { mode: DisplayMode }) {
         <div className="flex flex-col gap-4">
           {/* Rankings de musicas e artistas */}
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <Card titulo="Músicas mais amadas">
+            <Card titulo="Músicas preferidas">
               <RankingOuVazio serie={data.musicasAmadas} mode={mode} />
             </Card>
-            <Card titulo="Músicas mais rejeitadas">
+            <Card titulo="Músicas rejeitadas">
               <RankingOuVazio serie={data.musicasRejeitadas} mode={mode} />
             </Card>
-            <Card titulo="Artistas mais amados">
+            <Card titulo="Artistas preferidos">
               <RankingOuVazio serie={data.artistasAmados} mode={mode} />
             </Card>
-            <Card titulo="Artistas mais rejeitados">
+            <Card titulo="Artistas rejeitados">
               <RankingOuVazio serie={data.artistasRejeitados} mode={mode} />
             </Card>
           </div>
@@ -163,13 +177,13 @@ export default function PainelExtra({ mode }: { mode: DisplayMode }) {
                 </p>
               )}
             </Card>
-            <Card titulo="Bairros mais presentes (geral)">
+            <Card titulo="Bairros que mais participam">
               <RankingOuVazio serie={data.bairrosGeral} mode={mode} />
             </Card>
           </div>
 
           {/* Radios concorrentes */}
-          <Card titulo="Rádios que costumam ouvir">
+          <Card titulo="Rádios preferidas">
             <RankingOuVazio serie={data.radios} mode={mode} />
           </Card>
 

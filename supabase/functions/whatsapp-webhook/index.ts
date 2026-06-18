@@ -73,6 +73,8 @@ Voce interpreta respostas de ouvintes de uma radio brasileira (foco em sertanejo
 O ouvinte escreveu, em linguagem informal e as vezes com erros de digitacao, o que ele citou.
 Tarefa: extrair os itens citados e, para cada um, dizer se e uma MUSICA, um ARTISTA, ou MUSICA E ARTISTA juntos.
 Corrija a grafia para a forma canonica conhecida (ex.: "marilia mendonca" vira "Marília Mendonça"; "evidencias" vira "Evidências").
+Sempre devolva a musica no formato canonico com o ARTISTA e o TITULO separados. Quando o ouvinte escrever so o titulo, descubra o artista; quando escrever artista e musica juntos, separe os dois (ex.: "meteoro luan santana" vira artista "Luan Santana" e musica "Meteoro"; "jura edson e hudson" vira artista "Edson & Hudson" e musica "Jura").
+Use a grafia oficial com acentuação correta.
 Se o ouvinte citar apenas o nome de um cantor, dupla ou banda, sem musica, classifique como "artista" e nunca como "desconhecido".
 Use seu conhecimento de musica brasileira para reconhecer o artista mesmo escrito de forma informal ou incompleta (ex.: "ze neto" e Zé Neto & Cristiano; "maiara e maraisa" e Maiara & Maraisa).
 Use seu conhecimento de musica brasileira. Nao invente itens que o ouvinte nao citou.
@@ -100,6 +102,7 @@ async function interpretarMusicaDoArtista(
   const prompt = `
 O ouvinte de uma radio disse que curte o artista "${artista}" e agora respondeu qual musica dele(a) mais gosta.
 A resposta pode ter erro de grafia ou nome aproximado. Identifique a musica mais provavel de ${artista} e corrija para a forma canonica.
+Devolva o titulo da musica na grafia oficial com acentuação correta, separado do artista.
 Se nao tiver certeza, traga ate 3 sugestoes de musicas famosas de ${artista}.
 Use seu conhecimento de musica brasileira. Nao invente musicas que nao sejam de ${artista}.
 Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
@@ -150,6 +153,7 @@ async function interpretarBairro(
   const prompt = `
 O ouvinte informou em qual bairro da cidade de Sao Paulo (capital) ele esta, em texto informal e possivelmente com erros de grafia.
 Identifique o bairro na forma canonica e a zona da cidade: uma de "Norte", "Sul", "Leste", "Oeste", "Centro".
+Conheca apelidos e formas curtas (ex.: "Sao Miguel" e Sao Miguel Paulista, na Zona Leste).
 Se nao reconhecer como bairro de Sao Paulo capital, use zona "Outras".
 Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Nao invente. Responda APENAS com JSON, sem texto fora do JSON:
@@ -393,6 +397,7 @@ async function desfazerUltimo(
       );
       break;
     case "aniversario":
+    case "ano_nascimento":
       await db.from("ouvintes").update({
         data_nascimento: null,
         idade: null,
@@ -430,6 +435,8 @@ function perguntaDaEtapa(
       return "Me diz sua cidade e estado (ex: Campinas, SP).";
     case "aniversario":
       return "Qual a sua data de nascimento?";
+    case "ano_nascimento":
+      return "Qual ano você nasceu? (ex: 1990)";
     case "musicas_ama":
       return "Quais músicas você mais ama ouvir? Pode mandar várias.";
     case "musicas_rejeita":
@@ -553,6 +560,10 @@ Deno.serve(async (req: Request) => {
     .update({ ultimo_contato_em: new Date().toISOString() })
     .eq("id", ouvinteId);
 
+  // Fala usa so o primeiro nome (informal); o banco guarda o nome completo.
+  const primeiroNome = (ouvinte.nome ?? "").trim().split(/\s+/)[0] ||
+    (ouvinte.nome ?? "");
+
   // 4. Janela de sessao: acha a conversa mais recente ANTES de atualizar atividade.
   const { data: recente } = await db
     .from("conversas")
@@ -631,6 +642,7 @@ Deno.serve(async (req: Request) => {
     "bairro",
     "cidade",
     "aniversario",
+    "ano_nascimento",
     "musicas_ama",
     "musicas_rejeita",
     "musica_pendente",
@@ -728,7 +740,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          `${saud}, ${ouvinte.nome}! Bora atualizar rapidinho. Em qual bairro você está agora?`,
+          `${saud}, ${primeiroNome}! Bora atualizar rapidinho. Em qual bairro você está agora?`,
         );
         await setEtapa("bairro");
       } else {
@@ -736,7 +748,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          `${saud}, ${ouvinte.nome}! Bora atualizar rapidinho. Me diz sua cidade e estado agora (ex: Campinas, SP).`,
+          `${saud}, ${primeiroNome}! Bora atualizar rapidinho. Me diz sua cidade e estado agora (ex: Campinas, SP).`,
         );
         await setEtapa("cidade");
       }
@@ -745,6 +757,7 @@ Deno.serve(async (req: Request) => {
 
     case "nome": {
       const nomeLimpo = titleCasePtBr(limparPrefixoNome(texto)) || texto.trim();
+      const pn = nomeLimpo.trim().split(/\s+/)[0] || nomeLimpo;
       await db.from("ouvintes").update({ nome: nomeLimpo }).eq("id", ouvinteId);
       const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
       await db.from("conversas").update({
@@ -755,7 +768,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          `Prazer, ${nomeLimpo}! Em qual bairro você mora?`,
+          `Prazer, ${pn}! Em qual bairro você mora?`,
         );
         await setEtapa("bairro");
       } else {
@@ -763,7 +776,7 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          `Prazer, ${nomeLimpo}! Me diz sua cidade e estado (ex: Campinas, SP).`,
+          `Prazer, ${pn}! Me diz sua cidade e estado (ex: Campinas, SP).`,
         );
         await setEtapa("cidade");
       }
@@ -862,7 +875,7 @@ Deno.serve(async (req: Request) => {
           );
           break; // continua em aniversario
         }
-        // Segunda falha: segue sem data, sem travar.
+        // Segunda falha: pergunta so o ano e insiste nisso.
         await db.from("conversas").update({ contexto: null }).eq(
           "id",
           conversaId,
@@ -871,9 +884,9 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          "Tudo bem, seguimos. Quais músicas você mais ama ouvir? Pode mandar várias.",
+          "Não consegui a data completa. Sem problema, me diz só o ano que você nasceu, por exemplo 1990.",
         );
-        await setEtapa("musicas_ama");
+        await setEtapa("ano_nascimento");
         break;
       }
 
@@ -904,6 +917,50 @@ Deno.serve(async (req: Request) => {
         conversaId,
         radioId,
         "Quais músicas você mais ama ouvir? Pode mandar várias.",
+      );
+      await setEtapa("musicas_ama");
+      break;
+    }
+
+    case "ano_nascimento": {
+      const m = texto.replace(/\D/g, "");
+      let ano = 0;
+      if (m.length === 4) {
+        ano = parseInt(m, 10);
+      } else if (m.length === 2) {
+        const a = parseInt(m, 10);
+        ano = a <= 25 ? 2000 + a : 1900 + a;
+      }
+      const anoAtual = new Date().getUTCFullYear();
+      if (!ano || ano < 1900 || ano > anoAtual) {
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          "Só o ano mesmo, com 4 números, tipo 1990. Qual ano você nasceu?",
+        );
+        break; // continua em ano_nascimento, insistindo
+      }
+      const iso = `${ano}-01-01`;
+      const idade = anoAtual - ano;
+      const { data: faixa } = await db
+        .from("faixas_etarias")
+        .select("id")
+        .lte("idade_min", idade)
+        .or(`idade_max.gte.${idade},idade_max.is.null`)
+        .order("id")
+        .limit(1)
+        .maybeSingle();
+      await db
+        .from("ouvintes")
+        .update({ data_nascimento: iso, idade, faixa_etaria: faixa?.id ?? null })
+        .eq("id", ouvinteId);
+      await db.from("conversas").update({ contexto: null }).eq("id", conversaId);
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        "Show! Quais músicas você mais ama ouvir? Pode mandar várias.",
       );
       await setEtapa("musicas_ama");
       break;
@@ -1134,7 +1191,7 @@ Deno.serve(async (req: Request) => {
         conversaId,
         radioId,
         `Prontinho! Obrigado por participar com a gente${
-          ouvinte.nome ? ", " + ouvinte.nome : ""
+          primeiroNome ? ", " + primeiroNome : ""
         }. Fica ligado na ${radioNome}!`,
       );
       break;
@@ -1152,7 +1209,7 @@ Deno.serve(async (req: Request) => {
         conversaId,
         radioId,
         ouvinte.nome
-          ? `Que bom te ver de novo, ${ouvinte.nome}! Obrigado por falar com a ${radioNome}.`
+          ? `Que bom te ver de novo, ${primeiroNome}! Obrigado por falar com a ${radioNome}.`
           : `Obrigado por falar com a ${radioNome}!`,
       );
       break;
