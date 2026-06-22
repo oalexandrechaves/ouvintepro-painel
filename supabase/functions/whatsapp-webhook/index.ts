@@ -505,21 +505,27 @@ function perguntaDaEtapa(
 ): string {
   switch (etapa) {
     case "nome":
-      return "Pra você participar, me conta seu nome completo?";
-    case "bairro":
-      return "Em qual bairro você mora?";
-    case "cidade":
-      return "Me diz sua cidade e estado (ex: Campinas, SP).";
+      return "Pode me falar seu nome completo pra gente te cadastrar nas promoções?";
+    case "sobrenome":
+      return "Pode me passar seu nome completo, com sobrenome?";
     case "aniversario":
-      return "Qual a sua data de nascimento?";
+      return "Pode me passar sua data de nascimento, no formato dia/mês/ano?";
     case "ano_nascimento":
       return "Qual ano você nasceu? (ex: 1990)";
-    case "musicas_ama":
-      return "Quais músicas você mais ama ouvir? Pode mandar várias.";
+    case "bairro":
+      return "Me passa o bairro onde você mora?";
+    case "pedido_musica":
+      return "Quer pedir uma música?";
+    case "pedido_musica_nome":
+      return "Qual música você quer pedir?";
     case "musicas_rejeita":
-      return "Tem alguma música que você não gosta de jeito nenhum?";
-    case "outras_radios":
-      return "Além da nossa, quais outras rádios você costuma escutar?";
+      return `Tem alguma música que toca aqui na ${RADIO_LABEL} que você não gosta?`;
+    case "estilo_musical":
+      return "Qual é o estilo musical que você mais gosta?";
+    case "radio_troca":
+      return "Quando toca uma música que você não curte, você muda pra qual rádio?";
+    case "programa_locutor":
+      return `Tem algum programa ou locutor aqui na ${RADIO_LABEL} que você mais gosta?`;
     default:
       return "Pode me contar?";
   }
@@ -528,7 +534,6 @@ function perguntaDaEtapa(
 type Intencao = {
   intencao: "resposta" | "correcao" | "conversa";
   tipo_correcao: "gosto" | "nao_gosto" | null;
-  fala: string | null;
 };
 
 // Classifica se a mensagem do ouvinte e resposta, correcao ou conversa.
@@ -545,11 +550,65 @@ Classifique a mensagem do ouvinte em uma de três intenções:
 - "conversa": ele fez uma pergunta, comentário ou brincadeira que não é resposta direta (ex.: "por que você quer saber?", "kkkk", "quem é você?").
 Se a mensagem puder ser uma resposta válida à pergunta, prefira "resposta".
 Se for "correcao" sobre gostar ou não de música, defina tipo_correcao como "gosto" ou "nao_gosto"; caso contrário, null.
-Se for "conversa", escreva em "fala" uma resposta curta, simpática e direta ao ouvinte, de uma frase, sem travessão.
 Responda APENAS com JSON, sem texto fora do JSON:
-{"intencao":"resposta|correcao|conversa","tipo_correcao":"gosto|nao_gosto ou null","fala":"frase ou null"}
+{"intencao":"resposta|correcao|conversa","tipo_correcao":"gosto|nao_gosto ou null"}
 `;
   return await geminiJSON<Intencao>(prompt);
+}
+
+// Identidade fixa da Nativa FM.
+const RADIO_LABEL = "Nativa FM";
+const INSTAGRAM_URL = "https://www.instagram.com/nativa/";
+
+// Respostas que significam "nao tem / pular".
+const NEGATIVAS = new Set([
+  "nao", "n", "nao tem", "nao tenho", "nenhuma", "nenhum", "nada", "nem uma",
+  "nem um", "nao quero", "agora nao", "depois", "deixa", "deixa pra la",
+  "to de boa", "nao obrigado", "gosto de todas", "gosto de tudo", "todas",
+  "nao mudo", "fico aqui", "fico na nativa",
+]);
+
+// Respostas que significam "sim" (sem dizer a musica).
+const AFIRMATIVAS = new Set([
+  "sim", "s", "quero", "quero sim", "claro", "pode ser", "bora", "aceito",
+  "vai", "com certeza", "uhum", "aham", "pode", "manda", "quero pedir",
+]);
+
+// Cidade da Grande SP (fora da capital). Retorna o nome canonico ou null.
+async function resolverGrandeSP(texto: string): Promise<string | null> {
+  const alvo = normalizarSemAcento(texto);
+  const { data } = await db.from("cidades_grande_sp").select(
+    "nome, nome_normalizado",
+  );
+  const achou = (data ?? []).find((c) =>
+    (c.nome_normalizado as string) === alvo
+  );
+  return achou ? (achou.nome as string) : null;
+}
+
+// Detecta declaracao de nome novo ("meu nome e X", "me chamo X", "sou o X").
+function extrairNomeDeclarado(texto: string): string | null {
+  const m = texto.trim().match(
+    /(?:meu nome (?:é|eh|e)|me chamo|pode chamar de|sou o|sou a|eu sou)\s+(.{2,})/i,
+  );
+  if (!m) return null;
+  const nome = titleCasePtBr(m[1].replace(/[.!?]+$/, "").trim());
+  return nome || null;
+}
+
+// Grava artistas que vieram sem musica (catalogo nao achou titulo) como linha de artista.
+async function gravarPendentesComoArtista(
+  radioId: string,
+  ouvinteId: string,
+  sent: "ama" | "rejeita",
+  pendentes: string[],
+): Promise<string[]> {
+  const ids: string[] = [];
+  for (const a of pendentes) {
+    const id = await gravarMusica(radioId, ouvinteId, sent, a, null, a);
+    if (id) ids.push(id);
+  }
+  return ids;
 }
 
 Deno.serve(async (req: Request) => {
@@ -716,29 +775,32 @@ Deno.serve(async (req: Request) => {
   // 5b. Camada de intencao: entende se a mensagem e resposta, correcao ou conversa.
   const ETAPAS_RESPOSTA = new Set([
     "nome",
+    "sobrenome",
     "bairro",
-    "cidade",
     "aniversario",
     "ano_nascimento",
-    "musicas_ama",
+    "pedido_musica",
+    "pedido_musica_nome",
     "musicas_rejeita",
-    "musica_pendente",
-    "outras_radios",
+    "estilo_musical",
+    "radio_troca",
+    "programa_locutor",
   ]);
 
   if (isTexto && ETAPAS_RESPOSTA.has(etapa)) {
     const ctxAtual = (conversa.contexto as Record<string, unknown> | null) ?? {};
-    const perguntaAtual = etapa === "musica_pendente"
-      ? `Qual música de ${
-        ((ctxAtual.fila as string[] | undefined) ?? [])[0] ?? "do artista"
-      } você citou?`
-      : perguntaDaEtapa(etapa, ouvinte, ddd, radioNome);
+    const perguntaAtual = perguntaDaEtapa(etapa, ouvinte, ddd, radioNome);
 
     const intent = await classificarIntencao(perguntaAtual, texto);
 
     if (intent && intent.intencao === "conversa") {
-      const fala = intent.fala || "Boa!";
-      await reply(phone, conversaId, radioId, `${fala} ${perguntaAtual}`);
+      const desvio = escolher([
+        "Haha, boa! Mas deixa eu focar aqui que é rapidinho.",
+        "Show! Bora seguir com o seu cadastro, falta pouco.",
+        "Entendi! Pra gente continuar, é só me responder isto:",
+        "Boa! Voltando pro cadastro pra não perder sua participação.",
+      ]);
+      await reply(phone, conversaId, radioId, `${desvio} ${perguntaAtual}`);
       return new Response("ok", { status: 200 });
     }
 
@@ -802,178 +864,105 @@ Deno.serve(async (req: Request) => {
         phone,
         conversaId,
         radioId,
-        `Oi! Aqui é a ${radioNome}. Pra você participar de todas as promoções da rádio, me conta seu nome completo?`,
+        `Olá! Tudo bem? Que bom saber que você está com a gente aqui na ${RADIO_LABEL}. Meu nome é Adriana. Pode me falar seu nome completo pra gente te cadastrar nas promoções?`,
       );
       await setEtapa("nome");
       break;
     }
 
     case "reinicio": {
-      // Ouvinte que volta apos a janela: ja tem nome, recoleta a partir do local.
-      // A mensagem que disparou a rodada nao e consumida como resposta.
-      const saud = escolher(SAUDACOES_RETORNO);
-      if (ddd === "11") {
-        await reply(
-          phone,
-          conversaId,
-          radioId,
-          `${saud}, ${primeiroNome}! Bora atualizar rapidinho. Em qual bairro você está agora?`,
-        );
-        await setEtapa("bairro");
-      } else {
-        await reply(
-          phone,
-          conversaId,
-          radioId,
-          `${saud}, ${primeiroNome}! Bora atualizar rapidinho. Me diz sua cidade e estado agora (ex: Campinas, SP).`,
-        );
-        await setEtapa("cidade");
-      }
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        `Olá, ${primeiroNome}! Tudo bem? Que bom te ver de volta. O que manda?`,
+      );
+      await setEtapa("retorno");
       break;
     }
 
     case "nome": {
-      // Tira saudacao do inicio e prefixos tipo "meu nome e".
       const semSaud = removerSaudacaoInicial(texto);
       const baseNome = limparPrefixoNome(semSaud || texto);
       const chave = normalizarSemAcento(baseNome);
       const soLetras = baseNome.replace(/[^A-Za-zÀ-ÿ]/g, "");
-
-      // Nao parece nome: vazio, saudacao pura, ou quase sem letras.
       const naoEhNome = baseNome.trim().length === 0 ||
-        SAUDACOES_NAO_NOME.has(chave) ||
-        soLetras.length < 2;
-
+        SAUDACOES_NAO_NOME.has(chave) || soLetras.length < 2;
       if (naoEhNome) {
         await reply(
           phone,
           conversaId,
           radioId,
-          "Antes da gente começar, como você se chama? Pode mandar seu nome.",
+          "Antes da gente começar, como você se chama? Pode mandar seu nome completo.",
         );
-        break; // permanece em "nome", sem avancar
+        break;
       }
-
       const nomeLimpo = titleCasePtBr(baseNome) || baseNome.trim();
-      const pn = nomeLimpo.trim().split(/\s+/)[0] || nomeLimpo;
+      const partes = nomeLimpo.trim().split(/\s+/);
+      const pn = partes[0] || nomeLimpo;
       await db.from("ouvintes").update({ nome: nomeLimpo }).eq("id", ouvinteId);
-      const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
       await db.from("conversas").update({
-        contexto: { ...ctx, ultimo: { etapa: "nome" } },
+        contexto: { ultimo: { etapa: "nome" } },
       }).eq("id", conversaId);
-      if (ddd === "11") {
+      if (partes.length < 2) {
         await reply(
           phone,
           conversaId,
           radioId,
-          `Prazer, ${pn}! Em qual bairro você mora?`,
+          `Show, ${pn}! Pode me passar seu nome completo, com sobrenome?`,
         );
-        await setEtapa("bairro");
-      } else {
-        await reply(
-          phone,
-          conversaId,
-          radioId,
-          `Prazer, ${pn}! Me diz sua cidade e estado (ex: Campinas, SP).`,
-        );
-        await setEtapa("cidade");
-      }
-      break;
-    }
-
-    case "bairro": {
-      let bairroFinal = titleCasePtBr(texto);
-      let zona = "Outras";
-      const ia = await interpretarBairro(texto);
-      if (ia && ia.bairro) {
-        bairroFinal = ia.bairro;
-        zona = ia.zona || "Outras";
-      } else {
-        const alvo = normalizarSemAcento(texto);
-        const { data: seeds } = await db
-          .from("bairros_zonas")
-          .select("bairro, zona");
-        const achou = (seeds ?? []).find(
-          (b) => normalizarSemAcento(b.bairro as string) === alvo,
-        );
-        if (achou) zona = achou.zona as string;
-      }
-      await db
-        .from("ouvintes")
-        .update({ bairro: bairroFinal, zona })
-        .eq("id", ouvinteId);
-      {
-        const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
-        await db.from("conversas").update({
-          contexto: { ...ctx, ultimo: { etapa: "bairro" } },
-        }).eq("id", conversaId);
+        await setEtapa("sobrenome");
+        break;
       }
       await reply(
         phone,
         conversaId,
         radioId,
-        "Show! Qual a sua data de nascimento?",
+        `Muito legal, ${pn}! Pode me passar sua data de nascimento, no formato dia/mês/ano?`,
       );
       await setEtapa("aniversario");
       break;
     }
 
-    case "cidade": {
-      let cidade = "";
-      let estado: string | null = null;
-      const ia = await interpretarCidade(texto);
-      if (ia && ia.cidade) {
-        cidade = ia.cidade;
-        estado = ia.estado ? ia.estado.slice(0, 2).toUpperCase() : null;
-      } else {
-        const partes = texto.split(",").map((s) => s.trim());
-        cidade = titleCasePtBr(partes[0] || texto);
-        estado = partes[1] ? partes[1].slice(0, 2).toUpperCase() : null;
+    case "sobrenome": {
+      const limpo = titleCasePtBr(
+        limparPrefixoNome(removerSaudacaoInicial(texto) || texto),
+      );
+      const soLetras = limpo.replace(/[^A-Za-zÀ-ÿ]/g, "");
+      if (!limpo || soLetras.length < 2) {
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          "Pode me mandar seu nome completo, com nome e sobrenome?",
+        );
+        break;
       }
-      await db
-        .from("ouvintes")
-        .update({ cidade, estado })
-        .eq("id", ouvinteId);
-      {
-        const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
-        await db.from("conversas").update({
-          contexto: { ...ctx, ultimo: { etapa: "cidade" } },
-        }).eq("id", conversaId);
+      const atual = (ouvinte.nome ?? "").trim();
+      let completo = limpo;
+      if (limpo.split(/\s+/).length < 2 && atual) {
+        completo = `${atual} ${limpo}`.trim();
       }
+      const pn = completo.split(/\s+/)[0] || completo;
+      await db.from("ouvintes").update({ nome: completo }).eq("id", ouvinteId);
+      await db.from("conversas").update({
+        contexto: { ultimo: { etapa: "nome" } },
+      }).eq("id", conversaId);
       await reply(
         phone,
         conversaId,
         radioId,
-        "Show! Qual a sua data de nascimento?",
+        `Muito legal, ${pn}! Pode me passar sua data de nascimento, no formato dia/mês/ano?`,
       );
       await setEtapa("aniversario");
       break;
     }
 
     case "aniversario": {
-      let iso = parseAniversario(texto);
-      if (!iso) iso = await interpretarData(texto);
-
-      if (!iso) {
-        const jaTentou =
-          (conversa.contexto as { dataTentativa?: boolean } | null)
-            ?.dataTentativa === true;
-        if (!jaTentou) {
-          const ctx = (conversa.contexto as Record<string, unknown> | null) ??
-            {};
-          await db
-            .from("conversas")
-            .update({ contexto: { ...ctx, dataTentativa: true } })
-            .eq("id", conversaId);
-          await reply(
-            phone,
-            conversaId,
-            radioId,
-            "Não peguei direito a data. Pode mandar assim, por exemplo: 28/01/1995?",
-          );
-          break; // continua em aniversario
-        }
-        // Segunda falha: pergunta so o ano e insiste nisso.
+      // Dia/mes sem ano: pede so o ano (evita a IA inventar o ano).
+      if (
+        /\d{1,2}\s*[\/\-.\s]\s*\d{1,2}/.test(texto) && !/\d{4}/.test(texto)
+      ) {
         await db.from("conversas").update({ contexto: null }).eq(
           "id",
           conversaId,
@@ -982,50 +971,71 @@ Deno.serve(async (req: Request) => {
           phone,
           conversaId,
           radioId,
-          "Não consegui a data completa. Sem problema, me diz só o ano que você nasceu, por exemplo 1990.",
+          "Faltou o ano. Em que ano você nasceu? (ex: 1990)",
         );
         await setEtapa("ano_nascimento");
         break;
       }
-
-      // Limpa a flag de tentativa e marca a ultima resposta (descarta dataTentativa).
+      let iso = parseAniversario(texto);
+      if (!iso) iso = await interpretarData(texto);
+      if (!iso) {
+        const jaTentou =
+          (conversa.contexto as { dataTentativa?: boolean } | null)
+            ?.dataTentativa === true;
+        if (!jaTentou) {
+          const ctx = (conversa.contexto as Record<string, unknown> | null) ??
+            {};
+          await db.from("conversas").update({
+            contexto: { ...ctx, dataTentativa: true },
+          }).eq("id", conversaId);
+          await reply(
+            phone,
+            conversaId,
+            radioId,
+            "Não peguei direito a data. Pode mandar assim, por exemplo: 28/01/1995?",
+          );
+          break;
+        }
+        await db.from("conversas").update({ contexto: null }).eq(
+          "id",
+          conversaId,
+        );
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          "Não consegui a data completa. Me diz só o ano que você nasceu, por exemplo 1990.",
+        );
+        await setEtapa("ano_nascimento");
+        break;
+      }
       await db.from("conversas").update({
         contexto: { ultimo: { etapa: "aniversario" } },
       }).eq("id", conversaId);
-
       const idade = calcularIdade(iso);
-      const { data: faixa } = await db
-        .from("faixas_etarias")
-        .select("id")
-        .lte("idade_min", idade)
-        .or(`idade_max.gte.${idade},idade_max.is.null`)
-        .order("id")
-        .limit(1)
-        .maybeSingle();
-      await db
-        .from("ouvintes")
-        .update({
-          data_nascimento: iso,
-          idade,
-          faixa_etaria: faixa?.id ?? null,
-        })
-        .eq("id", ouvinteId);
+      const { data: faixa } = await db.from("faixas_etarias").select("id")
+        .lte("idade_min", idade).or(`idade_max.gte.${idade},idade_max.is.null`)
+        .order("id").limit(1).maybeSingle();
+      await db.from("ouvintes").update({
+        data_nascimento: iso,
+        idade,
+        faixa_etaria: faixa?.id ?? null,
+      }).eq("id", ouvinteId);
       await reply(
         phone,
         conversaId,
         radioId,
-        "Quais músicas você mais ama ouvir? Pode mandar várias.",
+        `Ótimo, ${primeiroNome}! Me passa o bairro onde você mora?`,
       );
-      await setEtapa("musicas_ama");
+      await setEtapa("bairro");
       break;
     }
 
     case "ano_nascimento": {
       const m = texto.replace(/\D/g, "");
       let ano = 0;
-      if (m.length === 4) {
-        ano = parseInt(m, 10);
-      } else if (m.length === 2) {
+      if (m.length === 4) ano = parseInt(m, 10);
+      else if (m.length === 2) {
         const a = parseInt(m, 10);
         ano = a <= 25 ? 2000 + a : 1900 + a;
       }
@@ -1037,269 +1047,297 @@ Deno.serve(async (req: Request) => {
           radioId,
           "Só o ano mesmo, com 4 números, tipo 1990. Qual ano você nasceu?",
         );
-        break; // continua em ano_nascimento, insistindo
+        break;
       }
       const iso = `${ano}-01-01`;
       const idade = anoAtual - ano;
-      const { data: faixa } = await db
-        .from("faixas_etarias")
-        .select("id")
-        .lte("idade_min", idade)
-        .or(`idade_max.gte.${idade},idade_max.is.null`)
-        .order("id")
-        .limit(1)
-        .maybeSingle();
-      await db
-        .from("ouvintes")
-        .update({ data_nascimento: iso, idade, faixa_etaria: faixa?.id ?? null })
-        .eq("id", ouvinteId);
+      const { data: faixa } = await db.from("faixas_etarias").select("id")
+        .lte("idade_min", idade).or(`idade_max.gte.${idade},idade_max.is.null`)
+        .order("id").limit(1).maybeSingle();
+      await db.from("ouvintes").update({
+        data_nascimento: iso,
+        idade,
+        faixa_etaria: faixa?.id ?? null,
+      }).eq("id", ouvinteId);
       await db.from("conversas").update({ contexto: null }).eq("id", conversaId);
       await reply(
         phone,
         conversaId,
         radioId,
-        "Show! Quais músicas você mais ama ouvir? Pode mandar várias.",
+        `Ótimo, ${primeiroNome}! Me passa o bairro onde você mora?`,
       );
-      await setEtapa("musicas_ama");
+      await setEtapa("bairro");
       break;
     }
 
-    case "musicas_ama": {
-      const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
+    case "bairro": {
+      let bairroFinal = titleCasePtBr(texto);
+      let zona = "Outras";
+      let cidade: string | null = null;
+      const ia = await interpretarBairro(texto);
+      if (ia && ia.bairro && ia.zona && ia.zona !== "Outras") {
+        bairroFinal = ia.bairro;
+        zona = ia.zona;
+      } else {
+        const alvo = normalizarSemAcento(texto);
+        const { data: seeds } = await db.from("bairros_zonas").select(
+          "bairro, zona",
+        );
+        const achou = (seeds ?? []).find(
+          (b) => normalizarSemAcento(b.bairro as string) === alvo,
+        );
+        if (achou) {
+          zona = achou.zona as string;
+          if (ia?.bairro) bairroFinal = ia.bairro;
+        } else {
+          const c = await resolverGrandeSP(texto);
+          if (c) {
+            zona = c;
+            cidade = c;
+            bairroFinal = c;
+          }
+        }
+      }
+      const upd: Record<string, unknown> = { bairro: bairroFinal, zona };
+      if (cidade) upd.cidade = cidade;
+      await db.from("ouvintes").update(upd).eq("id", ouvinteId);
+      await db.from("conversas").update({
+        contexto: { ultimo: { etapa: "bairro" } },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, "Show! Quer pedir uma música?");
+      await setEtapa("pedido_musica");
+      break;
+    }
+
+    case "pedido_musica": {
+      const chave = normalizarSemAcento(texto);
+      if (NEGATIVAS.has(chave)) {
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          `Tranquilo! Tem alguma música que toca aqui na ${RADIO_LABEL} que você não gosta?`,
+        );
+        await setEtapa("musicas_rejeita");
+        break;
+      }
+      if (AFIRMATIVAS.has(chave)) {
+        await reply(phone, conversaId, radioId, "Boa! Qual música você quer pedir?");
+        await setEtapa("pedido_musica_nome");
+        break;
+      }
       const { pendentes, ids } = await processarLista(
         radioId,
         ouvinteId,
         "ama",
         texto,
       );
-      const ultimo = { etapa: "musicas_ama", ids, sentimento: "ama" };
-      if (pendentes.length > 0) {
-        await db
-          .from("conversas")
-          .update({
-            contexto: {
-              ...ctx,
-              fila: pendentes,
-              sentimento: "ama",
-              proxima: "musicas_rejeita",
-              ultimo,
-            },
-          })
-          .eq("id", conversaId);
-        await reply(
-          phone,
-          conversaId,
+      const idsArt = await gravarPendentesComoArtista(
+        radioId,
+        ouvinteId,
+        "ama",
+        pendentes,
+      );
+      await db.from("conversas").update({
+        contexto: { ultimo: { etapa: "musicas_ama", ids: [...ids, ...idsArt] } },
+      }).eq("id", conversaId);
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        `Anotado! Tem alguma música que toca aqui na ${RADIO_LABEL} que você não gosta?`,
+      );
+      await setEtapa("musicas_rejeita");
+      break;
+    }
+
+    case "pedido_musica_nome": {
+      const chave = normalizarSemAcento(texto);
+      if (!NEGATIVAS.has(chave)) {
+        const { pendentes, ids } = await processarLista(
           radioId,
-          `Boa! E qual música de ${pendentes[0]} você mais curte?`,
+          ouvinteId,
+          "ama",
+          texto,
         );
-        await setEtapa("musica_pendente");
-      } else {
-        await db
-          .from("conversas")
-          .update({ contexto: { ...ctx, ultimo } })
-          .eq("id", conversaId);
-        await reply(
-          phone,
-          conversaId,
+        const idsArt = await gravarPendentesComoArtista(
           radioId,
-          "E tem alguma música que você não gosta de jeito nenhum?",
+          ouvinteId,
+          "ama",
+          pendentes,
         );
-        await setEtapa("musicas_rejeita");
+        await db.from("conversas").update({
+          contexto: {
+            ultimo: { etapa: "musicas_ama", ids: [...ids, ...idsArt] },
+          },
+        }).eq("id", conversaId);
       }
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        `Show! Tem alguma música que toca aqui na ${RADIO_LABEL} que você não gosta?`,
+      );
+      await setEtapa("musicas_rejeita");
       break;
     }
 
     case "musicas_rejeita": {
-      const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
-      const { pendentes, ids } = await processarLista(
-        radioId,
-        ouvinteId,
-        "rejeita",
-        texto,
-      );
-      const ultimo = { etapa: "musicas_rejeita", ids, sentimento: "rejeita" };
-      if (pendentes.length > 0) {
-        await db
-          .from("conversas")
-          .update({
-            contexto: {
-              ...ctx,
-              fila: pendentes,
-              sentimento: "rejeita",
-              proxima: "outras_radios",
-              ultimo,
-            },
-          })
-          .eq("id", conversaId);
-        await reply(
-          phone,
-          conversaId,
+      const chave = normalizarSemAcento(texto);
+      if (!NEGATIVAS.has(chave)) {
+        const { pendentes, ids } = await processarLista(
           radioId,
-          `Entendi! E qual música de ${pendentes[0]} te incomoda mais?`,
+          ouvinteId,
+          "rejeita",
+          texto,
         );
-        await setEtapa("musica_pendente");
-      } else {
-        await db
-          .from("conversas")
-          .update({ contexto: { ...ctx, ultimo } })
-          .eq("id", conversaId);
-        await reply(
-          phone,
-          conversaId,
+        const idsArt = await gravarPendentesComoArtista(
           radioId,
-          "Última pergunta: além da nossa, quais outras rádios você costuma escutar?",
+          ouvinteId,
+          "rejeita",
+          pendentes,
         );
-        await setEtapa("outras_radios");
-      }
-      break;
-    }
-
-    case "musica_pendente": {
-      const ctx = (conversa.contexto as {
-        fila?: string[];
-        sentimento?: "ama" | "rejeita";
-        proxima?: string;
-      } | null) ?? {};
-      const fila = ctx.fila ?? [];
-      const sentimento = ctx.sentimento ?? "ama";
-      const artista = fila[0];
-
-      if (!artista) {
-        // Sem fila valida: segue pro fluxo normal.
-        await db.from("conversas").update({ contexto: null }).eq(
-          "id",
-          conversaId,
-        );
-        await reply(
-          phone,
-          conversaId,
-          radioId,
-          "Última pergunta: além da nossa, quais outras rádios você costuma escutar?",
-        );
-        await setEtapa("outras_radios");
-        break;
-      }
-
-      // Catalogo gratuito primeiro; Gemini so se nao achar.
-      const cat = await buscarMusicaCatalogo(`${artista} ${texto}`);
-      const r = cat ? null : await interpretarMusicaDoArtista(texto, artista);
-      const titulo = cat?.titulo ?? r?.musica ?? texto;
-      const id = await gravarMusica(
-        radioId,
-        ouvinteId,
-        sentimento,
-        artista,
-        titulo,
-        texto,
-      );
-      const ultimo = {
-        etapa: "musica_pendente",
-        ids: id ? [id] : [],
-        sentimento,
-      };
-
-      // Monta complemento com sugestoes so se a IA ficou em duvida.
-      let extra = "";
-      if (
-        r && (r.confianca ?? 0) < 0.6 && r.sugestoes && r.sugestoes.length > 0
-      ) {
-        extra = ` Anotei "${titulo}". Se eu errei, de ${artista} também tocam: ${
-          r.sugestoes.slice(0, 2).join(", ")
-        }.`;
-      }
-
-      fila.shift();
-
-      if (fila.length > 0) {
-        await db
-          .from("conversas")
-          .update({
-            contexto: { ...ctx, fila, sentimento, proxima: ctx.proxima, ultimo },
-          })
-          .eq("id", conversaId);
-        await reply(
-          phone,
-          conversaId,
-          radioId,
-          `Show!${extra} E de ${fila[0]}, qual música?`,
-        );
-        // permanece em musica_pendente
-      } else {
-        // Fim da fila: limpa fila/proxima mas preserva ultimo (pra correcao).
-        await db.from("conversas").update({ contexto: { ultimo } }).eq(
-          "id",
-          conversaId,
-        );
-        if (ctx.proxima === "musicas_rejeita") {
-          await reply(
-            phone,
-            conversaId,
-            radioId,
-            `Show!${extra} E tem alguma música que você não gosta de jeito nenhum?`,
-          );
-          await setEtapa("musicas_rejeita");
-        } else {
-          await reply(
-            phone,
-            conversaId,
-            radioId,
-            `Show!${extra} Última pergunta: além da nossa, quais outras rádios você costuma escutar?`,
-          );
-          await setEtapa("outras_radios");
-        }
-      }
-      break;
-    }
-
-    case "outras_radios": {
-      // Canoniza cada radio pela tabela de apelidos (deterministico, sem IA).
-      const ids: string[] = [];
-      for (const item of splitLista(texto)) {
-        const nomeCanonico = await resolverRadio(item);
-        const { data } = await db.from("radios_concorrentes").insert({
-          radio_id: radioId,
-          ouvinte_id: ouvinteId,
-          nome_radio: item,
-          nome_canonico: nomeCanonico,
-        }).select("id").single();
-        if (data?.id) ids.push(data.id as string);
-      }
-      {
-        const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
         await db.from("conversas").update({
-          contexto: { ...ctx, ultimo: { etapa: "outras_radios", ids } },
+          contexto: {
+            ultimo: { etapa: "musicas_rejeita", ids: [...ids, ...idsArt] },
+          },
         }).eq("id", conversaId);
       }
-      await db
-        .from("ouvintes")
-        .update({ participacoes: (ouvinte.participacoes ?? 0) + 1 })
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        "Entendi! Qual é o estilo musical que você mais gosta?",
+      );
+      await setEtapa("estilo_musical");
+      break;
+    }
+
+    case "estilo_musical": {
+      await db.from("ouvintes").update({ estilo_musical: titleCasePtBr(texto) })
         .eq("id", ouvinteId);
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        "Boa! Quando está tocando uma música que você não curte muito, você muda pra qual rádio?",
+      );
+      await setEtapa("radio_troca");
+      break;
+    }
+
+    case "radio_troca": {
+      const chave = normalizarSemAcento(texto);
+      if (!NEGATIVAS.has(chave)) {
+        for (const item of splitLista(texto)) {
+          const nomeCanonico = await resolverRadio(item);
+          await db.from("radios_concorrentes").insert({
+            radio_id: radioId,
+            ouvinte_id: ouvinteId,
+            nome_radio: item,
+            nome_canonico: nomeCanonico,
+          });
+        }
+      }
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        `Show! Tem algum programa ou locutor aqui na ${RADIO_LABEL} que você mais gosta?`,
+      );
+      await setEtapa("programa_locutor");
+      break;
+    }
+
+    case "programa_locutor": {
+      const chave = normalizarSemAcento(texto);
+      if (!NEGATIVAS.has(chave)) {
+        await db.from("ouvintes").update({
+          programa_locutor: titleCasePtBr(texto),
+        }).eq("id", ouvinteId);
+      }
+      await db.from("ouvintes").update({
+        participacoes: (ouvinte.participacoes ?? 0) + 1,
+      }).eq("id", ouvinteId);
       await setEtapa("concluido");
       await reply(
         phone,
         conversaId,
         radioId,
-        `Prontinho! Obrigado por participar com a gente${
-          primeiroNome ? ", " + primeiroNome : ""
-        }. Fica ligado na ${radioNome}!`,
+        `Muito obrigado por participar com a gente aqui na ${RADIO_LABEL}, ${primeiroNome}, e continue com a gente! Clique no link e siga a gente no Instagram: ${INSTAGRAM_URL}`,
+      );
+      break;
+    }
+
+    case "retorno": {
+      // Refaz o cadastro SO se a pessoa declarar um nome novo.
+      const nomeNovo = extrairNomeDeclarado(texto);
+      if (nomeNovo) {
+        await db.from("ouvintes").update({ nome: nomeNovo }).eq(
+          "id",
+          ouvinteId,
+        );
+        await db.from("conversas").update({
+          contexto: { ultimo: { etapa: "nome" } },
+        }).eq("id", conversaId);
+        const pn = nomeNovo.split(/\s+/)[0] || nomeNovo;
+        if (nomeNovo.split(/\s+/).length < 2) {
+          await reply(
+            phone,
+            conversaId,
+            radioId,
+            `Show, ${pn}! Pode me passar seu nome completo, com sobrenome?`,
+          );
+          await setEtapa("sobrenome");
+        } else {
+          await reply(
+            phone,
+            conversaId,
+            radioId,
+            `Muito legal, ${pn}! Pode me passar sua data de nascimento, no formato dia/mês/ano?`,
+          );
+          await setEtapa("aniversario");
+        }
+        break;
+      }
+      // Sem nome novo: trata como pedido de musica, com frases fixas.
+      const chave = normalizarSemAcento(texto);
+      if (!NEGATIVAS.has(chave) && chave.length > 1) {
+        const { pendentes, ids } = await processarLista(
+          radioId,
+          ouvinteId,
+          "ama",
+          texto,
+        );
+        await gravarPendentesComoArtista(radioId, ouvinteId, "ama", pendentes);
+        if (ids.length || pendentes.length) {
+          await reply(
+            phone,
+            conversaId,
+            radioId,
+            `Anotei seu pedido, ${primeiroNome}! Quer pedir mais alguma?`,
+          );
+          break;
+        }
+      }
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        `Tô por aqui, ${primeiroNome}! Se quiser pedir uma música é só mandar o nome.`,
       );
       break;
     }
 
     case "concluido":
     default: {
-      // Ouvinte que volta: reconhece, incrementa participacoes, agradece curto.
-      await db
-        .from("ouvintes")
-        .update({ participacoes: (ouvinte.participacoes ?? 0) + 1 })
-        .eq("id", ouvinteId);
       await reply(
         phone,
         conversaId,
         radioId,
         ouvinte.nome
-          ? `Que bom te ver de novo, ${primeiroNome}! Obrigado por falar com a ${radioNome}.`
-          : `Obrigado por falar com a ${radioNome}!`,
+          ? `Que bom te ver de novo, ${primeiroNome}! Se quiser pedir uma música é só mandar.`
+          : `Obrigado por falar com a ${RADIO_LABEL}!`,
       );
       break;
     }
