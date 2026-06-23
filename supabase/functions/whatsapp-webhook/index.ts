@@ -1,7 +1,7 @@
 // OuvintePro - webhook "ao receber" da Z-API.
 // Recebe mensagens do WhatsApp da radio, roda a maquina de estados de cadastro,
 // grava nas tabelas e responde a proxima pergunta pela Z-API.
-// Tom: simpatico, direto e transparente. Sem fingir ser humano, sem disparo em massa.
+// Tom: simpatico, direto e transparente. A IA so atua nos bastidores.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -11,12 +11,11 @@ const ZAPI_INSTANCE_ID = Deno.env.get("ZAPI_INSTANCE_ID")!;
 const ZAPI_TOKEN = Deno.env.get("ZAPI_TOKEN")!;
 const ZAPI_CLIENT_TOKEN = Deno.env.get("ZAPI_CLIENT_TOKEN")!;
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
-const GEMINI_MODEL = "gemini-2.5-flash-lite"; // se der 404 algum dia, tentar "gemini-flash-lite-latest"
+const GEMINI_MODEL = "gemini-2.5-flash-lite";
 
 const db = createClient(SUPABASE_URL, SERVICE_ROLE);
 
 // Chama o Gemini esperando JSON puro de volta. Retorna null em qualquer falha.
-// Da uma segunda tentativa em falha transitoria (429 ou 5xx) antes de desistir.
 async function geminiJSON<T>(prompt: string, tentativas = 2): Promise<T | null> {
   if (!GEMINI_API_KEY) return null;
   for (let i = 0; i < tentativas; i++) {
@@ -55,6 +54,38 @@ async function geminiJSON<T>(prompt: string, tentativas = 2): Promise<T | null> 
       return null;
     }
   }
+  return null;
+}
+
+// Busca musica/artista em catalogo gratuito (sem chave): iTunes -> Deezer. 1 resultado.
+async function buscarMusicaCatalogo(
+  termo: string,
+): Promise<{ artista: string; titulo: string } | null> {
+  const q = termo.trim();
+  if (!q) return null;
+  try {
+    const u =
+      `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&country=BR&media=music&entity=song&limit=1&lang=pt_br`;
+    const r = await fetch(u);
+    if (r.ok) {
+      const j = await r.json();
+      const hit = j?.results?.[0];
+      if (hit?.artistName && hit?.trackName) {
+        return { artista: hit.artistName, titulo: hit.trackName };
+      }
+    }
+  } catch (_) { /* ignora */ }
+  try {
+    const u = `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=1`;
+    const r = await fetch(u);
+    if (r.ok) {
+      const j = await r.json();
+      const hit = j?.data?.[0];
+      if (hit?.artist?.name && hit?.title) {
+        return { artista: hit.artist.name, titulo: hit.title };
+      }
+    }
+  } catch (_) { /* ignora */ }
   return null;
 }
 
@@ -100,12 +131,9 @@ async function buscarCandidatos(
 // Detecta se o termo e um ARTISTA e devolve ate 4 musicas dele (iTunes -> Deezer).
 async function buscarArtistaeMusicas(
   termo: string,
-): Promise<
-  { artista: string; faixas: { artista: string; titulo: string }[] } | null
-> {
+): Promise<{ artista: string; faixas: { artista: string; titulo: string }[] } | null> {
   const q = termo.trim();
   if (!q) return null;
-  // iTunes: acha o artista e depois as musicas dele.
   try {
     const ua =
       `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&country=BR&entity=musicArtist&limit=1&lang=pt_br`;
@@ -122,20 +150,17 @@ async function buscarArtistaeMusicas(
           const faixas: { artista: string; titulo: string }[] = [];
           for (const it of (jl?.results ?? [])) {
             if (it?.wrapperType === "track" && it?.trackName) {
-              const dup = faixas.some((f) =>
-                normalizarSemAcento(f.titulo) === normalizarSemAcento(it.trackName)
+              const dup = faixas.some(
+                (f) => normalizarSemAcento(f.titulo) === normalizarSemAcento(it.trackName),
               );
               if (!dup) faixas.push({ artista: art.artistName, titulo: it.trackName });
             }
           }
-          if (faixas.length) {
-            return { artista: art.artistName, faixas: faixas.slice(0, 4) };
-          }
+          if (faixas.length) return { artista: art.artistName, faixas: faixas.slice(0, 4) };
         }
       }
     }
   } catch (_) { /* ignora */ }
-  // Deezer fallback.
   try {
     const ua = `https://api.deezer.com/search/artist?q=${encodeURIComponent(q)}&limit=1`;
     const ra = await fetch(ua);
@@ -149,15 +174,13 @@ async function buscarArtistaeMusicas(
           const faixas: { artista: string; titulo: string }[] = [];
           for (const it of (jt?.data ?? [])) {
             if (it?.title) {
-              const dup = faixas.some((f) =>
-                normalizarSemAcento(f.titulo) === normalizarSemAcento(it.title)
+              const dup = faixas.some(
+                (f) => normalizarSemAcento(f.titulo) === normalizarSemAcento(it.title),
               );
               if (!dup) faixas.push({ artista: art.name, titulo: it.title });
             }
           }
-          if (faixas.length) {
-            return { artista: art.name, faixas: faixas.slice(0, 4) };
-          }
+          if (faixas.length) return { artista: art.name, faixas: faixas.slice(0, 4) };
         }
       }
     }
@@ -186,7 +209,6 @@ async function resolverRadio(texto: string): Promise<string> {
     n,
   ).maybeSingle();
   if (data?.nome_canonico) return data.nome_canonico as string;
-  // Fallback: title case do que o ouvinte escreveu (agrupa por esse texto).
   return texto.trim().replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
@@ -195,7 +217,6 @@ async function interpretarData(texto: string): Promise<string | null> {
   const prompt = `
 O ouvinte respondeu a data de nascimento em texto livre, que pode estar por extenso, abreviada, com ou sem separadores, ou com erros.
 Converta para o formato ISO AAAA-MM-DD. Se vier so o ano, use 01-01 para dia e mes. Se for impossivel identificar uma data, retorne null.
-Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Responda APENAS com JSON, sem texto fora do JSON: {"iso":"AAAA-MM-DD ou null"}
 Resposta do ouvinte: """${texto}"""
 `;
@@ -213,7 +234,6 @@ O ouvinte informou em qual bairro da cidade de Sao Paulo (capital) ele esta, em 
 Identifique o bairro na forma canonica e a zona da cidade: uma de "Norte", "Sul", "Leste", "Oeste", "Centro".
 Conheca apelidos e formas curtas (ex.: "Sao Miguel" e Sao Miguel Paulista, na Zona Leste).
 Se nao reconhecer como bairro de Sao Paulo capital, use zona "Outras".
-Sempre devolva os nomes na grafia oficial com acentuação correta do português, por exemplo Marília Mendonça, Evidências, São Paulo, Tatuapé.
 Nao invente. Responda APENAS com JSON, sem texto fora do JSON:
 {"bairro":"Forma Canonica","zona":"Norte|Sul|Leste|Oeste|Centro|Outras"}
 Resposta do ouvinte: """${texto}"""
@@ -237,7 +257,6 @@ async function gravarMusica(
     artista,
     titulo,
     texto_original: textoOriginal,
-    // mantem a coluna "nome" preenchida pra compatibilidade: titulo, senao artista, senao cru
     nome: titulo ?? artista ?? textoOriginal,
   }).select("id").single();
   return (data?.id as string) ?? null;
@@ -250,7 +269,6 @@ function escolher(arr: string[]): string {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-// Variacoes pra nao repetir sempre a mesma frase.
 const FALLBACK_MIDIA = [
   "Recebi sua mensagem! Por aqui eu só consigo ler texto. Pode me escrever a resposta?",
   "Opa! Esse tipo de arquivo eu ainda não leio. Me manda por texto que eu sigo com você.",
@@ -259,7 +277,6 @@ const FALLBACK_MIDIA = [
 ];
 
 async function sendText(phone: string, message: string) {
-  // delayTyping (1-15s) faz a Z-API mostrar "Digitando..." antes de entregar.
   const delayTyping = Math.min(4, Math.max(2, Math.round(message.length / 60)));
   const url = `https://api.z-api.io/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}/send-text`;
   const res = await fetch(url, {
@@ -270,7 +287,6 @@ async function sendText(phone: string, message: string) {
     },
     body: JSON.stringify({ phone, message, delayTyping }),
   });
-  // Confere a resposta da Z-API e loga quando nao for 2xx (sem interromper o fluxo).
   if (!res.ok) {
     const corpo = await res.text().catch(() => "");
     console.error(
@@ -279,7 +295,6 @@ async function sendText(phone: string, message: string) {
   }
 }
 
-// Envia a resposta e grava a mensagem enviada.
 async function reply(
   phone: string,
   conversaId: string,
@@ -296,8 +311,7 @@ async function reply(
   });
 }
 
-// Separa itens por quebra de linha, virgula, ponto-e-virgula ou barra.
-// NUNCA por " e " (nao quebra "Edson e Hudson", "Vitor e Leo"). Max 5 itens.
+// Separa itens por quebra de linha, virgula, ponto-e-virgula ou barra. Max 5 itens.
 function splitLista(texto: string): string[] {
   return texto
     .split(/[\n,;/]+/)
@@ -306,7 +320,6 @@ function splitLista(texto: string): string[] {
     .slice(0, 5);
 }
 
-// Title case em portugues, mantendo particulas em minusculo (exceto na 1a palavra).
 const PARTICULAS = new Set([
   "de", "da", "do", "das", "dos", "e", "di", "du", "dal", "del", "della",
   "van", "von", "y",
@@ -323,7 +336,6 @@ function titleCasePtBr(texto: string): string {
     .join(" ");
 }
 
-// Remove prefixos comuns antes do nome ("meu nome e", "me chamo", "sou o"...).
 function limparPrefixoNome(texto: string): string {
   return texto
     .trim()
@@ -334,7 +346,6 @@ function limparPrefixoNome(texto: string): string {
     .trim();
 }
 
-// Mensagens que sao cumprimento/ruido e nunca devem ser gravadas como nome.
 const SAUDACOES_NAO_NOME = new Set([
   "oi", "ola", "alo", "opa", "salve", "hey", "hi", "hello",
   "bom dia", "boa tarde", "boa noite", "boa madrugada",
@@ -346,7 +357,6 @@ const SAUDACOES_NAO_NOME = new Set([
   "oi tudo bem", "ola tudo bem", "oi bom dia", "quem e voce", "quem e",
 ]);
 
-// Remove uma saudacao no inicio da frase (oi, ola, opa, bom dia...) pra sobrar o nome.
 function removerSaudacaoInicial(texto: string): string {
   let t = texto.trim().replace(/^[\s,.!?-]+/, "");
   const padrao =
@@ -355,7 +365,6 @@ function removerSaudacaoInicial(texto: string): string {
   return t;
 }
 
-// Normaliza pra comparacao sem acento e sem caixa.
 function normalizarSemAcento(s: string): string {
   return s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
@@ -411,10 +420,7 @@ async function desfazerUltimo(
       );
       break;
     case "cidade":
-      await db.from("ouvintes").update({ cidade: null, estado: null }).eq(
-        "id",
-        ouvinteId,
-      );
+      await db.from("ouvintes").update({ cidade: null }).eq("id", ouvinteId);
       break;
     case "aniversario":
     case "ano_nascimento":
@@ -426,14 +432,8 @@ async function desfazerUltimo(
       break;
     case "musicas_ama":
     case "musicas_rejeita":
-    case "musica_pendente":
       if (ultimo.ids?.length) {
         await db.from("musicas").delete().in("id", ultimo.ids);
-      }
-      break;
-    case "outras_radios":
-      if (ultimo.ids?.length) {
-        await db.from("radios_concorrentes").delete().in("id", ultimo.ids);
       }
       break;
   }
@@ -459,8 +459,6 @@ function perguntaDaEtapa(
       return "Em qual cidade você mora?";
     case "bairro":
       return "E em qual bairro?";
-    case "outros_estilos":
-      return "E quais outros estilos você gosta de ouvir?";
     case "pedido_musica":
       return "Quer pedir uma música?";
     case "pedido_musica_nome":
@@ -469,6 +467,8 @@ function perguntaDaEtapa(
       return `Tem alguma música que toca aqui na ${RADIO_LABEL} que você não gosta?`;
     case "estilo_musical":
       return "Qual é o estilo musical que você mais gosta?";
+    case "outros_estilos":
+      return "E quais outros estilos você gosta de ouvir?";
     case "radio_troca":
       return "Quando toca uma música que você não curte, você muda pra qual rádio?";
     case "programa_locutor":
@@ -483,7 +483,6 @@ type Intencao = {
   tipo_correcao: "gosto" | "nao_gosto" | null;
 };
 
-// Classifica se a mensagem do ouvinte e resposta, correcao ou conversa.
 async function classificarIntencao(
   pergunta: string,
   texto: string,
@@ -493,8 +492,8 @@ Você é o cérebro de um atendimento de rádio por WhatsApp. O bot acabou de pe
 O ouvinte respondeu: """${texto}""".
 Classifique a mensagem do ouvinte em uma de três intenções:
 - "resposta": ele está respondendo a pergunta normalmente.
-- "correcao": ele está dizendo que o bot entendeu errado, ou corrigindo algo anterior (ex.: "não é isso", "você entendeu errado", "na verdade eu gosto", "é Tatuapé, não Santana").
-- "conversa": ele fez uma pergunta, comentário ou brincadeira que não é resposta direta (ex.: "por que você quer saber?", "kkkk", "quem é você?").
+- "correcao": ele está dizendo que o bot entendeu errado, ou corrigindo algo anterior.
+- "conversa": ele fez uma pergunta, comentário ou brincadeira que não é resposta direta.
 Se a mensagem puder ser uma resposta válida à pergunta, prefira "resposta".
 Se for "correcao" sobre gostar ou não de música, defina tipo_correcao como "gosto" ou "nao_gosto"; caso contrário, null.
 Responda APENAS com JSON, sem texto fora do JSON:
@@ -503,11 +502,31 @@ Responda APENAS com JSON, sem texto fora do JSON:
   return await geminiJSON<Intencao>(prompt);
 }
 
+// No retorno (ouvinte ja cadastrado), separa pedido de musica de conversa solta.
+type IntencaoRetorno = {
+  intencao: "pedido_musica" | "conversa" | "despedida";
+  termo_musica: string | null;
+};
+
+async function classificarRetorno(texto: string): Promise<IntencaoRetorno | null> {
+  const prompt = `
+Você é o cérebro da Adriana, atendente de uma rádio (${RADIO_LABEL}) no WhatsApp.
+O ouvinte já é cadastrado e mandou esta mensagem: """${texto}""".
+Classifique a intenção dele em uma destas:
+- "pedido_musica": ele quer pedir/ouvir uma música específica, citou nome de música, cantor ou banda. Nesse caso, extraia o termo da música/artista em "termo_musica".
+- "conversa": qualquer outra coisa que NÃO seja pedir música (perguntar sobre prêmio, promoção, sorteio, falar do dia, fazer uma pergunta, reclamar, elogiar, brincar). Nesse caso "termo_musica" é null.
+- "despedida": ele está se despedindo ou dizendo que não quer nada agora. "termo_musica" é null.
+Atenção: pedir prêmio, promoção ou sorteio NÃO é pedido de música, é "conversa".
+Responda APENAS com JSON, sem texto fora do JSON:
+{"intencao":"pedido_musica|conversa|despedida","termo_musica":"texto ou null"}
+`;
+  return await geminiJSON<IntencaoRetorno>(prompt);
+}
+
 // Identidade fixa da Nativa FM.
 const RADIO_LABEL = "Nativa FM";
 const INSTAGRAM_URL = "https://www.instagram.com/nativa/";
 
-// Respostas que significam "nao tem / pular".
 const NEGATIVAS = new Set([
   "nao", "n", "nao tem", "nao tenho", "nenhuma", "nenhum", "nada", "nem uma",
   "nem um", "nao quero", "agora nao", "depois", "deixa", "deixa pra la",
@@ -515,13 +534,24 @@ const NEGATIVAS = new Set([
   "nao mudo", "fico aqui", "fico na nativa",
 ]);
 
-// Respostas que significam "sim" (sem dizer a musica).
 const AFIRMATIVAS = new Set([
   "sim", "s", "quero", "quero sim", "claro", "pode ser", "bora", "aceito",
   "vai", "com certeza", "uhum", "aham", "pode", "manda", "quero pedir",
 ]);
 
-// Cidade da Grande SP (fora da capital). Retorna o nome canonico ou null.
+const DESPEDIDAS = new Set([
+  "tchau", "falou", "flw", "vlw", "valeu", "obrigado", "obrigada", "obg",
+  "ate mais", "ate logo", "ate", "por enquanto so", "so isso", "era so isso",
+  "nada nao", "nada", "to de boa", "de boa",
+]);
+
+// Frases seguras de desvio quando o ouvinte foge do roteiro no retorno.
+const DESVIO_RETORNO = [
+  "As promoções a gente anuncia direto na ${RADIO}, fica ligado lá! Por aqui eu te ajudo a pedir música. Qual você quer ouvir?",
+  "Quem cuida de prêmio e sorteio é a equipe da ${RADIO} no ar! Aqui comigo você pode pedir uma música. Qual vai ser?",
+  "Isso é com a equipe da ${RADIO} no ar, hein! Mas se quiser pedir uma música, é só me mandar o nome.",
+];
+
 async function resolverGrandeSP(texto: string): Promise<string | null> {
   const alvo = normalizarSemAcento(texto);
   const { data } = await db.from("cidades_grande_sp").select(
@@ -533,7 +563,6 @@ async function resolverGrandeSP(texto: string): Promise<string | null> {
   return achou ? (achou.nome as string) : null;
 }
 
-// Detecta declaracao de nome novo ("meu nome e X", "me chamo X", "sou o X").
 function extrairNomeDeclarado(texto: string): string | null {
   const m = texto.trim().match(
     /(?:meu nome (?:é|eh|e)|me chamo|pode chamar de|sou o|sou a|eu sou)\s+(.{2,})/i,
@@ -562,15 +591,12 @@ Deno.serve(async (req: Request) => {
   const audioUrl = (body.audio as { audioUrl?: string } | undefined)?.audioUrl;
   const isAudio = !!audioUrl;
   const isTexto = texto.length > 0;
-  // Qualquer outra midia (imagem, video, documento, figurinha, localizacao, contato).
   const isMidia = !isAudio && !isTexto;
 
-  // 1. Ignora apenas: mensagens proprias, de grupo, reacoes e respostas de status.
   if (fromMe || isGroup || isStatusReply || isReaction || !phone) {
     return new Response("ok", { status: 200 });
   }
 
-  // 1b. Idempotencia: ignora entrega duplicada da Z-API (mesmo messageId).
   const messageId = typeof body.messageId === "string" ? body.messageId : "";
   if (messageId) {
     const { error } = await db
@@ -578,14 +604,12 @@ Deno.serve(async (req: Request) => {
       .insert({ message_id: messageId });
     if (error) {
       if (error.code === "23505") {
-        // entrega duplicada: ja processamos essa mensagem, ignora.
         return new Response("ok", { status: 200 });
       }
       console.error(`dedup erro: ${error.code} ${error.message}`);
     }
   }
 
-  // 2. Identifica a radio pelo instanceId (fallback: unica radio ativa na v1).
   let { data: radio } = await db
     .from("radios")
     .select("id, nome")
@@ -605,7 +629,6 @@ Deno.serve(async (req: Request) => {
   const radioId = radio.id as string;
   const radioNome = radio.nome as string;
 
-  // 3. Acha ou cria o ouvinte. DDD = 2 digitos apos o 55 (formato 55DD9........).
   const ddd = phone.startsWith("55") ? phone.slice(2, 4) : phone.slice(0, 2);
   let { data: ouvinte } = await db
     .from("ouvintes")
@@ -628,11 +651,9 @@ Deno.serve(async (req: Request) => {
     .update({ ultimo_contato_em: new Date().toISOString() })
     .eq("id", ouvinteId);
 
-  // Fala usa so o primeiro nome (informal); o banco guarda o nome completo.
   const primeiroNome = (ouvinte.nome ?? "").trim().split(/\s+/)[0] ||
     (ouvinte.nome ?? "");
 
-  // 4. Janela de sessao: acha a conversa mais recente ANTES de atualizar atividade.
   const { data: recente } = await db
     .from("conversas")
     .select("*")
@@ -647,16 +668,13 @@ Deno.serve(async (req: Request) => {
     : Infinity;
 
   let conversa = aberta;
-  // Continua a conversa aberta so se a ultima atividade foi dentro da janela.
   if (!aberta || intervaloMs > JANELA_MS) {
-    // Nova rodada. Encerra conversa aberta antiga parada, se houver.
     if (aberta) {
       await db
         .from("conversas")
         .update({ status: "encerrada", encerrada_em: new Date().toISOString() })
         .eq("id", aberta.id);
     }
-    // Ja tem nome: reinicio (pula o nome). Sem nome: inicio (pede o nome).
     const etapaInicial = ouvinte.nome ? "reinicio" : "inicio";
     const { data: nova } = await db
       .from("conversas")
@@ -672,7 +690,6 @@ Deno.serve(async (req: Request) => {
     .update({ ultima_atividade_em: new Date().toISOString() })
     .eq("id", conversaId);
 
-  // Grava a mensagem recebida.
   await db.from("mensagens").insert({
     conversa_id: conversaId,
     radio_id: radioId,
@@ -682,7 +699,6 @@ Deno.serve(async (req: Request) => {
     audio_url: audioUrl ?? null,
   });
 
-  // 7. Audio na v1: registra e pede para digitar. // TODO: transcrever com Gemini na fase 2.
   if (isAudio) {
     await reply(
       phone,
@@ -693,18 +709,106 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { status: 200 });
   }
 
-  // Qualquer outra midia: ja registrada como "outro", responde pedindo texto.
   if (isMidia) {
     await reply(phone, conversaId, radioId, escolher(FALLBACK_MIDIA));
     return new Response("ok", { status: 200 });
   }
 
-  // 5. Maquina de estados pela coluna etapa.
   const etapa = conversa.etapa as string;
   const setEtapa = (e: string) =>
     db.from("conversas").update({ etapa: e }).eq("id", conversaId);
 
-  // 5b. Camada de intencao: entende se a mensagem e resposta, correcao ou conversa.
+  async function avancarPara(proxima: string) {
+    if (proxima === "retorno") {
+      await db.from("conversas").update({ contexto: null }).eq("id", conversaId);
+      await setEtapa("retorno");
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        `Anotei seu pedido, ${primeiroNome}! Quer pedir mais alguma?`,
+      );
+      return;
+    }
+    await setEtapa(proxima);
+    await reply(
+      phone,
+      conversaId,
+      radioId,
+      perguntaDaEtapa(proxima, ouvinte, ddd, radioNome),
+    );
+  }
+
+  async function iniciarMusica(
+    termo: string,
+    sentimento: "ama" | "rejeita",
+    proxima: string,
+    opts: { jaPediuArtista?: boolean; modoArtista?: boolean } = {},
+  ) {
+    const palavras = termo.trim().split(/\s+/).length;
+
+    if (opts.modoArtista || (palavras <= 3 && !opts.jaPediuArtista)) {
+      const art = await buscarArtistaeMusicas(termo);
+      if (art && art.faixas.length && (opts.modoArtista || pareceArtista(termo, art.artista))) {
+        const linhas = art.faixas.map((c, i) => `${i + 1}. ${c.artista} - ${c.titulo}`)
+          .join("\n");
+        await db.from("conversas").update({
+          contexto: { musica: { sentimento, proxima, candidatos: art.faixas, termo, artista: art.artista, tentativas: 0 } },
+        }).eq("id", conversaId);
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          `Achei o cantor ${art.artista}! Qual música dele você quer? Responde com o número:\n${linhas}\n\nSe não for nenhuma, me manda o nome da música.`,
+        );
+        await setEtapa("musica_escolha");
+        return;
+      }
+    }
+
+    const cands = await buscarCandidatos(termo);
+    if (cands.length === 0) {
+      if (!opts.jaPediuArtista) {
+        await db.from("conversas").update({
+          contexto: { musica: { sentimento, proxima, termo, tentativas: 0 } },
+        }).eq("id", conversaId);
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          "Hmm, não achei essa música. Me manda o cantor e a música juntos (ex: Daniel, Dia Que Eu Saí de Casa).",
+        );
+        await setEtapa("musica_artista");
+        return;
+      }
+      await reply(phone, conversaId, radioId, "Beleza, deixa essa de lado então.");
+      await avancarPara(proxima);
+      return;
+    }
+    if (cands.length === 1) {
+      const c = cands[0];
+      const id = await gravarMusica(radioId, ouvinteId, sentimento, c.artista, c.titulo, termo);
+      await db.from("conversas").update({
+        contexto: {
+          ultimo: { etapa: sentimento === "ama" ? "musicas_ama" : "musicas_rejeita", ids: id ? [id] : [] },
+        },
+      }).eq("id", conversaId);
+      await avancarPara(proxima);
+      return;
+    }
+    const linhas = cands.map((c, i) => `${i + 1}. ${c.artista} - ${c.titulo}`).join("\n");
+    await db.from("conversas").update({
+      contexto: { musica: { sentimento, proxima, candidatos: cands, termo, tentativas: 0 } },
+    }).eq("id", conversaId);
+    await reply(
+      phone,
+      conversaId,
+      radioId,
+      `Achei mais de uma com esse nome. Qual é a sua? Responde com o número:\n${linhas}\n\nSe não for nenhuma, me manda o cantor e a música.`,
+    );
+    await setEtapa("musica_escolha");
+  }
+
   const ETAPAS_RESPOSTA = new Set([
     "nome",
     "sobrenome",
@@ -743,7 +847,6 @@ Deno.serve(async (req: Request) => {
         | { etapa?: string; ids?: string[] }
         | undefined;
 
-      // Caso 1: trocar gosto/nao gosto da ultima musica.
       if (
         (intent.tipo_correcao === "gosto" ||
           intent.tipo_correcao === "nao_gosto") &&
@@ -765,7 +868,6 @@ Deno.serve(async (req: Request) => {
         return new Response("ok", { status: 200 });
       }
 
-      // Caso 2: correcao generica. Desfaz a ultima resposta e repergunta a etapa.
       if (ultimo?.etapa) {
         await desfazerUltimo(ouvinteId, ultimo);
         const novoCtx = { ...ctxAtual, ultimo: null };
@@ -784,144 +886,9 @@ Deno.serve(async (req: Request) => {
         return new Response("ok", { status: 200 });
       }
 
-      // Sem "ultimo" registrado: so repergunta a atual.
       await reply(phone, conversaId, radioId, `Vamos de novo: ${perguntaAtual}`);
       return new Response("ok", { status: 200 });
     }
-
-    // intencao "resposta" (ou classificador indisponivel): segue pro switch normal.
-  }
-
-  // Transita pra proxima etapa (ou encerra o pedido com agradecimento no retorno).
-  async function avancarPara(proxima: string) {
-    if (proxima === "retorno") {
-      await db.from("conversas").update({ contexto: null }).eq(
-        "id",
-        conversaId,
-      );
-      await setEtapa("retorno");
-      await reply(
-        phone,
-        conversaId,
-        radioId,
-        `Anotei seu pedido, ${primeiroNome}! Quer pedir mais alguma?`,
-      );
-      return;
-    }
-    await db.from("conversas").update({
-      contexto: { ultimo: { etapa: "transicao" } },
-    }).eq("id", conversaId);
-    await setEtapa(proxima);
-    await reply(
-      phone,
-      conversaId,
-      radioId,
-      perguntaDaEtapa(proxima, ouvinte, ddd, radioNome),
-    );
-  }
-
-  // Busca a musica. Caminho do cantor (oferece musicas dele) ou do titulo (escolha exata).
-  async function iniciarMusica(
-    termo: string,
-    sentimento: "ama" | "rejeita",
-    proxima: string,
-    opts: { jaPediuArtista?: boolean; modoArtista?: boolean } = {},
-  ) {
-    const palavras = termo.trim().split(/\s+/).length;
-
-    // 1) Caminho do CANTOR: termo curto que bate exatamente com um artista, ou refino forcado.
-    if (opts.modoArtista || (palavras <= 3 && !opts.jaPediuArtista)) {
-      const art = await buscarArtistaeMusicas(termo);
-      if (
-        art && art.faixas.length &&
-        (opts.modoArtista || pareceArtista(termo, art.artista))
-      ) {
-        const linhas = art.faixas.map((c, i) =>
-          `${i + 1}. ${c.artista} - ${c.titulo}`
-        ).join("\n");
-        await db.from("conversas").update({
-          contexto: {
-            musica: {
-              sentimento,
-              proxima,
-              candidatos: art.faixas,
-              termo,
-              artista: art.artista,
-              tentativas: 0,
-            },
-          },
-        }).eq("id", conversaId);
-        await reply(
-          phone,
-          conversaId,
-          radioId,
-          `Achei o cantor ${art.artista}! Qual música dele você quer? Responde com o número:\n${linhas}\n\nSe não for nenhuma, me manda o nome da música.`,
-        );
-        await setEtapa("musica_escolha");
-        return;
-      }
-    }
-
-    // 2) Caminho do TITULO.
-    const cands = await buscarCandidatos(termo);
-    if (cands.length === 0) {
-      if (!opts.jaPediuArtista) {
-        await db.from("conversas").update({
-          contexto: { musica: { sentimento, proxima, termo, tentativas: 0 } },
-        }).eq("id", conversaId);
-        await reply(
-          phone,
-          conversaId,
-          radioId,
-          "Hmm, não achei essa música. Me manda o cantor e a música juntos (ex: Daniel, Dia Que Eu Saí de Casa).",
-        );
-        await setEtapa("musica_artista");
-        return;
-      }
-      await reply(
-        phone,
-        conversaId,
-        radioId,
-        "Beleza, deixa essa de lado então.",
-      );
-      await avancarPara(proxima);
-      return;
-    }
-    if (cands.length === 1) {
-      const c = cands[0];
-      const id = await gravarMusica(
-        radioId,
-        ouvinteId,
-        sentimento,
-        c.artista,
-        c.titulo,
-        termo,
-      );
-      await db.from("conversas").update({
-        contexto: {
-          ultimo: {
-            etapa: sentimento === "ama" ? "musicas_ama" : "musicas_rejeita",
-            ids: id ? [id] : [],
-          },
-        },
-      }).eq("id", conversaId);
-      await avancarPara(proxima);
-      return;
-    }
-    const linhas = cands.map((c, i) => `${i + 1}. ${c.artista} - ${c.titulo}`)
-      .join("\n");
-    await db.from("conversas").update({
-      contexto: {
-        musica: { sentimento, proxima, candidatos: cands, termo, tentativas: 0 },
-      },
-    }).eq("id", conversaId);
-    await reply(
-      phone,
-      conversaId,
-      radioId,
-      `Achei mais de uma com esse nome. Qual é a sua? Responde com o número:\n${linhas}\n\nSe não for nenhuma, me manda o cantor e a música.`,
-    );
-    await setEtapa("musica_escolha");
   }
 
   switch (etapa) {
@@ -1025,23 +992,26 @@ Deno.serve(async (req: Request) => {
     }
 
     case "aniversario": {
-      // So dia/mes (duas partes, sem ano): pede so o ano. "27/10/95" NAO cai aqui.
-      if (/^\s*\d{1,2}\s*[\/\-.\s]\s*\d{1,2}\s*$/.test(texto)) {
-        await db.from("conversas").update({ contexto: null }).eq(
-          "id",
-          conversaId,
-        );
-        await reply(
-          phone,
-          conversaId,
-          radioId,
-          "Faltou o ano. Em que ano você nasceu? (ex: 1990)",
-        );
-        await setEtapa("ano_nascimento");
-        break;
-      }
       let iso = parseAniversario(texto);
-      if (!iso) iso = await interpretarData(texto);
+      if (!iso) {
+        if (
+          /\d{1,2}\s*[\/\-.\s]\s*\d{1,2}/.test(texto) && !/\d{4}/.test(texto)
+        ) {
+          await db.from("conversas").update({ contexto: null }).eq(
+            "id",
+            conversaId,
+          );
+          await reply(
+            phone,
+            conversaId,
+            radioId,
+            "Faltou o ano. Em que ano você nasceu? (ex: 1990)",
+          );
+          await setEtapa("ano_nascimento");
+          break;
+        }
+        iso = await interpretarData(texto);
+      }
       if (!iso) {
         const jaTentou =
           (conversa.contexto as { dataTentativa?: boolean } | null)
@@ -1151,9 +1121,10 @@ Deno.serve(async (req: Request) => {
         }
       }
       await db.from("ouvintes").update({ cidade }).eq("id", ouvinteId);
-      await db.from("conversas").update({
-        contexto: { loc: { tipo, zona } },
-      }).eq("id", conversaId);
+      await db.from("conversas").update({ contexto: { loc: { tipo, zona } } }).eq(
+        "id",
+        conversaId,
+      );
       await reply(phone, conversaId, radioId, "E em qual bairro?");
       await setEtapa("bairro");
       break;
@@ -1186,7 +1157,6 @@ Deno.serve(async (req: Request) => {
           }
         }
       }
-      // grandesp/outra: zona ja vem da cidade (nome da cidade ou "Outras").
       await db.from("ouvintes").update({ bairro: bairroFinal, zona }).eq(
         "id",
         ouvinteId,
@@ -1252,7 +1222,6 @@ Deno.serve(async (req: Request) => {
         break;
       }
 
-      // Numero valido: grava a opcao escolhida.
       if (/^\s*\d+\s*$/.test(texto)) {
         const num = parseInt(texto.replace(/\D/g, ""), 10);
         if (num >= 1 && num <= ctx.candidatos.length) {
@@ -1268,9 +1237,7 @@ Deno.serve(async (req: Request) => {
           await db.from("conversas").update({
             contexto: {
               ultimo: {
-                etapa: ctx.sentimento === "ama"
-                  ? "musicas_ama"
-                  : "musicas_rejeita",
+                etapa: ctx.sentimento === "ama" ? "musicas_ama" : "musicas_rejeita",
                 ids: id ? [id] : [],
               },
             },
@@ -1280,64 +1247,36 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      // Nao mandou numero: NUNCA repete a lista no vazio. Refina ou pede o nome.
       const tent = (ctx.tentativas ?? 0) + 1;
-
-      // Tira a negativa do comeco ("nenhuma dessas", "nao e essa"), mantendo o resto.
       const resto = texto.trim()
-        .replace(
-          /^(n[aã]o[,\s]+(é|eh|e)?[,\s]*)?(nenhuma|nenhum)(\s+(delas|dessas|dessa|destas|desses))?[,.\s]*/i,
-          "",
-        )
-        .replace(
-          /^(n[aã]o[,\s]+(é|eh|e)\s+(essa|esse|essas|esses|isso))[,.\s]*/i,
-          "",
-        )
+        .replace(/^(n[aã]o[,\s]+(é|eh|e)?[,\s]*)?(nenhuma|nenhum)(\s+(delas|dessas|dessa|destas|desses))?[,.\s]*/i, "")
+        .replace(/^(n[aã]o[,\s]+(é|eh|e)\s+(essa|esse|essas|esses|isso))[,.\s]*/i, "")
         .trim();
 
-      // Limite: depois de muitas tentativas, aceita o que o ouvinte digitou e segue.
       if (tent > 4) {
-        const id = await gravarMusica(
-          radioId,
-          ouvinteId,
-          ctx.sentimento,
-          ctx.artista ?? null,
-          resto || ctx.termo,
-          texto,
-        );
+        const id = await gravarMusica(radioId, ouvinteId, ctx.sentimento, ctx.artista ?? null, resto || ctx.termo, texto);
         await db.from("conversas").update({
           contexto: {
-            ultimo: {
-              etapa: ctx.sentimento === "ama" ? "musicas_ama" : "musicas_rejeita",
-              ids: id ? [id] : [],
-            },
+            ultimo: { etapa: ctx.sentimento === "ama" ? "musicas_ama" : "musicas_rejeita", ids: id ? [id] : [] },
           },
         }).eq("id", conversaId);
         await avancarPara(ctx.proxima);
         break;
       }
 
-      // Mencionou o cantor? ("é uma música do Fulano", "do cantor Fulano", "da banda X")
-      const mArt = resto.match(
-        /(?:m[uú]sica|can[cç][aã]o|cantor|cantora|banda)\s+d[oae]\s+(.+)/i,
-      ) || resto.match(/^d[oa]\s+(.+)/i);
+      const mArt = resto.match(/(?:m[uú]sica|can[cç][aã]o|cantor|cantora|banda)\s+d[oae]\s+(.+)/i) ||
+        resto.match(/^d[oa]\s+(.+)/i);
       if (mArt && mArt[1] && mArt[1].trim().length >= 2) {
-        await iniciarMusica(mArt[1].trim(), ctx.sentimento, ctx.proxima, {
-          modoArtista: true,
-        });
+        await iniciarMusica(mArt[1].trim(), ctx.sentimento, ctx.proxima, { modoArtista: true });
         break;
       }
 
-      // Mandou um nome (provavelmente a musica): junta com o artista/termo e busca de novo.
       if (resto.length >= 2) {
         const base = ctx.artista ? `${ctx.artista} ${resto}` : resto;
-        await iniciarMusica(base, ctx.sentimento, ctx.proxima, {
-          jaPediuArtista: true,
-        });
+        await iniciarMusica(base, ctx.sentimento, ctx.proxima, { jaPediuArtista: true });
         break;
       }
 
-      // Negativa pura, sem nome: pede o nome da musica/cantor (guarda a tentativa).
       await db.from("conversas").update({
         contexto: { musica: { ...ctx, tentativas: tent } },
       }).eq("id", conversaId);
@@ -1353,23 +1292,14 @@ Deno.serve(async (req: Request) => {
 
     case "musica_artista": {
       const ctx = (conversa.contexto as {
-        musica?: {
-          sentimento: "ama" | "rejeita";
-          proxima: string;
-          termo: string;
-          artista?: string;
-        };
+        musica?: { sentimento: "ama" | "rejeita"; proxima: string; termo: string; artista?: string };
       } | null)?.musica;
       if (!ctx) {
         await avancarPara("musicas_rejeita");
         break;
       }
-      const base = ctx.artista
-        ? `${ctx.artista} ${texto}`
-        : `${ctx.termo ?? ""} ${texto}`;
-      await iniciarMusica(base.trim(), ctx.sentimento, ctx.proxima, {
-        jaPediuArtista: true,
-      });
+      const base = ctx.artista ? `${ctx.artista} ${texto}` : `${ctx.termo ?? ""} ${texto}`;
+      await iniciarMusica(base.trim(), ctx.sentimento, ctx.proxima, { jaPediuArtista: true });
       break;
     }
 
@@ -1405,9 +1335,8 @@ Deno.serve(async (req: Request) => {
     case "outros_estilos": {
       const chave = normalizarSemAcento(texto);
       if (!NEGATIVAS.has(chave)) {
-        await db.from("ouvintes").update({
-          outros_estilos: titleCasePtBr(texto),
-        }).eq("id", ouvinteId);
+        await db.from("ouvintes").update({ outros_estilos: titleCasePtBr(texto) })
+          .eq("id", ouvinteId);
       }
       await reply(
         phone,
@@ -1463,7 +1392,6 @@ Deno.serve(async (req: Request) => {
     }
 
     case "retorno": {
-      // Refaz o cadastro SO se a pessoa declarar um nome novo.
       const nomeNovo = extrairNomeDeclarado(texto);
       if (nomeNovo) {
         await db.from("ouvintes").update({ nome: nomeNovo }).eq(
@@ -1493,12 +1421,48 @@ Deno.serve(async (req: Request) => {
         }
         break;
       }
-      // Sem nome novo: trata como pedido de musica (escolha exata via iniciarMusica).
+
       const chave = normalizarSemAcento(texto);
-      if (!NEGATIVAS.has(chave) && chave.length > 1) {
-        await iniciarMusica(texto, "ama", "retorno");
+
+      // Negativa ou despedida explicita: encerra com simpatia, sem buscar musica.
+      if (NEGATIVAS.has(chave) || DESPEDIDAS.has(chave)) {
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          `Tranquilo, ${primeiroNome}! Qualquer hora que quiser pedir uma música é só me chamar. Continue ligado na ${RADIO_LABEL}!`,
+        );
         break;
       }
+
+      // Classifica a intencao: pedido de musica de verdade x conversa solta (premio, promocao...).
+      const ir = await classificarRetorno(texto);
+
+      if (ir && ir.intencao === "conversa") {
+        const frase = escolher(DESVIO_RETORNO).replace(/\$\{RADIO\}/g, RADIO_LABEL);
+        await reply(phone, conversaId, radioId, frase);
+        break;
+      }
+
+      if (ir && ir.intencao === "despedida") {
+        await reply(
+          phone,
+          conversaId,
+          radioId,
+          `Tranquilo, ${primeiroNome}! Qualquer hora que quiser pedir uma música é só me chamar. Continue ligado na ${RADIO_LABEL}!`,
+        );
+        break;
+      }
+
+      // Pedido de musica: usa o termo extraido pela IA, senao o texto original.
+      const termo = (ir && ir.intencao === "pedido_musica" && ir.termo_musica)
+        ? ir.termo_musica
+        : texto;
+      if (normalizarSemAcento(termo).length > 1) {
+        await iniciarMusica(termo, "ama", "retorno");
+        break;
+      }
+
       await reply(
         phone,
         conversaId,
