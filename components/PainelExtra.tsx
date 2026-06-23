@@ -42,7 +42,8 @@ function dataPtBr(iso: string | null): string {
   if (!iso) return "-";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "-";
-  return d.toLocaleDateString("pt-BR");
+  // Sempre no fuso de Brasilia (sem horario de verao, offset fixo -03:00).
+  return d.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
 }
 
 export default function PainelExtra({ mode }: { mode: DisplayMode }) {

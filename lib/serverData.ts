@@ -145,9 +145,14 @@ export async function getPainelExtra(
       .limit(2000);
     if (faixa) q = q.eq("faixa_etaria", faixa);
     if (zona) q = q.eq("zona", zona);
-    // Filtro por data de cadastro (primeiro_contato_em).
-    if (de) q = q.gte("primeiro_contato_em", `${de}T00:00:00.000Z`);
-    if (ate) q = q.lte("primeiro_contato_em", `${ate}T23:59:59.999Z`);
+    // Filtro por data de cadastro: as datas escolhidas sao dias de Brasilia
+    // (UTC-03:00 fixo, sem horario de verao). Converte pra UTC antes de consultar.
+    if (de) q = q.gte("primeiro_contato_em", `${de}T03:00:00.000Z`);
+    if (ate) {
+      const fim = new Date(`${ate}T03:00:00.000Z`);
+      fim.setUTCDate(fim.getUTCDate() + 1); // ate < dia seguinte (03:00Z)
+      q = q.lt("primeiro_contato_em", fim.toISOString());
+    }
 
     const { data, error } = await q;
     if (error) throw error;
