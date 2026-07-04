@@ -1,8 +1,9 @@
 // OuvintePro - webhook "ao receber" da Z-API.
 // Recebe mensagens do WhatsApp da radio, roda a conversa da Adriana e responde pela Z-API.
 // Tom: simpatico, direto e transparente. A IA conduz a conversa nos bastidores.
-// v48: Adriana conversacional (cerebro Gemini conduz a coleta) + fonte de verdade
-// musical via grounding do Google (Gemini com google_search). Nunca inventa musica.
+// v49: privacidade (o cerebro NAO recebe valores, so o primeiro nome + campos faltantes),
+// pula campos ja preenchidos, e junta cantor+musica vindos em mensagens separadas (grounding).
+// Base v48: Adriana conversacional + fonte de verdade musical via grounding do Google.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -562,20 +563,35 @@ type DecisaoCerebro = {
   qualquer_do_artista: boolean;
 };
 
+// Lista ordenada de campos ainda faltantes (bairro so quando a cidade e Sao Paulo capital).
+function camposFaltantes(
+  o: Record<string, unknown>,
+  flags: Record<string, unknown>,
+): string[] {
+  const capital = normalizarSemAcento((o.cidade as string) ?? "") === "sao paulo";
+  const faltam: string[] = [];
+  if (!o.nome) faltam.push("nome");
+  if (!o.data_nascimento) faltam.push("data_nascimento");
+  if (!o.cidade) faltam.push("cidade");
+  if (capital && !o.bairro) faltam.push("bairro");
+  if (flags.musica_pedida !== true) faltam.push("pedido_musica");
+  if (!o.estilo_musical) faltam.push("estilo_musical");
+  if (!o.outros_estilos) faltam.push("outros_estilos");
+  if (flags.radio_troca_pedida !== true) faltam.push("radio_troca");
+  if (!o.programa_locutor) faltam.push("programa_locutor");
+  return faltam;
+}
+
+// PRIVACIDADE: o cerebro NAO recebe valores dos dados do ouvinte, so o primeiro nome
+// (pro cumprimento) e a lista de campos que faltam. Assim nao ha como recitar dados.
 function montarColetado(
   ouvinte: Record<string, unknown>,
   flags: Record<string, unknown>,
 ): Record<string, unknown> {
+  const primeiro = ((ouvinte.nome as string) ?? "").trim().split(/\s+/)[0] || null;
   return {
-    nome: ouvinte.nome ?? null,
-    data_nascimento: ouvinte.data_nascimento ?? null,
-    cidade: ouvinte.cidade ?? null,
-    bairro: ouvinte.bairro ?? null,
-    estilo_musical: ouvinte.estilo_musical ?? null,
-    outros_estilos: ouvinte.outros_estilos ?? null,
-    programa_locutor: ouvinte.programa_locutor ?? null,
-    ja_pediu_musica: flags.musica_pedida === true,
-    ja_informou_radio_troca: flags.radio_troca_pedida === true,
+    primeiro_nome: primeiro,
+    campos_faltantes: camposFaltantes(ouvinte, flags),
   };
 }
 
@@ -614,21 +630,19 @@ async function cerebroAdriana(
   const hist = (historico ?? []).map((h) =>
     `${h.de === "ouvinte" ? "Ouvinte" : "Adriana"}: ${h.texto}`
   ).join("\n") || "(inicio da conversa)";
+  const primeiroNome = (coletado.primeiro_nome as string | null) ?? "";
+  const faltantes = (coletado.campos_faltantes as string[]) ?? [];
   const prompt = `
 Você é a Adriana, atendente simpática e animada da rádio ${RADIO_LABEL}, no WhatsApp. Fala português do Brasil com acentos corretos, tom de rádio, natural e acolhedor. NUNCA use travessão.
-O OuvintePro cadastra os ouvintes pra participarem das promoções e registra os gostos musicais. Você conduz a conversa pra coletar, UMA COISA POR VEZ, na ordem de prioridade, pulando o que já estiver preenchido:
-1. nome (nome completo)
-2. data_nascimento (dia/mês/ano)
-3. cidade
-4. bairro (pergunte SÓ se a cidade for São Paulo capital)
-5. pedido_musica (uma música que a pessoa queira ouvir: título e cantor)
-6. estilo_musical (estilo preferido)
-7. outros_estilos
-8. radio_troca (pra qual rádio ela troca quando não gosta da música)
-9. programa_locutor (programa ou locutor preferido da ${RADIO_LABEL})
 
-Dados já coletados (não pergunte de novo o que já estiver preenchido):
-${JSON.stringify(coletado)}
+PRIVACIDADE (regra absoluta): os dados do ouvinte são informação INTERNA do sistema. Você NUNCA repete, lista, cita ou confirma em voz alta qualquer dado dele (nem sobrenome, nem data de nascimento, nem cidade, bairro, estilo musical, rádios, programa ou locutor). O ÚNICO dado que você pode usar é o PRIMEIRO NOME, e só no cumprimento (ex.: "Opa, Fulano!"). Nada além disso. Nunca diga frases do tipo "já tenho aqui seu nome/sua cidade...".
+
+O OuvintePro cadastra os ouvintes pra participarem das promoções e registra os gostos musicais. Você coleta UMA COISA POR VEZ.
+
+Primeiro nome do ouvinte (use só no cumprimento; pode estar vazio): "${primeiroNome}"
+Campos que ainda faltam coletar, em ordem de prioridade: ${JSON.stringify(faltantes)}
+
+Significado dos campos: nome=nome completo; data_nascimento=dia/mês/ano; cidade; bairro (só aparece na lista quando é São Paulo capital); pedido_musica=uma música que a pessoa queira ouvir; estilo_musical=estilo preferido; outros_estilos; radio_troca=pra qual rádio ela troca quando não gosta; programa_locutor=programa ou locutor preferido da ${RADIO_LABEL}.
 
 Histórico recente da conversa:
 ${hist}
@@ -636,15 +650,14 @@ ${hist}
 Nova mensagem do ouvinte: """${mensagem}"""
 
 Regras:
-- Aceite respostas informais e variadas, sem exigir formato. Uma pergunta por vez, breve e natural.
-- Se for a primeira interação (sem dados e sem histórico), se apresente rapidinho como Adriana da ${RADIO_LABEL} e já pergunte o nome.
-- Sobre música: se a pessoa citar só o CANTOR, pergunte a MÚSICA. Se citar a MÚSICA, pode seguir. Se ela disser "tanto faz" ou "qualquer" para um cantor, marque qualquer_do_artista=true e ponha o cantor em artista_bruto.
-- NUNCA invente nome de música nem corrija a grafia você mesma. Se ela citou uma música, ponha o texto cru dela em musica_bruta e o cantor citado (se houver) em artista_bruto. Quem confirma a música com a fonte oficial é o sistema, não você.
-- Em campos_extraidos, coloque SÓ o que a mensagem atual permitiu preencher, usando exatamente os nomes de campo da lista. Para data_nascimento use AAAA-MM-DD só se tiver certeza do ANO; se faltar o ano, NÃO preencha e pergunte o ano.
-- proximo_campo: o próximo campo que você vai perguntar, ou "concluido" se já coletou tudo.
-- Ao concluir, agradeça de forma calorosa e convide a continuar ouvindo a ${RADIO_LABEL}.
+- Pergunte APENAS o primeiro campo que ainda falta (o primeiro item de campos_faltantes). NUNCA pergunte um campo que não está nessa lista. Se a lista estiver vazia, NÃO pergunte cadastro: apenas converse de forma simpática e trate pedidos de música.
+- Se for a primeira interação (sem histórico), se apresente rapidinho como Adriana da ${RADIO_LABEL} e já pergunte o primeiro campo que falta.
+- Uma pergunta por vez, breve e natural. Aceite respostas informais, sem exigir formato.
+- Música: se a pessoa citar só o CANTOR, marque e_pedido_musica=true, ponha o cantor em artista_bruto e deixe musica_bruta null (o sistema vai perguntar a música). Se citar a MÚSICA (com ou sem cantor), ponha o texto cru dela em musica_bruta e o cantor, se houver, em artista_bruto. Se disser "tanto faz" ou "qualquer" pra um cantor, marque qualquer_do_artista=true e ponha o cantor em artista_bruto. NUNCA invente nome de música nem corrija a grafia; quem confirma com a fonte oficial é o sistema.
+- Em campos_extraidos, coloque SÓ o que a mensagem atual permitiu preencher, e SÓ para campos que estão em campos_faltantes, usando exatamente os nomes de campo. Para data_nascimento use AAAA-MM-DD só se tiver certeza do ANO; se faltar o ano, NÃO preencha.
+- proximo_campo: o próximo campo que falta, ou "concluido" se não falta nada.
 Responda APENAS com JSON, sem texto fora do JSON:
-{"resposta_ao_ouvinte":"...","campos_extraidos":{},"proximo_campo":"nome","e_pedido_musica":false,"musica_bruta":null,"artista_bruto":null,"qualquer_do_artista":false}
+{"resposta_ao_ouvinte":"...","campos_extraidos":{},"proximo_campo":"...","e_pedido_musica":false,"musica_bruta":null,"artista_bruto":null,"qualquer_do_artista":false}
 `;
   return await geminiJSON<DecisaoCerebro>(prompt);
 }
@@ -878,6 +891,60 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { status: 200 });
   }
 
+  // ===== Segundo tempo do pedido de musica: cantor ja conhecido, agora chega o titulo =====
+  // Junta o cantor guardado com o texto novo (mesmo torto) e busca a musica real no Google.
+  if (etapa === "musica_aguarda_titulo" && ctx.pending_artista) {
+    const artista = ctx.pending_artista as string;
+    const chave = normalizarSemAcento(texto);
+    const QUALQUER = new Set([
+      "qualquer", "qualquer uma", "qualquer musica", "tanto faz", "o que tiver",
+      "pode ser qualquer", "qualquer coisa", "surpresa", "escolhe voce",
+    ]);
+    if (QUALQUER.has(chave)) {
+      const artCanon = (await confirmarArtista(artista)) ?? titleCasePtBr(artista);
+      await gravarMusica(radioId, ouvinteId, "ama", artCanon, null, artista);
+      const flags2 = { ...flags, musica_pedida: true };
+      const prox = proximaPerguntaFaltante(ouvinte, flags2);
+      const concluido = prox.campo === "concluido";
+      const msg = `Fechado! Vou colocar um ${artCanon} pra você. ${prox.texto}`;
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: concluido ? "concluido" : "cadastro",
+        contexto: { flags: flags2, historico: hist },
+      }).eq("id", conversaId);
+      if (concluido) {
+        await db.from("ouvintes").update({ participacoes: (ouvinte.participacoes ?? 0) + 1 }).eq("id", ouvinteId);
+      }
+      await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+    if (NEGATIVAS.has(chave)) {
+      const flags2 = { ...flags, musica_pedida: true };
+      const msg = `Tranquilo${primeiroNome ? ", " + primeiroNome : ""}! Se quiser pedir outra música é só mandar o nome.`;
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: "cadastro",
+        contexto: { flags: flags2, historico: hist },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+    const oficial = await resolverMusicaOficial(texto, artista);
+    const artistaFinal = oficial.artista ?? titleCasePtBr(artista);
+    const msg = `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${oficial.titulo}", do ${artistaFinal}. Confirma pra mim! (responde sim ou não)`;
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "confirma_musica",
+      contexto: {
+        flags,
+        historico: hist,
+        pending_musica: { titulo: oficial.titulo, artista: artistaFinal, sentimento: "ama" },
+      },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+    return new Response("ok", { status: 200 });
+  }
+
   // ===== Premio: fast-path deterministico =====
   const cadastroCompleto = !!(ouvinte.nome && ouvinte.data_nascimento && ouvinte.cidade);
   if (isTexto && ehPremio(texto)) {
@@ -1047,12 +1114,24 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { status: 200 });
   }
 
+  // So o CANTOR (sem titulo): guarda o cantor e pergunta a musica, sem repedir o cantor.
+  if (dec.e_pedido_musica && artistaHint && !musicaBruta && !overrideMsg) {
+    const msg = `${primeiroNome ? primeiroNome + ", " : ""}boa escolha! E qual música do ${artistaHint} você quer ouvir?`;
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "musica_aguarda_titulo",
+      contexto: { flags: flagsNovas, historico: hist, pending_artista: artistaHint },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+    return new Response("ok", { status: 200 });
+  }
+
   // Pedido com uma musica nomeada: resolve a oficial (Google -> catalogo -> literal) e CONFIRMA.
   if (dec.e_pedido_musica && musicaBruta && !overrideMsg) {
     const oficial = await resolverMusicaOficial(musicaBruta, artistaHint);
     const msg = oficial.artista
-      ? `Acho que é "${oficial.titulo}", do ${oficial.artista}, né? Só confirma pra mim! (responde sim ou não)`
-      : `Acho que é "${oficial.titulo}", né? Só confirma pra mim! (responde sim ou não)`;
+      ? `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${oficial.titulo}", do ${oficial.artista}. Confirma pra mim! (responde sim ou não)`
+      : `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${oficial.titulo}". Confirma pra mim! (responde sim ou não)`;
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
       etapa: "confirma_musica",
@@ -1067,8 +1146,21 @@ Deno.serve(async (req: Request) => {
   }
 
   // ===== Resposta normal da Adriana =====
-  let resposta = overrideMsg ?? (val(dec.resposta_ao_ouvinte) ?? proximaPerguntaFaltante(ouvinteAtual, flagsNovas).texto);
-  const concluido = !overrideMsg && dec.proximo_campo === "concluido";
+  // Se estava perguntando a musica e o ouvinte declinou, marca como pedido feito (nao repergunta).
+  const chaveMsg = normalizarSemAcento(texto);
+  let declinouMusica = false;
+  if (
+    !dec.e_pedido_musica && !dec.qualquer_do_artista &&
+    flagsNovas.musica_pedida !== true && NEGATIVAS.has(chaveMsg) &&
+    camposFaltantes(ouvinteAtual, flagsNovas)[0] === "pedido_musica"
+  ) {
+    flagsNovas.musica_pedida = true;
+    declinouMusica = true;
+  }
+  const proxAtual = proximaPerguntaFaltante(ouvinteAtual, flagsNovas);
+  let resposta = overrideMsg ??
+    (declinouMusica ? proxAtual.texto : (val(dec.resposta_ao_ouvinte) ?? proxAtual.texto));
+  const concluido = !overrideMsg && proxAtual.campo === "concluido";
   if (concluido && flagsNovas.concluido !== true) {
     flagsNovas.concluido = true;
     resposta = `${resposta} Ah, e segue a gente no Instagram: ${INSTAGRAM_URL}`;
