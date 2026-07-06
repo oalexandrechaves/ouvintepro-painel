@@ -1,6 +1,12 @@
 // OuvintePro - webhook "ao receber" da Z-API.
 // Recebe mensagens do WhatsApp da radio, roda a conversa da Adriana e responde pela Z-API.
 // Tom: simpatico, direto e transparente. A IA conduz a conversa nos bastidores.
+// v53: regra anti-placeholder tambem no prompt do cerebroAdriana (espelha a do falaAdriana):
+// nome vazio -> nao cita nome, nunca inventa "[Nome do ouvinte]". Fecha o unico caminho cru
+// (dec.resposta_ao_ouvinte usado direto) que ainda podia vazar o placeholder na pergunta da data.
+// v52: TODOS os campos de cadastro (nome, data, cidade, bairro, estilo, outros, programa) tem
+// handler deterministico ANTES do cerebro (handleCampoCadastro), imune a 503/429 - mata o loop.
+// Anti-loop: repergunta 1x variada (falaAdriana) e forca avanco (nome aceita texto; data pula).
 // v51: radio_troca agora extrai o nome da radio de frase natural ("eu troco pra mix" -> Mix),
 // via extrairRadioDaFrase (tira verbos/conectores do inicio, preserva "Radio" quando faz parte
 // do nome) + resolverRadio; nega/loop tratados; sem regressao no fluxo de musica.
@@ -413,6 +419,27 @@ function limparPrefixoNome(texto: string): string {
     .trim();
 }
 
+// Mensagens que sao cumprimento/ruido e nunca devem ser gravadas como nome.
+const SAUDACOES_NAO_NOME = new Set([
+  "oi", "ola", "alo", "opa", "salve", "hey", "hi", "hello",
+  "bom dia", "boa tarde", "boa noite", "boa madrugada",
+  "e ai", "eai", "eae", "fala", "fala ai",
+  "tudo bem", "tudo bom", "td bem", "td bom", "tudo certo", "tudo otimo",
+  "blz", "beleza", "suave", "de boa",
+  "sim", "nao", "ok", "okay", "entao", "entendi", "certo", "uai",
+  "kk", "kkk", "kkkk", "rs", "rsrs", "haha", "hahaha", "hehe",
+  "oi tudo bem", "ola tudo bem", "oi bom dia", "quem e voce", "quem e",
+]);
+
+// Remove uma saudacao no inicio da frase (oi, ola, opa, bom dia...) pra sobrar o nome.
+function removerSaudacaoInicial(texto: string): string {
+  let t = texto.trim().replace(/^[\s,.!?-]+/, "");
+  const padrao =
+    /^(oi|ol[aá]|al[oô]|opa|salve|e a[ií]|eai|eae|fala|hey|hi|hello|bom dia|boa tarde|boa noite)\b[\s,!.\-]*/i;
+  t = t.replace(padrao, "").trim();
+  return t;
+}
+
 function normalizarSemAcento(s: string): string {
   return s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
@@ -576,14 +603,14 @@ function camposFaltantes(
   const capital = normalizarSemAcento((o.cidade as string) ?? "") === "sao paulo";
   const faltam: string[] = [];
   if (!o.nome) faltam.push("nome");
-  if (!o.data_nascimento) faltam.push("data_nascimento");
+  if (!o.data_nascimento && flags.data_pulada !== true) faltam.push("data_nascimento");
   if (!o.cidade) faltam.push("cidade");
   if (capital && !o.bairro) faltam.push("bairro");
   if (flags.musica_pedida !== true) faltam.push("pedido_musica");
-  if (!o.estilo_musical) faltam.push("estilo_musical");
-  if (!o.outros_estilos) faltam.push("outros_estilos");
+  if (!o.estilo_musical && flags.pulou_estilo !== true) faltam.push("estilo_musical");
+  if (!o.outros_estilos && flags.pulou_outros !== true) faltam.push("outros_estilos");
   if (flags.radio_troca_pedida !== true) faltam.push("radio_troca");
-  if (!o.programa_locutor) faltam.push("programa_locutor");
+  if (!o.programa_locutor && flags.pulou_programa !== true) faltam.push("programa_locutor");
   return faltam;
 }
 
@@ -645,6 +672,7 @@ PRIVACIDADE (regra absoluta): os dados do ouvinte são informação INTERNA do s
 O OuvintePro cadastra os ouvintes pra participarem das promoções e registra os gostos musicais. Você coleta UMA COISA POR VEZ.
 
 Primeiro nome do ouvinte (use só no cumprimento; pode estar vazio): "${primeiroNome}"
+Se o primeiro nome estiver vazio, NÃO use nome nenhum nem invente placeholder (nada de "[Nome do ouvinte]", "[nome]" ou parecido); apenas fale de forma natural, sem citar nome.
 Campos que ainda faltam coletar, em ordem de prioridade: ${JSON.stringify(faltantes)}
 
 Significado dos campos: nome=nome completo; data_nascimento=dia/mês/ano; cidade; bairro (só aparece na lista quando é São Paulo capital); pedido_musica=uma música que a pessoa queira ouvir; estilo_musical=estilo preferido; outros_estilos; radio_troca=pra qual rádio ela troca quando não gosta; programa_locutor=programa ou locutor preferido da ${RADIO_LABEL}.
@@ -672,7 +700,7 @@ Responda APENAS com JSON, sem texto fora do JSON:
 async function falaAdriana(instrucao: string, primeiroNome: string): Promise<string | null> {
   const prompt = `
 Você é a Adriana, atendente simpática e animada da rádio ${RADIO_LABEL} no WhatsApp. Fala português do Brasil com acentos corretos, tom de rádio, natural e caloroso. NUNCA use travessão. NUNCA escreva "(responde sim ou não)" nem instruções robóticas; a própria frase já convida a resposta.
-Você pode usar o primeiro nome do ouvinte no cumprimento, se houver: "${primeiroNome}". NUNCA cite nenhum outro dado do ouvinte.
+Você pode usar o primeiro nome do ouvinte no cumprimento, se houver: "${primeiroNome}". NUNCA cite nenhum outro dado do ouvinte. Se o primeiro nome estiver vazio, NÃO use nome nenhum nem invente placeholder (nada de "[Nome do ouvinte]" ou parecido); apenas fale sem citar nome.
 Escreva UMA mensagem curta (1 ou 2 frases) para o ouvinte cumprindo esta intenção interna (a intenção é só sua, não a repita literalmente): ${instrucao}
 Responda APENAS com o texto da mensagem, sem aspas, sem JSON.
 `;
@@ -714,6 +742,14 @@ function ehNegativaRadio(texto: string): boolean {
 // Intencao interna do proximo campo de cadastro (usada quando a Adriana segue apos a musica).
 function intencaoProximoCampo(campo: string): string {
   switch (campo) {
+    case "nome":
+      return "peça o nome completo dele pra cadastrar nas promoções";
+    case "data_nascimento":
+      return "pergunte a data de nascimento dele, no formato dia, mês e ano";
+    case "cidade":
+      return "pergunte em qual cidade ele mora";
+    case "bairro":
+      return "pergunte em qual bairro ele mora";
     case "pedido_musica":
       return "pergunte se ele quer pedir uma música";
     case "estilo_musical":
@@ -1014,6 +1050,248 @@ Deno.serve(async (req: Request) => {
     await reply(phone, conversaId, radioId, msg);
   }
 
+  // Grava o campo e a Adriana pergunta o proximo (fala natural via falaAdriana).
+  async function avancarCadastro(
+    updObj: Record<string, unknown>,
+    flags2: Record<string, unknown>,
+    extraCtx?: Record<string, unknown>,
+  ) {
+    if (Object.keys(updObj).length) {
+      await db.from("ouvintes").update(updObj).eq("id", ouvinteId);
+    }
+    const ouv2 = { ...ouvinte, ...updObj };
+    // Primeiro nome ATUALIZADO (o nome pode ter acabado de ser gravado neste turno).
+    const pn = ((ouv2.nome as string) ?? "").trim().split(/\s+/)[0] || primeiroNome;
+    const prox = proximaPerguntaFaltante(ouv2, flags2);
+    const concluido = prox.campo === "concluido";
+    const inst = concluido
+      ? `agradeça e convide o ouvinte a continuar ouvindo a ${RADIO_LABEL}`
+      : intencaoProximoCampo(prox.campo);
+    const fallback = concluido
+      ? `Prontinho${pn ? ", " + pn : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
+      : prox.texto;
+    let msg = (await falaAdriana(inst, pn)) ?? fallback;
+    if (concluido && flags2.concluido !== true) {
+      flags2.concluido = true;
+      msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
+      await db.from("ouvintes").update({
+        participacoes: (ouvinte.participacoes ?? 0) + 1,
+      }).eq("id", ouvinteId);
+    }
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: concluido ? "concluido" : "cadastro",
+      contexto: { flags: flags2, historico: hist, ...(extraCtx ?? {}) },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+  }
+
+  // Repergunta UMA vez, de forma natural (nao identica), setando uma flag de tentativa.
+  async function reperguntar(
+    instrucao: string,
+    fallback: string,
+    flagsMerge: Record<string, unknown>,
+  ) {
+    const msg = (await falaAdriana(instrucao, primeiroNome)) ?? fallback;
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "cadastro",
+      contexto: { flags: { ...flags, ...flagsMerge }, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+  }
+
+  // Trata deterministico UM campo de cadastro (antes do cerebro; imune a 503/429, sem loop).
+  async function handleCampoCadastro(campo: string) {
+    const flags2: Record<string, unknown> = { ...flags };
+    const anoAtual = new Date().getUTCFullYear();
+
+    if (campo === "nome") {
+      const base = limparPrefixoNome(removerSaudacaoInicial(texto) || texto)
+        .replace(
+          /^(ja falei[,\s]*(que\s+)?(é|eh|e)?|eu ja disse[,\s]*(que\s+)?|falei[,\s]*(que\s+)?|é|eh)\s+/i,
+          "",
+        ).trim();
+      const soLetras = base.replace(/[^A-Za-zÀ-ÿ]/g, "");
+      const naoEhNome = base.trim().length === 0 ||
+        SAUDACOES_NAO_NOME.has(normalizarSemAcento(base)) || soLetras.length < 2;
+      if (naoEhNome && flags.nome_tentativa !== true) {
+        await reperguntar(
+          "voce ainda nao pegou o nome do ouvinte; se apresente rapidinho como Adriana da Nativa FM e peca o nome completo dele, de um jeito diferente",
+          "Antes da gente começar, como você se chama? Pode mandar seu nome completo.",
+          { nome_tentativa: true },
+        );
+        return;
+      }
+      const nome = titleCasePtBr(naoEhNome ? texto.trim() : base) || texto.trim();
+      await avancarCadastro({ nome }, flags2);
+      return;
+    }
+
+    if (campo === "data_nascimento") {
+      // Sub-passo: aguardando so o ANO.
+      if (flags.aguardando_ano === true) {
+        const d = texto.replace(/\D/g, "");
+        let ano = 0;
+        if (d.length === 4) ano = parseInt(d, 10);
+        else if (d.length === 2) {
+          const a = parseInt(d, 10);
+          ano = a <= 25 ? 2000 + a : 1900 + a;
+        }
+        if (!ano || ano < 1900 || ano > anoAtual) {
+          if (flags.ano_tentativa === true) {
+            // Desiste da data pra nao travar (pula).
+            const f2: Record<string, unknown> = { ...flags };
+            delete f2.aguardando_ano;
+            delete f2.ano_tentativa;
+            delete f2.data_tentativa;
+            f2.data_pulada = true;
+            await avancarCadastro({}, f2);
+            return;
+          }
+          await reperguntar(
+            "voce so precisa do ANO de nascimento; peca so o ano com 4 numeros (ex: 1990), de um jeito natural",
+            "Só o ano mesmo, com 4 números, tipo 1990. Qual ano você nasceu?",
+            { ano_tentativa: true },
+          );
+          return;
+        }
+        const iso = `${ano}-01-01`;
+        const idade = anoAtual - ano;
+        const { data: faixa } = await db.from("faixas_etarias").select("id")
+          .lte("idade_min", idade).or(`idade_max.gte.${idade},idade_max.is.null`)
+          .order("id").limit(1).maybeSingle();
+        const f2: Record<string, unknown> = { ...flags };
+        delete f2.aguardando_ano;
+        delete f2.ano_tentativa;
+        delete f2.data_tentativa;
+        await avancarCadastro({
+          data_nascimento: iso,
+          idade,
+          faixa_etaria: faixa?.id ?? null,
+        }, f2);
+        return;
+      }
+      const iso = parseAniversario(texto);
+      if (iso) {
+        const idade = calcularIdade(iso);
+        const { data: faixa } = await db.from("faixas_etarias").select("id")
+          .lte("idade_min", idade).or(`idade_max.gte.${idade},idade_max.is.null`)
+          .order("id").limit(1).maybeSingle();
+        await avancarCadastro({
+          data_nascimento: iso,
+          idade,
+          faixa_etaria: faixa?.id ?? null,
+        }, flags2);
+        return;
+      }
+      const temDiaMes = /\d{1,2}\s*[\/\-.\s]\s*\d{1,2}/.test(texto);
+      const temAno4 = /\d{4}/.test(texto);
+      if (temDiaMes && !temAno4) {
+        await reperguntar(
+          "faltou o ano na data de nascimento; pergunte em que ano ele nasceu, de forma natural",
+          "Faltou o ano. Em que ano você nasceu? (ex: 1990)",
+          { aguardando_ano: true },
+        );
+        return;
+      }
+      if (flags.data_tentativa !== true) {
+        await reperguntar(
+          "voce nao entendeu a data de nascimento; peca de novo no formato dia/mes/ano (ex: 28/01/1995), natural e diferente",
+          "Não peguei direito. Pode mandar sua data assim, por exemplo: 28/01/1995?",
+          { data_tentativa: true },
+        );
+        return;
+      }
+      // 2a falha: pede so o ano.
+      await reperguntar(
+        "peca so o ano de nascimento, com 4 numeros, de forma natural",
+        "Sem problema. Me diz só o ano que você nasceu, tipo 1990.",
+        { aguardando_ano: true },
+      );
+      return;
+    }
+
+    if (campo === "cidade") {
+      const alvo = normalizarSemAcento(texto);
+      let cidade = titleCasePtBr(texto);
+      let loc: Record<string, unknown> = { tipo: "outra", zona: "Outras" };
+      const upd: Record<string, unknown> = {};
+      if (alvo === "sao paulo" || alvo === "sp") {
+        cidade = "São Paulo";
+        loc = { tipo: "capital", zona: "" };
+      } else {
+        const c = await resolverGrandeSP(texto);
+        if (c) {
+          cidade = c;
+          loc = { tipo: "grandesp", zona: c };
+          upd.zona = c;
+        } else {
+          upd.zona = "Outras";
+        }
+      }
+      upd.cidade = cidade;
+      await avancarCadastro(upd, flags2, { loc });
+      return;
+    }
+
+    if (campo === "bairro") {
+      const loc =
+        (ctx.loc as { tipo?: string; zona?: string } | null) ??
+          { tipo: "outra", zona: "Outras" };
+      let bairroFinal = titleCasePtBr(texto);
+      let zona = loc.zona || "Outras";
+      if (loc.tipo === "capital") {
+        const ia = await interpretarBairro(texto);
+        if (ia && ia.bairro && ia.zona && ia.zona !== "Outras") {
+          bairroFinal = ia.bairro;
+          zona = ia.zona;
+        } else {
+          const alvo = normalizarSemAcento(texto);
+          const { data: seeds } = await db.from("bairros_zonas").select("bairro, zona");
+          const achou = (seeds ?? []).find(
+            (b) => normalizarSemAcento(b.bairro as string) === alvo,
+          );
+          if (achou) {
+            zona = achou.zona as string;
+            if (ia?.bairro) bairroFinal = ia.bairro;
+          } else {
+            zona = "Outras";
+          }
+        }
+      }
+      await avancarCadastro({ bairro: bairroFinal, zona }, flags2);
+      return;
+    }
+
+    if (campo === "estilo_musical") {
+      if (NEGATIVAS.has(normalizarSemAcento(texto))) {
+        await avancarCadastro({}, { ...flags2, pulou_estilo: true });
+      } else {
+        await avancarCadastro({ estilo_musical: titleCasePtBr(texto) }, flags2);
+      }
+      return;
+    }
+
+    if (campo === "outros_estilos") {
+      if (NEGATIVAS.has(normalizarSemAcento(texto))) {
+        await avancarCadastro({}, { ...flags2, pulou_outros: true });
+      } else {
+        await avancarCadastro({ outros_estilos: titleCasePtBr(texto) }, flags2);
+      }
+      return;
+    }
+
+    if (campo === "programa_locutor") {
+      if (NEGATIVAS.has(normalizarSemAcento(texto))) {
+        await avancarCadastro({}, { ...flags2, pulou_programa: true });
+      } else {
+        await avancarCadastro({ programa_locutor: titleCasePtBr(texto) }, flags2);
+      }
+      return;
+    }
+  }
+
   // ===== GUARDA-CORPO: ofensa e drogas ANTES de tudo (a IA nunca ve isso) =====
   if (isTexto) {
     const ehOfensa = listaContemTermo(texto, TERMOS_OFENSA);
@@ -1137,11 +1415,19 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // ===== Cadastro deterministico: trata o campo ATUAL antes do cerebro (imune a 503/429, sem loop) =====
+  const campoAtual = camposFaltantes(ouvinte, flags)[0];
+  const CAMPOS_CADASTRO = new Set([
+    "nome", "data_nascimento", "cidade", "bairro",
+    "estilo_musical", "outros_estilos", "programa_locutor",
+  ]);
+  if (isTexto && CAMPOS_CADASTRO.has(campoAtual)) {
+    await handleCampoCadastro(campoAtual);
+    return new Response("ok", { status: 200 });
+  }
+
   // ===== radio_troca: quando essa e a pergunta atual, trata deterministico (antes do cerebro) =====
-  if (
-    isTexto && flags.radio_troca_pedida !== true &&
-    camposFaltantes(ouvinte, flags)[0] === "radio_troca"
-  ) {
+  if (isTexto && flags.radio_troca_pedida !== true && campoAtual === "radio_troca") {
     await handleRadioTroca(texto);
     return new Response("ok", { status: 200 });
   }
