@@ -171,14 +171,21 @@ export async function getPainelExtra(
       const ama: string[] = [];
       const rejeita: string[] = [];
       for (const m of o.musicas ?? []) {
+        // Dois votos independentes: voto de MUSICA so quando ha titulo; voto de CANTOR quando
+        // ha artista. Assim um pedido de "so cantor" nao polui o ranking de musicas.
+        const temTitulo = !!m.titulo;
         const chave = chaveMusica(m);
         if (m.sentimento === "ama") {
-          if (chave) ama.push(chave);
-          amaMus.push(chave);
+          if (temTitulo) {
+            ama.push(chave);
+            amaMus.push(chave);
+          }
           if (m.artista) amaArt.push(m.artista);
         } else if (m.sentimento === "rejeita") {
-          if (chave) rejeita.push(chave);
-          rejMus.push(chave);
+          if (temTitulo) {
+            rejeita.push(chave);
+            rejMus.push(chave);
+          }
           if (m.artista) rejArt.push(m.artista);
         }
       }

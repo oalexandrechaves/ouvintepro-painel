@@ -1,9 +1,11 @@
 // OuvintePro - webhook "ao receber" da Z-API.
 // Recebe mensagens do WhatsApp da radio, roda a conversa da Adriana e responde pela Z-API.
 // Tom: simpatico, direto e transparente. A IA conduz a conversa nos bastidores.
-// v49: privacidade (o cerebro NAO recebe valores, so o primeiro nome + campos faltantes),
-// pula campos ja preenchidos, e junta cantor+musica vindos em mensagens separadas (grounding).
-// Base v48: Adriana conversacional + fonte de verdade musical via grounding do Google.
+// v50: fluxo de musica reprojetado (dois votos independentes cantor/musica). So busca no
+// Google quando existe TEXTO de musica (regra de ouro: so cantor nunca dispara busca). Toda
+// fala do fluxo de musica vem do cerebro (falaAdriana), sem frase fixa do codigo. Estados:
+// musica_aguarda_titulo (tem cantor), musica_aguarda_cantor (tem musica), confirma_musica.
+// Base v49: privacidade (cerebro sem valores) + pula campos preenchidos + grounding.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -662,6 +664,37 @@ Responda APENAS com JSON, sem texto fora do JSON:
   return await geminiJSON<DecisaoCerebro>(prompt);
 }
 
+// Gera UMA fala natural da Adriana a partir de uma intencao interna. TODA fala do
+// fluxo de musica passa por aqui: o codigo nunca escreve frase fixa pro ouvinte.
+async function falaAdriana(instrucao: string, primeiroNome: string): Promise<string | null> {
+  const prompt = `
+Você é a Adriana, atendente simpática e animada da rádio ${RADIO_LABEL} no WhatsApp. Fala português do Brasil com acentos corretos, tom de rádio, natural e caloroso. NUNCA use travessão. NUNCA escreva "(responde sim ou não)" nem instruções robóticas; a própria frase já convida a resposta.
+Você pode usar o primeiro nome do ouvinte no cumprimento, se houver: "${primeiroNome}". NUNCA cite nenhum outro dado do ouvinte.
+Escreva UMA mensagem curta (1 ou 2 frases) para o ouvinte cumprindo esta intenção interna (a intenção é só sua, não a repita literalmente): ${instrucao}
+Responda APENAS com o texto da mensagem, sem aspas, sem JSON.
+`;
+  const t = await geminiTexto(prompt, GEMINI_MODEL);
+  return t ? t.replace(/^["']+|["']+$/g, "").trim() : null;
+}
+
+// Intencao interna do proximo campo de cadastro (usada quando a Adriana segue apos a musica).
+function intencaoProximoCampo(campo: string): string {
+  switch (campo) {
+    case "pedido_musica":
+      return "pergunte se ele quer pedir uma música";
+    case "estilo_musical":
+      return "pergunte qual estilo musical ele mais gosta";
+    case "outros_estilos":
+      return "pergunte quais outros estilos ele curte ouvir";
+    case "radio_troca":
+      return "pergunte pra qual rádio ele troca quando não gosta da música que está tocando";
+    case "programa_locutor":
+      return `pergunte se ele tem um programa ou locutor preferido aqui na ${RADIO_LABEL}`;
+    default:
+      return "puxe papo de forma simpática";
+  }
+}
+
 Deno.serve(async (req: Request) => {
   let body: Record<string, unknown>;
   try {
@@ -826,6 +859,67 @@ Deno.serve(async (req: Request) => {
   const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
   const flags = (ctx.flags as Record<string, unknown> | null) ?? {};
 
+  // Fala da confirmacao (apos buscar): a Adriana confirma a versao oficial e espera o "sim".
+  async function confirmarComOuvinte(
+    titulo: string,
+    artista: string | null,
+    flagsBase: Record<string, unknown>,
+  ) {
+    const inst = artista
+      ? `você buscou e a música que o ouvinte pediu é "${titulo}", do ${artista}; confirme com ele de forma natural e curta, pedindo pra ele confirmar se é essa mesmo`
+      : `você buscou e a música que o ouvinte pediu é "${titulo}"; confirme com ele de forma natural e curta, pedindo pra ele confirmar se é essa mesmo`;
+    const fallback = artista
+      ? `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${titulo}", do ${artista}. Confirma?`
+      : `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${titulo}". Confirma?`;
+    const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "confirma_musica",
+      contexto: {
+        flags: flagsBase,
+        historico: hist,
+        pending_musica: { titulo, artista, sentimento: "ama" },
+      },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+  }
+
+  // Grava os votos (cantor e/ou musica) e a Adriana agradece e segue pro proximo passo.
+  // titulo preenchido = voto de musica; artista preenchido = voto de cantor. 1 linha p/ os dois.
+  async function gravarVotosESeguir(
+    titulo: string | null,
+    artista: string | null,
+    flagsBase: Record<string, unknown>,
+  ) {
+    const textoOrig = (titulo && artista)
+      ? `${titulo} - ${artista}`
+      : (titulo ?? artista ?? "");
+    await gravarMusica(radioId, ouvinteId, "ama", artista, titulo, textoOrig);
+    const flags2: Record<string, unknown> = { ...flagsBase, musica_pedida: true };
+    const prox = proximaPerguntaFaltante(ouvinte, flags2);
+    const concluido = prox.campo === "concluido";
+    const inst = concluido
+      ? `a música que o ouvinte pediu foi anotada; agradeça de forma calorosa e convide ele a continuar ouvindo a ${RADIO_LABEL}`
+      : `a música que o ouvinte pediu foi anotada; agradeça rapidinho e, na sequência, ${intencaoProximoCampo(prox.campo)}`;
+    const fallback = concluido
+      ? `Anotado${primeiroNome ? ", " + primeiroNome : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
+      : `Anotado! ${prox.texto}`;
+    let msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
+    if (concluido && flags2.concluido !== true) {
+      flags2.concluido = true;
+      msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
+      await db.from("ouvintes").update({
+        participacoes: (ouvinte.participacoes ?? 0) + 1,
+      }).eq("id", ouvinteId);
+    }
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: concluido ? "concluido" : "cadastro",
+      contexto: { flags: flags2, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+  }
+
   // ===== GUARDA-CORPO: ofensa e drogas ANTES de tudo (a IA nunca ve isso) =====
   if (isTexto) {
     const ehOfensa = listaContemTermo(texto, TERMOS_OFENSA);
@@ -853,95 +947,85 @@ Deno.serve(async (req: Request) => {
 
   // ===== PORTAO DETERMINISTICO: confirmacao de musica (nunca grava sem "sim") =====
   if (etapa === "confirma_musica" && ctx.pending_musica) {
-    const pend = ctx.pending_musica as { titulo: string; artista: string | null; sentimento?: string };
+    const pend = ctx.pending_musica as { titulo: string | null; artista: string | null };
     const chave = normalizarSemAcento(texto);
     if (AFIRMATIVAS.has(chave)) {
-      const textoOrig = pend.artista ? `${pend.titulo} - ${pend.artista}` : pend.titulo;
-      await gravarMusica(radioId, ouvinteId, (pend.sentimento as "ama" | "rejeita") ?? "ama", pend.artista ?? null, pend.titulo, textoOrig);
-      const flags2 = { ...flags, musica_pedida: true };
-      const prox = proximaPerguntaFaltante(ouvinte, flags2);
-      const concluido = prox.campo === "concluido";
-      const msg = `Boa escolha, já anotei! ${prox.texto}`;
-      const hist = pushHist(ctx.historico, texto, msg);
-      await db.from("conversas").update({
-        etapa: concluido ? "concluido" : "cadastro",
-        contexto: { flags: flags2, historico: hist },
-      }).eq("id", conversaId);
-      if (concluido) {
-        await db.from("ouvintes").update({ participacoes: (ouvinte.participacoes ?? 0) + 1 }).eq("id", ouvinteId);
-      }
-      await reply(phone, conversaId, radioId, msg);
+      await gravarVotosESeguir(pend.titulo ?? null, pend.artista ?? null, flags);
       return new Response("ok", { status: 200 });
     }
     if (NEGATIVAS.has(chave)) {
-      const msg = "Sem problema! Me manda de novo: qual é a música? Se souber, manda o nome do cantor também.";
+      const inst =
+        "o ouvinte disse que nao era essa musica; diga tranquilo e peca pra ele mandar de novo qual musica quer, com o nome do cantor se souber";
+      const fallback = `Sem problema${primeiroNome ? ", " + primeiroNome : ""}! Me manda de novo qual música você quer, e o cantor se souber.`;
+      const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
       const hist = pushHist(ctx.historico, texto, msg);
       await db.from("conversas").update({
         etapa: "cadastro",
-        contexto: { ...ctx, pending_musica: null, historico: hist },
+        contexto: { flags, historico: hist },
       }).eq("id", conversaId);
       await reply(phone, conversaId, radioId, msg);
       return new Response("ok", { status: 200 });
     }
-    // Ambiguo: repete a confirmacao sem perder o contexto.
-    const msg = pend.artista
-      ? `Só confirma pra mim: é "${pend.titulo}", do ${pend.artista}? (responde sim ou não)`
-      : `Só confirma pra mim: é "${pend.titulo}"? (responde sim ou não)`;
-    await reply(phone, conversaId, radioId, msg);
+    // Resposta ambigua: a Adriana repete a confirmacao, sem perder o contexto.
+    await confirmarComOuvinte(pend.titulo ?? "", pend.artista ?? null, flags);
     return new Response("ok", { status: 200 });
   }
 
-  // ===== Segundo tempo do pedido de musica: cantor ja conhecido, agora chega o titulo =====
-  // Junta o cantor guardado com o texto novo (mesmo torto) e busca a musica real no Google.
+  // ===== CASO 1 (2o tempo): tem o CANTOR, agora chega a MUSICA. Junta e busca. =====
   if (etapa === "musica_aguarda_titulo" && ctx.pending_artista) {
     const artista = ctx.pending_artista as string;
     const chave = normalizarSemAcento(texto);
+    // "qualquer/tanto faz/nao sei" => registra SO o voto do cantor (nao ha texto de musica).
     const QUALQUER = new Set([
       "qualquer", "qualquer uma", "qualquer musica", "tanto faz", "o que tiver",
       "pode ser qualquer", "qualquer coisa", "surpresa", "escolhe voce",
+      "nao sei", "sei la", "voce escolhe", "o que voce quiser",
     ]);
     if (QUALQUER.has(chave)) {
       const artCanon = (await confirmarArtista(artista)) ?? titleCasePtBr(artista);
-      await gravarMusica(radioId, ouvinteId, "ama", artCanon, null, artista);
-      const flags2 = { ...flags, musica_pedida: true };
-      const prox = proximaPerguntaFaltante(ouvinte, flags2);
-      const concluido = prox.campo === "concluido";
-      const msg = `Fechado! Vou colocar um ${artCanon} pra você. ${prox.texto}`;
-      const hist = pushHist(ctx.historico, texto, msg);
-      await db.from("conversas").update({
-        etapa: concluido ? "concluido" : "cadastro",
-        contexto: { flags: flags2, historico: hist },
-      }).eq("id", conversaId);
-      if (concluido) {
-        await db.from("ouvintes").update({ participacoes: (ouvinte.participacoes ?? 0) + 1 }).eq("id", ouvinteId);
-      }
-      await reply(phone, conversaId, radioId, msg);
+      await gravarVotosESeguir(null, artCanon, flags);
       return new Response("ok", { status: 200 });
     }
     if (NEGATIVAS.has(chave)) {
+      // Desistiu da musica: nao grava nada, segue o cadastro.
       const flags2 = { ...flags, musica_pedida: true };
-      const msg = `Tranquilo${primeiroNome ? ", " + primeiroNome : ""}! Se quiser pedir outra música é só mandar o nome.`;
+      const prox = proximaPerguntaFaltante(ouvinte, flags2);
+      const inst = prox.campo === "concluido"
+        ? `o ouvinte nao quis pedir musica agora; agradeça e convide ele a continuar ouvindo a ${RADIO_LABEL}`
+        : `o ouvinte nao quis pedir musica agora; diga tranquilo e ${intencaoProximoCampo(prox.campo)}`;
+      const fallback = `Tranquilo${primeiroNome ? ", " + primeiroNome : ""}! ${prox.texto}`;
+      const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
       const hist = pushHist(ctx.historico, texto, msg);
       await db.from("conversas").update({
-        etapa: "cadastro",
+        etapa: prox.campo === "concluido" ? "concluido" : "cadastro",
         contexto: { flags: flags2, historico: hist },
       }).eq("id", conversaId);
       await reply(phone, conversaId, radioId, msg);
       return new Response("ok", { status: 200 });
     }
+    // Tem cantor + texto de musica: busca a versao oficial e confirma.
     const oficial = await resolverMusicaOficial(texto, artista);
-    const artistaFinal = oficial.artista ?? titleCasePtBr(artista);
-    const msg = `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${oficial.titulo}", do ${artistaFinal}. Confirma pra mim! (responde sim ou não)`;
-    const hist = pushHist(ctx.historico, texto, msg);
-    await db.from("conversas").update({
-      etapa: "confirma_musica",
-      contexto: {
-        flags,
-        historico: hist,
-        pending_musica: { titulo: oficial.titulo, artista: artistaFinal, sentimento: "ama" },
-      },
-    }).eq("id", conversaId);
-    await reply(phone, conversaId, radioId, msg);
+    await confirmarComOuvinte(oficial.titulo, oficial.artista ?? titleCasePtBr(artista), flags);
+    return new Response("ok", { status: 200 });
+  }
+
+  // ===== CASO 2 (2o tempo): tem a MUSICA, agora chega o CANTOR (ou "nao sei"). =====
+  if (etapa === "musica_aguarda_cantor" && ctx.pending_musica_texto) {
+    const musica = ctx.pending_musica_texto as string;
+    const chave = normalizarSemAcento(texto);
+    const NAO_SEI = new Set([
+      "nao sei", "nao sei quem canta", "sei la", "nao lembro", "nao faco ideia",
+      "nao faco a menor ideia", "sla", "nem sei", "nao conheco",
+    ]);
+    if (NAO_SEI.has(chave) || NEGATIVAS.has(chave)) {
+      // Existe texto de musica: a Adriana busca a musica sozinha pra descobrir o cantor real.
+      const oficial = await resolverMusicaOficial(musica, null);
+      await confirmarComOuvinte(oficial.titulo, oficial.artista ?? null, flags);
+      return new Response("ok", { status: 200 });
+    }
+    // Tem musica + cantor: junta, busca e confirma.
+    const oficial = await resolverMusicaOficial(musica, texto);
+    await confirmarComOuvinte(oficial.titulo, oficial.artista ?? titleCasePtBr(texto), flags);
     return new Response("ok", { status: 200 });
   }
 
@@ -1094,52 +1178,43 @@ Deno.serve(async (req: Request) => {
   const artistaHint = val(dec.artista_bruto);
   const musicaBruta = val(dec.musica_bruta);
 
-  // "Qualquer uma do X": grava so o artista e segue (sem confirmacao).
+  // "Qualquer uma do X": registra SO o voto de cantor e segue (sem confirmacao, sem busca).
   if (dec.qualquer_do_artista && artistaHint && !overrideMsg) {
     const artCanon = (await confirmarArtista(artistaHint)) ?? titleCasePtBr(artistaHint);
-    await gravarMusica(radioId, ouvinteId, "ama", artCanon, null, musicaBruta ?? artistaHint);
-    flagsNovas.musica_pedida = true;
-    const prox = proximaPerguntaFaltante(ouvinteAtual, flagsNovas);
-    const concluido = prox.campo === "concluido";
-    const msg = `Fechado! Vou colocar um ${artCanon} pra você. ${prox.texto}`;
+    await gravarVotosESeguir(null, artCanon, flagsNovas);
+    return new Response("ok", { status: 200 });
+  }
+
+  // CASO 3: cantor + musica juntos -> busca a versao oficial e confirma.
+  if (dec.e_pedido_musica && musicaBruta && artistaHint && !overrideMsg) {
+    const oficial = await resolverMusicaOficial(musicaBruta, artistaHint);
+    await confirmarComOuvinte(oficial.titulo, oficial.artista ?? titleCasePtBr(artistaHint), flagsNovas);
+    return new Response("ok", { status: 200 });
+  }
+
+  // CASO 2: SO a musica (sem cantor). Guarda a musica e pergunta quem canta. NAO busca ainda.
+  if (dec.e_pedido_musica && musicaBruta && !artistaHint && !overrideMsg) {
+    const inst = `o ouvinte pediu a música "${musicaBruta}"; pergunte de forma natural quem canta essa música`;
+    const fallback = `Boa${primeiroNome ? ", " + primeiroNome : ""}! E quem canta "${musicaBruta}"?`;
+    const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
-      etapa: concluido ? "concluido" : "cadastro",
-      contexto: { flags: flagsNovas, historico: hist },
+      etapa: "musica_aguarda_cantor",
+      contexto: { flags: flagsNovas, historico: hist, pending_musica_texto: musicaBruta },
     }).eq("id", conversaId);
-    if (concluido) {
-      await db.from("ouvintes").update({ participacoes: (ouvinte.participacoes ?? 0) + 1 }).eq("id", ouvinteId);
-    }
     await reply(phone, conversaId, radioId, msg);
     return new Response("ok", { status: 200 });
   }
 
-  // So o CANTOR (sem titulo): guarda o cantor e pergunta a musica, sem repedir o cantor.
+  // CASO 1: SO o cantor (sem titulo). Guarda o cantor e pergunta a musica. PROIBIDO buscar aqui.
   if (dec.e_pedido_musica && artistaHint && !musicaBruta && !overrideMsg) {
-    const msg = `${primeiroNome ? primeiroNome + ", " : ""}boa escolha! E qual música do ${artistaHint} você quer ouvir?`;
+    const inst = `o ouvinte quer ouvir o cantor ${artistaHint}; pergunte de forma animada qual música dele(a) o ouvinte quer ouvir`;
+    const fallback = `${primeiroNome ? primeiroNome + ", " : ""}boa escolha! E qual música do ${artistaHint} você quer ouvir?`;
+    const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
       etapa: "musica_aguarda_titulo",
       contexto: { flags: flagsNovas, historico: hist, pending_artista: artistaHint },
-    }).eq("id", conversaId);
-    await reply(phone, conversaId, radioId, msg);
-    return new Response("ok", { status: 200 });
-  }
-
-  // Pedido com uma musica nomeada: resolve a oficial (Google -> catalogo -> literal) e CONFIRMA.
-  if (dec.e_pedido_musica && musicaBruta && !overrideMsg) {
-    const oficial = await resolverMusicaOficial(musicaBruta, artistaHint);
-    const msg = oficial.artista
-      ? `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${oficial.titulo}", do ${oficial.artista}. Confirma pra mim! (responde sim ou não)`
-      : `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${oficial.titulo}". Confirma pra mim! (responde sim ou não)`;
-    const hist = pushHist(ctx.historico, texto, msg);
-    await db.from("conversas").update({
-      etapa: "confirma_musica",
-      contexto: {
-        flags: flagsNovas,
-        historico: hist,
-        pending_musica: { titulo: oficial.titulo, artista: oficial.artista, sentimento: "ama" },
-      },
     }).eq("id", conversaId);
     await reply(phone, conversaId, radioId, msg);
     return new Response("ok", { status: 200 });
