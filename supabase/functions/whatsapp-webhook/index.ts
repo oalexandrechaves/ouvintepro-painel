@@ -1,6 +1,9 @@
 // OuvintePro - webhook "ao receber" da Z-API.
 // Recebe mensagens do WhatsApp da radio, roda a conversa da Adriana e responde pela Z-API.
 // Tom: simpatico, direto e transparente. A IA conduz a conversa nos bastidores.
+// v51: radio_troca agora extrai o nome da radio de frase natural ("eu troco pra mix" -> Mix),
+// via extrairRadioDaFrase (tira verbos/conectores do inicio, preserva "Radio" quando faz parte
+// do nome) + resolverRadio; nega/loop tratados; sem regressao no fluxo de musica.
 // v50: fluxo de musica reprojetado (dois votos independentes cantor/musica). So busca no
 // Google quando existe TEXTO de musica (regra de ouro: so cantor nunca dispara busca). Toda
 // fala do fluxo de musica vem do cerebro (falaAdriana), sem frase fixa do codigo. Estados:
@@ -677,6 +680,37 @@ Responda APENAS com o texto da mensagem, sem aspas, sem JSON.
   return t ? t.replace(/^["']+|["']+$/g, "").trim() : null;
 }
 
+// Conectores/verbos comuns antes do nome da radio. "radio/rádio" NAO entra aqui:
+// so e removida se sobrar sozinha (conector puro), preservando "Radio Globo", "Radio Mix" etc.
+const STOP_RADIO_INICIO = new Set([
+  "eu", "voce", "vc", "a", "gente", "troco", "mudo", "muda", "vou", "viro",
+  "passo", "pra", "para", "pro", "pras", "pros", "o", "na", "no", "numa", "num",
+  "de", "do", "da", "escuto", "ouco", "coloco", "ponho", "boto", "sempre",
+  "geralmente", "normalmente", "as", "vezes", "quando", "costumo", "fico", "mais",
+  "ai", "entao", "gosto", "curto", "prefiro", "sintonizo", "vou pra",
+]);
+
+// Extrai o nome da radio de uma frase natural, removendo conectores do INICIO.
+function extrairRadioDaFrase(texto: string): string {
+  const limpo = texto.trim().replace(/[.!?,;]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!limpo) return "";
+  let palavras = limpo.split(" ");
+  while (palavras.length && STOP_RADIO_INICIO.has(normalizarSemAcento(palavras[0]))) {
+    palavras.shift();
+  }
+  // "radio"/"rádio" sozinha (sem nome depois) e conector puro -> descarta.
+  if (palavras.length === 1 && /^r[aá]dio$/i.test(palavras[0])) palavras = [];
+  return palavras.join(" ").trim();
+}
+
+// Negativa de troca de radio ("nao mudo", "fico na Nativa", "nao troco", "nenhuma"...).
+function ehNegativaRadio(texto: string): boolean {
+  const n = normalizarSemAcento(texto);
+  if (NEGATIVAS.has(n)) return true;
+  return /\b(nao (mudo|muda|troco|saio|mexo|mudo de radio)|fico (na nativa|aqui|com voces|com a nativa)|nenhuma|so (a )?nativa|nativa mesmo|nao troco)\b/
+    .test(n);
+}
+
 // Intencao interna do proximo campo de cadastro (usada quando a Adriana segue apos a musica).
 function intencaoProximoCampo(campo: string): string {
   switch (campo) {
@@ -920,6 +954,66 @@ Deno.serve(async (req: Request) => {
     await reply(phone, conversaId, radioId, msg);
   }
 
+  // Trata a resposta de radio_troca (extrai nome de frase natural, registra e segue).
+  // Deterministico: nao depende do cerebro (imune a 429), nunca entra em loop.
+  async function handleRadioTroca(radioAlvoRaw: string) {
+    const flags2: Record<string, unknown> = { ...flags, radio_troca_pedida: true };
+    let registrou = false;
+    if (!ehNegativaRadio(radioAlvoRaw)) {
+      const bruto = extrairRadioDaFrase(radioAlvoRaw);
+      const alnum = normalizarSemAcento(bruto).replace(/[^a-z0-9]/g, "");
+      if (alnum.length >= 2) {
+        for (const item of splitLista(bruto)) {
+          const nc = await resolverRadio(item);
+          await db.from("radios_concorrentes").insert({
+            radio_id: radioId,
+            ouvinte_id: ouvinteId,
+            nome_radio: item,
+            nome_canonico: nc,
+          });
+        }
+        registrou = true;
+      } else if (flags.radio_tentativa !== true) {
+        // 1a vez sem nome identificavel: pede de novo UMA vez, de forma natural (nao identica).
+        const reask = (await falaAdriana(
+          "o ouvinte nao deixou claro pra qual radio ele troca quando nao gosta da musica; pergunte de novo, de um jeito diferente e natural, o nome da radio que ele coloca",
+          primeiroNome,
+        )) ?? `E me diz${primeiroNome ? ", " + primeiroNome : ""}, qual rádio você coloca quando não curte a música que tá tocando?`;
+        const hist = pushHist(ctx.historico, texto, reask);
+        await db.from("conversas").update({
+          etapa: "cadastro",
+          contexto: { flags: { ...flags, radio_tentativa: true }, historico: hist },
+        }).eq("id", conversaId);
+        await reply(phone, conversaId, radioId, reask);
+        return;
+      }
+      // 2a vez ainda vazio: desiste (flags2.radio_troca_pedida ja true) e segue.
+    }
+    // Registrou ou ficou na Nativa: a Adriana agradece/segue pro proximo campo.
+    const prox = proximaPerguntaFaltante(ouvinte, flags2);
+    const concluido = prox.campo === "concluido";
+    const inst = concluido
+      ? `agradeça e convide o ouvinte a continuar ouvindo a ${RADIO_LABEL}`
+      : `${registrou ? "anotei a rádio que ele troca quando não gosta; " : "tudo bem, ele fica na Nativa; "}na sequência, ${intencaoProximoCampo(prox.campo)}`;
+    const fallbackMsg = concluido
+      ? `Show${primeiroNome ? ", " + primeiroNome : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
+      : `Show! ${prox.texto}`;
+    let msg = (await falaAdriana(inst, primeiroNome)) ?? fallbackMsg;
+    if (concluido && flags2.concluido !== true) {
+      flags2.concluido = true;
+      msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
+      await db.from("ouvintes").update({
+        participacoes: (ouvinte.participacoes ?? 0) + 1,
+      }).eq("id", ouvinteId);
+    }
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: concluido ? "concluido" : "cadastro",
+      contexto: { flags: flags2, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+  }
+
   // ===== GUARDA-CORPO: ofensa e drogas ANTES de tudo (a IA nunca ve isso) =====
   if (isTexto) {
     const ehOfensa = listaContemTermo(texto, TERMOS_OFENSA);
@@ -1043,6 +1137,15 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // ===== radio_troca: quando essa e a pergunta atual, trata deterministico (antes do cerebro) =====
+  if (
+    isTexto && flags.radio_troca_pedida !== true &&
+    camposFaltantes(ouvinte, flags)[0] === "radio_troca"
+  ) {
+    await handleRadioTroca(texto);
+    return new Response("ok", { status: 200 });
+  }
+
   // ===== Cerebro conversacional: a Adriana conduz =====
   const coletado = montarColetado(ouvinte, flags);
   const dec = await cerebroAdriana(
@@ -1149,24 +1252,6 @@ Deno.serve(async (req: Request) => {
   const programaCampo = val(campos.programa_locutor);
   if (programaCampo && !NEGATIVAS.has(normalizarSemAcento(programaCampo))) {
     upd.programa_locutor = titleCasePtBr(programaCampo);
-  }
-
-  const radioCampo = val(campos.radio_troca);
-  if (radioCampo) {
-    if (NEGATIVAS.has(normalizarSemAcento(radioCampo))) {
-      flagsNovas.radio_troca_pedida = true;
-    } else {
-      for (const item of splitLista(radioCampo)) {
-        const nc = await resolverRadio(item);
-        await db.from("radios_concorrentes").insert({
-          radio_id: radioId,
-          ouvinte_id: ouvinteId,
-          nome_radio: item,
-          nome_canonico: nc,
-        });
-      }
-      flagsNovas.radio_troca_pedida = true;
-    }
   }
 
   if (Object.keys(upd).length) {
