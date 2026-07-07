@@ -1,6 +1,11 @@
 // OuvintePro - webhook "ao receber" da Z-API.
 // Recebe mensagens do WhatsApp da radio, roda a conversa da Adriana e responde pela Z-API.
 // Tom: simpatico, direto e transparente. A IA conduz a conversa nos bastidores.
+// v54: MIGRACAO Gemini -> Claude (Anthropic). cerebroAdriana/falaAdriana usam claude-haiku-4-5
+// (claudeJSON via tool use forcado para manter o JSON; claudeTexto para a fala). Correcao de
+// musica usa a busca web da Claude (claudeBusca) como fonte de verdade, mantendo iTunes/Deezer de
+// reserva. Transcricao de audio migrada para o Groq Whisper (whisper-large-v3-turbo). Guarda-corpos
+// preservados. Secrets: ANTHROPIC_API_KEY, GROQ_API_KEY.
 // v53: regra anti-placeholder tambem no prompt do cerebroAdriana (espelha a do falaAdriana):
 // nome vazio -> nao cita nome, nunca inventa "[Nome do ouvinte]". Fecha o unico caminho cru
 // (dec.resposta_ao_ouvinte usado direto) que ainda podia vazar o placeholder na pergunta da data.
@@ -23,46 +28,52 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ZAPI_INSTANCE_ID = Deno.env.get("ZAPI_INSTANCE_ID")!;
 const ZAPI_TOKEN = Deno.env.get("ZAPI_TOKEN")!;
 const ZAPI_CLIENT_TOKEN = Deno.env.get("ZAPI_CLIENT_TOKEN")!;
-const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
-// Modelo para audio e para grounding (google_search). Free tier.
-const GEMINI_AUDIO_MODEL = "gemini-2.5-flash";
-const GEMINI_GROUNDING_MODEL = "gemini-2.5-flash";
+const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+const CLAUDE_MODEL = "claude-haiku-4-5";
+const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY") ?? "";
+const GROQ_MODEL = "whisper-large-v3-turbo";
 
 const db = createClient(SUPABASE_URL, SERVICE_ROLE);
 
-// Chama o Gemini esperando JSON puro de volta. Retorna null em qualquer falha.
-async function geminiJSON<T>(prompt: string, tentativas = 2): Promise<T | null> {
-  if (!GEMINI_API_KEY) return null;
+// Chama a Claude esperando JSON estruturado, via tool use forcado. Retorna null em qualquer falha.
+async function claudeJSON<T>(prompt: string, tentativas = 2): Promise<T | null> {
+  if (!ANTHROPIC_API_KEY) return null;
   for (let i = 0; i < tentativas; i++) {
     try {
-      const url =
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-      const res = await fetch(url, {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            temperature: 0.2,
-          },
+          model: CLAUDE_MODEL,
+          max_tokens: 1024,
+          temperature: 0.2,
+          tools: [{
+            name: "responder",
+            description: "Devolve a resposta estruturada exatamente no formato JSON pedido no prompt.",
+            input_schema: { type: "object", properties: {}, additionalProperties: true },
+          }],
+          tool_choice: { type: "tool", name: "responder" },
+          messages: [{ role: "user", content: prompt }],
         }),
       });
       if (!res.ok) {
-        console.error(`Gemini falhou: status=${res.status} (tentativa ${i + 1})`);
-        if ((res.status === 429 || res.status >= 500) && i < tentativas - 1) {
+        console.error(`Claude JSON falhou: status=${res.status} (tentativa ${i + 1})`);
+        if ((res.status === 429 || res.status === 529 || res.status >= 500) && i < tentativas - 1) {
           await new Promise((r) => setTimeout(r, 1200));
           continue;
         }
         return null;
       }
       const data = await res.json();
-      const txt = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!txt) return null;
-      return JSON.parse(txt) as T;
+      const bloco = (data?.content ?? []).find((b: { type?: string }) => b?.type === "tool_use");
+      if (bloco?.input) return bloco.input as T;
+      return null;
     } catch (e) {
-      console.error(`Gemini excecao (tentativa ${i + 1}): ${e}`);
+      console.error(`Claude JSON excecao (tentativa ${i + 1}): ${e}`);
       if (i < tentativas - 1) {
         await new Promise((r) => setTimeout(r, 1200));
         continue;
@@ -73,43 +84,82 @@ async function geminiJSON<T>(prompt: string, tentativas = 2): Promise<T | null> 
   return null;
 }
 
-// Variante do Gemini que aceita tools (ex.: google_search) e devolve TEXTO livre.
-// NAO usa responseMimeType (a API proibe grounding + json na mesma chamada).
-async function geminiTexto(
-  prompt: string,
-  model: string,
-  tools?: unknown[],
-): Promise<string | null> {
-  if (!GEMINI_API_KEY) return null;
+// Chama a Claude esperando TEXTO livre (fala natural da Adriana), sem tools.
+async function claudeTexto(prompt: string, temperature = 0.6): Promise<string | null> {
+  if (!ANTHROPIC_API_KEY) return null;
   try {
-    const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
-    const body: Record<string, unknown> = {
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2 },
-    };
-    if (tools) body.tools = tools;
-    const res = await fetch(url, {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 300,
+        temperature,
+        messages: [{ role: "user", content: prompt }],
+      }),
     });
     if (!res.ok) {
-      console.error(`geminiTexto falhou: status=${res.status}`);
+      console.error(`claudeTexto falhou: status=${res.status}`);
       return null;
     }
     const data = await res.json();
-    const parts = data?.candidates?.[0]?.content?.parts ?? [];
-    const txt = parts.map((p: { text?: string }) => p?.text ?? "").join(" ").trim();
+    const txt = (data?.content ?? [])
+      .filter((b: { type?: string }) => b?.type === "text")
+      .map((b: { text?: string }) => b?.text ?? "")
+      .join(" ").trim();
     return txt || null;
   } catch (e) {
-    console.error(`geminiTexto excecao: ${e}`);
+    console.error(`claudeTexto excecao: ${e}`);
     return null;
   }
 }
 
-// FONTE DE VERDADE: usa o Google (grounding do Gemini) pra achar a musica real.
-// Duas chamadas: 1) grounding em texto livre; 2) extracao estruturada. Nunca inventa.
+// Usa a busca web da Claude como FONTE DE VERDADE para achar a musica real. Devolve o texto ou null.
+async function claudeBusca(prompt: string): Promise<string | null> {
+  if (!ANTHROPIC_API_KEY) return null;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 1024,
+        temperature: 0,
+        tools: [{
+          type: "web_search_20250305",
+          name: "web_search",
+          max_uses: 3,
+          user_location: { type: "approximate", country: "BR" },
+        }],
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      console.error(`claudeBusca falhou: status=${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const txt = (data?.content ?? [])
+      .filter((b: { type?: string }) => b?.type === "text")
+      .map((b: { text?: string }) => b?.text ?? "")
+      .join(" ").trim();
+    return txt || null;
+  } catch (e) {
+    console.error(`claudeBusca excecao: ${e}`);
+    return null;
+  }
+}
+
+// FONTE DE VERDADE: usa a busca web da Claude pra achar a musica real.
+// Duas chamadas: 1) busca em texto livre; 2) extracao estruturada. Nunca inventa.
 async function buscarMusicaGrounding(
   textoBruto: string,
   artistaOpcional?: string | null,
@@ -122,14 +172,13 @@ async function buscarMusicaGrounding(
   const prompt1 = `
 Você ajuda uma rádio brasileira a identificar pedidos de música no WhatsApp.
 O ouvinte escreveu o pedido, possivelmente com erro de grafia ou de ouvido: "${q}".${dica}
-Usando a busca do Google, descubra qual é a MÚSICA REAL e o ARTISTA REAL que ele quis pedir.
+Usando a busca web, descubra qual é a MÚSICA REAL e o ARTISTA REAL que ele quis pedir.
 Responda em uma frase curta com o título oficial e o artista oficial, por exemplo: A música é "Dormi na Praça", do Bruno e Marrone.
 Se não existir nenhuma música correspondente, responda exatamente: NAO ENCONTRADO
 `;
-  const t = await geminiTexto(prompt1, GEMINI_GROUNDING_MODEL, [{ google_search: {} }]);
+  const t = await claudeBusca(prompt1);
   if (!t) return null;
-  if (/nao\s+encontrado/i.test(t) || /n[aã]o\s+encontrad/i.test(t)) return null;
-
+  if (/n[aã]o\s+encontrad/i.test(t)) return null;
   const prompt2 = `
 Do texto a seguir, extraia a música e o artista mencionados.
 Texto: """${t}"""
@@ -137,24 +186,14 @@ Se o texto disser claramente que não encontrou, use encontrou=false.
 Responda APENAS com JSON, sem texto fora do JSON:
 {"encontrou":true ou false,"titulo":"Título Oficial ou null","artista":"Artista Oficial ou null"}
 `;
-  const out = await geminiJSON<{ encontrou: boolean; titulo: string | null; artista: string | null }>(prompt2);
+  const out = await claudeJSON<{ encontrou: boolean; titulo: string | null; artista: string | null }>(prompt2);
   if (!out || !out.encontrou || !out.titulo) return null;
   return { titulo: out.titulo, artista: out.artista ?? null };
 }
 
-// Converte bytes em base64 em blocos (evita estourar a pilha em audios maiores).
-function bytesToB64(bytes: Uint8Array): string {
-  let bin = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(bin);
-}
-
-// Transcreve um audio do WhatsApp nos bastidores (Gemini). Retorna o texto falado ou null.
+// Transcreve um audio do WhatsApp nos bastidores (Groq Whisper). Retorna o texto falado ou null.
 async function transcreverAudio(url: string, mime: string): Promise<string | null> {
-  if (!GEMINI_API_KEY) return null;
+  if (!GROQ_API_KEY) return null;
   try {
     const r = await fetch(url);
     if (!r.ok) {
@@ -162,36 +201,37 @@ async function transcreverAudio(url: string, mime: string): Promise<string | nul
       return null;
     }
     const bytes = new Uint8Array(await r.arrayBuffer());
-    if (bytes.length > 8_000_000) {
+    if (bytes.length > 24_000_000) {
       console.error(`audio grande demais para transcrever: ${bytes.length} bytes`);
       return null;
     }
-    const b64 = bytesToB64(bytes);
-    const apiUrl =
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_AUDIO_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-    const res = await fetch(apiUrl, {
+    const tipo = (mime || "audio/ogg").toLowerCase();
+    const ext = tipo.includes("mp4") || tipo.includes("m4a") || tipo.includes("aac")
+      ? "m4a"
+      : tipo.includes("mpeg") || tipo.includes("mp3")
+      ? "mp3"
+      : tipo.includes("wav")
+      ? "wav"
+      : tipo.includes("webm")
+      ? "webm"
+      : "ogg";
+    const form = new FormData();
+    form.append("file", new Blob([bytes], { type: mime || "audio/ogg" }), `audio.${ext}`);
+    form.append("model", GROQ_MODEL);
+    form.append("language", "pt");
+    form.append("response_format", "json");
+    form.append("temperature", "0");
+    const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            {
-              text:
-                "Transcreva exatamente o que a pessoa falou neste audio, em portugues do Brasil. " +
-                "Responda APENAS com o texto falado, sem aspas e sem comentarios. Se nao houver fala, responda vazio.",
-            },
-            { inlineData: { mimeType: mime || "audio/ogg", data: b64 } },
-          ],
-        }],
-        generationConfig: { temperature: 0 },
-      }),
+      headers: { "Authorization": `Bearer ${GROQ_API_KEY}` },
+      body: form,
     });
     if (!res.ok) {
-      console.error(`Gemini audio falhou: status=${res.status}`);
+      console.error(`Groq audio falhou: status=${res.status}`);
       return null;
     }
     const data = await res.json();
-    const txt = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const txt = data?.text;
     return (typeof txt === "string" && txt.trim()) ? txt.trim() : null;
   } catch (e) {
     console.error(`transcrever audio excecao: ${e}`);
@@ -310,7 +350,7 @@ Nao invente. Responda APENAS com JSON, sem texto fora do JSON:
 {"bairro":"Forma Canonica","zona":"Norte|Sul|Leste|Oeste|Centro|Outras"}
 Resposta do ouvinte: """${texto}"""
 `;
-  return await geminiJSON<{ bairro: string; zona: string }>(prompt);
+  return await claudeJSON<{ bairro: string; zona: string }>(prompt);
 }
 
 // Grava uma musica canonica e devolve o id inserido (ou null).
@@ -692,7 +732,7 @@ Regras:
 Responda APENAS com JSON, sem texto fora do JSON:
 {"resposta_ao_ouvinte":"...","campos_extraidos":{},"proximo_campo":"...","e_pedido_musica":false,"musica_bruta":null,"artista_bruto":null,"qualquer_do_artista":false}
 `;
-  return await geminiJSON<DecisaoCerebro>(prompt);
+  return await claudeJSON<DecisaoCerebro>(prompt);
 }
 
 // Gera UMA fala natural da Adriana a partir de uma intencao interna. TODA fala do
@@ -704,7 +744,7 @@ Você pode usar o primeiro nome do ouvinte no cumprimento, se houver: "${primeir
 Escreva UMA mensagem curta (1 ou 2 frases) para o ouvinte cumprindo esta intenção interna (a intenção é só sua, não a repita literalmente): ${instrucao}
 Responda APENAS com o texto da mensagem, sem aspas, sem JSON.
 `;
-  const t = await geminiTexto(prompt, GEMINI_MODEL);
+  const t = await claudeTexto(prompt);
   return t ? t.replace(/^["']+|["']+$/g, "").trim() : null;
 }
 
@@ -887,7 +927,7 @@ Deno.serve(async (req: Request) => {
     .update({ ultima_atividade_em: new Date().toISOString() })
     .eq("id", conversaId);
 
-  // Audio: transcreve nos bastidores (Gemini) e segue como se fosse texto.
+  // Audio: transcreve nos bastidores (Groq Whisper) e segue como se fosse texto.
   let audioFalhou = false;
   if (isAudio && !isTexto) {
     const transcrito = await transcreverAudio(audioUrl!, audioMime);
