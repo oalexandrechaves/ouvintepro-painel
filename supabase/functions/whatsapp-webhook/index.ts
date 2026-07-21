@@ -593,6 +593,42 @@ function removerSaudacaoInicial(texto: string): string {
   return t;
 }
 
+// Saudacoes/cortesias e prefixos de nome removidos do INICIO da resposta, em laco.
+// Cada item e uma sequencia de palavras (normalizadas, sem acento). Ordena por tamanho desc.
+const PREFIXOS_NOME: string[][] = [
+  ["meu", "nome", "e"], ["pode", "me", "chamar", "de"], ["pode", "chamar", "de"],
+  ["aqui", "e", "o"], ["aqui", "e", "a"], ["aqui", "e"], ["me", "chamo"],
+  ["eu", "sou", "o"], ["eu", "sou", "a"], ["eu", "sou"], ["sou", "o"], ["sou", "a"], ["sou"],
+  ["bom", "dia"], ["boa", "tarde"], ["boa", "noite"],
+  ["tudo", "bem"], ["tudo", "bom"], ["tudo", "otimo"], ["tudo", "certo"], ["tudo", "tranquilo"],
+  ["e", "ai"], ["oi"], ["ola"], ["alo"], ["opa"], ["salve"], ["eai"], ["eae"], ["fala"],
+  ["hey"], ["hi"], ["hello"], ["beleza"], ["blz"], ["de", "boa"], ["suave"], ["tranquilo"],
+].sort((a, b) => b.length - a.length);
+
+// Extrai o nome proprio: tokeniza e descarta saudacoes/prefixos do inicio ate sobrar o nome.
+// Se sobrar nome composto (ex: "Ana Paula"), mantem as duas palavras.
+function extrairNomeProprio(texto: string): string {
+  let s = texto.trim();
+  let mudou = true;
+  while (mudou) {
+    mudou = false;
+    s = s.replace(/^[\s,.!?;:-]+/, "");
+    const palavras = s.split(/\s+/).filter(Boolean);
+    if (!palavras.length) break;
+    const norm = palavras.map((p) =>
+      normalizarSemAcento(p.replace(/^[.,!?;:-]+|[.,!?;:-]+$/g, ""))
+    );
+    for (const pref of PREFIXOS_NOME) {
+      if (palavras.length >= pref.length && pref.every((w, i) => norm[i] === w)) {
+        s = palavras.slice(pref.length).join(" ");
+        mudou = true;
+        break;
+      }
+    }
+  }
+  return s.replace(/^[\s,.!?;:-]+|[\s,.!?;:-]+$/g, "").trim();
+}
+
 function normalizarSemAcento(s: string): string {
   return s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
@@ -1284,11 +1320,12 @@ Deno.serve(async (req: Request) => {
     const anoAtual = new Date().getUTCFullYear();
 
     if (campo === "nome") {
-      const base = limparPrefixoNome(removerSaudacaoInicial(texto) || texto)
-        .replace(
-          /^(ja falei[,\s]*(que\s+)?(é|eh|e)?|eu ja disse[,\s]*(que\s+)?|falei[,\s]*(que\s+)?|é|eh)\s+/i,
-          "",
-        ).trim();
+      // Tira "ja falei que.../falei que..." e depois descarta saudacoes/prefixos do inicio.
+      const semReclamacao = texto.replace(
+        /^(ja falei[,\s]*(que\s+)?(é|eh|e)?|eu ja disse[,\s]*(que\s+)?|falei[,\s]*(que\s+)?)\s+/i,
+        "",
+      );
+      const base = extrairNomeProprio(semReclamacao);
       const soLetras = base.replace(/[^A-Za-zÀ-ÿ]/g, "");
       const naoEhNome = base.trim().length === 0 ||
         SAUDACOES_NAO_NOME.has(normalizarSemAcento(base)) || soLetras.length < 2;
