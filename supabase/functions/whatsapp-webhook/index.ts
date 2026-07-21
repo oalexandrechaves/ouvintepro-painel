@@ -18,7 +18,8 @@
 // v50: fluxo de musica reprojetado (dois votos independentes cantor/musica). So busca no
 // Google quando existe TEXTO de musica (regra de ouro: so cantor nunca dispara busca). Toda
 // fala do fluxo de musica vem do cerebro (falaAdriana), sem frase fixa do codigo. Estados:
-// musica_aguarda_titulo (tem cantor), musica_aguarda_cantor (tem musica), confirma_musica.
+// musica_aguarda_titulo (tem cantor), musica_aguarda_cantor (tem musica). v71+: quando a busca
+// acha a musica oficial, grava direto com o nome corrigido (sem pedir confirmacao); so nao achou repergunta.
 // Base v49: privacidade (cerebro sem valores) + pula campos preenchidos + grounding.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -302,11 +303,11 @@ async function confirmarArtista(termo: string): Promise<string | null> {
   return null;
 }
 
-// Resolve a musica oficial: grounding (Google) -> catalogo -> literal (sem inventar).
+// Resolve a musica oficial: grounding (Google) -> catalogo. Retorna null quando nao acha (nunca inventa).
 async function resolverMusicaOficial(
   textoBruto: string,
   artistaHint?: string | null,
-): Promise<{ titulo: string; artista: string | null }> {
+): Promise<{ titulo: string; artista: string | null } | null> {
   const g = await buscarMusicaGrounding(textoBruto, artistaHint);
   if (g && g.titulo) {
     return { titulo: g.titulo, artista: g.artista ?? (artistaHint ? titleCasePtBr(artistaHint) : null) };
@@ -314,10 +315,7 @@ async function resolverMusicaOficial(
   const termo = artistaHint ? `${artistaHint} ${textoBruto}` : textoBruto;
   const cat = await buscarMusicaCatalogo(termo);
   if (cat) return { titulo: cat.titulo, artista: cat.artista };
-  return {
-    titulo: titleCasePtBr(textoBruto),
-    artista: artistaHint ? titleCasePtBr(artistaHint) : null,
-  };
+  return null;
 }
 
 // Normaliza pra chave de apelido (sem acento, minusculo, espacos colapsados).
@@ -351,6 +349,121 @@ Nao invente. Responda APENAS com JSON, sem texto fora do JSON:
 Resposta do ouvinte: """${texto}"""
 `;
   return await claudeJSON<{ bairro: string; zona: string }>(prompt);
+}
+
+// ===== ENDERECO POR CEP (portado do EthnosPRO, adaptado para a Adriana) =====
+// So alimenta cidade e bairro; a zona continua sendo resolvida pela logica atual.
+// fetch com timeout curto (via AbortController) para nao travar o webhook.
+async function fetchComTimeout(url: string, ms = 5000): Promise<Response | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { signal: ctrl.signal });
+  } catch (e) {
+    console.error(`fetch de CEP falhou (${url}): ${e}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+interface EnderecoCep {
+  logradouro: string;
+  bairro: string;
+  localidade: string;
+  uf: string;
+  provedor: string;
+}
+
+// Provedor 1: ViaCEP (gratis, sem chave).
+async function consultarViaCep(d: string): Promise<EnderecoCep | null> {
+  const r = await fetchComTimeout(`https://viacep.com.br/ws/${d}/json/`);
+  if (!r) {
+    console.error(`ViaCEP sem resposta para cep=${d}`);
+    return null;
+  }
+  if (!r.ok) {
+    const corpo = await r.text().catch(() => "");
+    console.error(`ViaCEP falhou: status=${r.status} corpo=${corpo.slice(0, 200)} cep=${d}`);
+    return null;
+  }
+  let j: Record<string, unknown>;
+  try {
+    j = await r.json();
+  } catch (e) {
+    console.error(`ViaCEP JSON invalido cep=${d}: ${e}`);
+    return null;
+  }
+  if (!j || j.erro) {
+    console.error(`ViaCEP nao encontrou o cep=${d}`);
+    return null;
+  }
+  return {
+    logradouro: (j.logradouro as string) ?? "",
+    bairro: (j.bairro as string) ?? "",
+    localidade: (j.localidade as string) ?? "",
+    uf: (j.uf as string) ?? "",
+    provedor: "viacep",
+  };
+}
+
+// Provedor 2: BrasilAPI (resiliencia). Mapeia street/neighborhood/city/state.
+async function consultarBrasilApi(d: string): Promise<EnderecoCep | null> {
+  const r = await fetchComTimeout(`https://brasilapi.com.br/api/cep/v2/${d}`);
+  if (!r) {
+    console.error(`BrasilAPI sem resposta para cep=${d}`);
+    return null;
+  }
+  if (!r.ok) {
+    const corpo = await r.text().catch(() => "");
+    console.error(`BrasilAPI falhou: status=${r.status} corpo=${corpo.slice(0, 200)} cep=${d}`);
+    return null;
+  }
+  let j: Record<string, unknown>;
+  try {
+    j = await r.json();
+  } catch (e) {
+    console.error(`BrasilAPI JSON invalido cep=${d}: ${e}`);
+    return null;
+  }
+  if (!j || !(j.street || j.neighborhood || j.city)) {
+    console.error(`BrasilAPI resposta sem endereco cep=${d}`);
+    return null;
+  }
+  return {
+    logradouro: (j.street as string) ?? "",
+    bairro: (j.neighborhood as string) ?? "",
+    localidade: (j.city as string) ?? "",
+    uf: (j.state as string) ?? "",
+    provedor: "brasilapi",
+  };
+}
+
+// Busca CEP em cascata: ViaCEP -> BrasilAPI -> null (fallback manual no fluxo).
+async function consultarCep(cep: string): Promise<EnderecoCep | null> {
+  const d = (cep ?? "").replace(/\D/g, "");
+  if (d.length !== 8) {
+    console.error(`CEP com digitos invalidos: "${d}" (${d.length} digitos)`);
+    return null;
+  }
+  const via = await consultarViaCep(d);
+  if (via) {
+    console.log(`CEP ${d} resolvido pelo provedor: ${via.provedor}`);
+    return via;
+  }
+  const brasil = await consultarBrasilApi(d);
+  if (brasil) {
+    console.log(`CEP ${d} resolvido pelo provedor: ${brasil.provedor}`);
+    return brasil;
+  }
+  console.error(`CEP ${d} falhou em ViaCEP e BrasilAPI, cai no fallback manual`);
+  return null;
+}
+
+// Parece um CEP: 8 digitos (com ou sem hifen).
+function pareceCep(texto: string): boolean {
+  if (/\b\d{5}-?\d{3}\b/.test(texto.trim())) return true;
+  return texto.replace(/\D/g, "").length === 8;
 }
 
 // Grava uma musica canonica e devolve o id inserido (ou null).
@@ -726,7 +839,7 @@ Regras:
 - Pergunte APENAS o primeiro campo que ainda falta (o primeiro item de campos_faltantes). NUNCA pergunte um campo que não está nessa lista. Se a lista estiver vazia, NÃO pergunte cadastro: apenas converse de forma simpática e trate pedidos de música.
 - Se for a primeira interação (sem histórico), se apresente rapidinho como Adriana da ${RADIO_LABEL} e já pergunte o primeiro campo que falta.
 - Uma pergunta por vez, breve e natural. Aceite respostas informais, sem exigir formato.
-- Música: se a pessoa citar só o CANTOR, marque e_pedido_musica=true, ponha o cantor em artista_bruto e deixe musica_bruta null (o sistema vai perguntar a música). Se citar a MÚSICA (com ou sem cantor), ponha o texto cru dela em musica_bruta e o cantor, se houver, em artista_bruto. Se disser "tanto faz" ou "qualquer" pra um cantor, marque qualquer_do_artista=true e ponha o cantor em artista_bruto. NUNCA invente nome de música nem corrija a grafia; quem confirma com a fonte oficial é o sistema.
+- Música (REGRA DE OURO): só existe pedido de música quando há um TEXTO de música que a pessoa digitou. Se a pessoa citar SÓ o CANTOR (sem nome de música), marque e_pedido_musica=true, ponha o cantor em artista_bruto e deixe musica_bruta null; o sistema vai perguntar a música e esperar. NUNCA trate só o cantor como se fosse a música. Se citar a MÚSICA (com ou sem cantor), ponha o texto cru dela em musica_bruta e o cantor, se houver, em artista_bruto. Se, ao ser perguntada qual música do cantor, a pessoa disser "qualquer uma", "tanto faz", "não sei", "o que tiver", "você escolhe" ou algo assim, marque qualquer_do_artista=true e ponha o cantor em artista_bruto (deixe musica_bruta null) — isso significa aceitar qualquer música daquele artista, sem música específica. NUNCA invente nome de música nem corrija a grafia; quem busca e confirma com a fonte oficial é o sistema.
 - Em campos_extraidos, coloque SÓ o que a mensagem atual permitiu preencher, e SÓ para campos que estão em campos_faltantes, usando exatamente os nomes de campo. Para data_nascimento use AAAA-MM-DD só se tiver certeza do ANO; se faltar o ano, NÃO preencha.
 - proximo_campo: o próximo campo que falta, ou "concluido" se não falta nada.
 Responda APENAS com JSON, sem texto fora do JSON:
@@ -737,10 +850,20 @@ Responda APENAS com JSON, sem texto fora do JSON:
 
 // Gera UMA fala natural da Adriana a partir de uma intencao interna. TODA fala do
 // fluxo de musica passa por aqui: o codigo nunca escreve frase fixa pro ouvinte.
-async function falaAdriana(instrucao: string, primeiroNome: string): Promise<string | null> {
+async function falaAdriana(
+  instrucao: string,
+  primeiroNome: string,
+  jaSaudou = false,
+): Promise<string | null> {
+  // jaSaudou=true significa que a conversa ja teve mensagens antes (nao e o primeiro
+  // contato). Nesse caso a Adriana NAO deve cumprimentar de novo, so ir direto ao ponto.
+  const regraSaudacao = jaSaudou
+    ? `Esta NAO e a primeira mensagem desta conversa. NAO cumprimente de novo: nada de "Oi", "Ola", "Opa", "Tudo bem", "Bom dia", "Boa tarde", "Boa noite". Va direto ao ponto da intencao. Voce pode usar o primeiro nome naturalmente no meio da frase, sem saudacao.`
+    : `Se fizer sentido, voce pode cumprimentar o ouvinte de forma calorosa, usando o primeiro nome no cumprimento se houver.`;
   const prompt = `
 Você é a Adriana, atendente simpática e animada da rádio ${RADIO_LABEL} no WhatsApp. Fala português do Brasil com acentos corretos, tom de rádio, natural e caloroso. NUNCA use travessão. NUNCA escreva "(responde sim ou não)" nem instruções robóticas; a própria frase já convida a resposta.
-Você pode usar o primeiro nome do ouvinte no cumprimento, se houver: "${primeiroNome}". NUNCA cite nenhum outro dado do ouvinte. Se o primeiro nome estiver vazio, NÃO use nome nenhum nem invente placeholder (nada de "[Nome do ouvinte]" ou parecido); apenas fale sem citar nome.
+Primeiro nome do ouvinte (pode estar vazio): "${primeiroNome}". NUNCA cite nenhum outro dado do ouvinte. Se o primeiro nome estiver vazio, NÃO use nome nenhum nem invente placeholder (nada de "[Nome do ouvinte]" ou parecido); apenas fale sem citar nome.
+${regraSaudacao}
 Escreva UMA mensagem curta (1 ou 2 frases) para o ouvinte cumprindo esta intenção interna (a intenção é só sua, não a repita literalmente): ${instrucao}
 Responda APENAS com o texto da mensagem, sem aspas, sem JSON.
 `;
@@ -968,28 +1091,19 @@ Deno.serve(async (req: Request) => {
     db.from("conversas").update({ etapa: e }).eq("id", conversaId);
   const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
   const flags = (ctx.flags as Record<string, unknown> | null) ?? {};
+  // Ja houve mensagem antes nesta conversa? Se sim, a Adriana nao cumprimenta de novo.
+  const jaSaudou = Array.isArray(ctx.historico) &&
+    (ctx.historico as unknown[]).length > 0;
 
-  // Fala da confirmacao (apos buscar): a Adriana confirma a versao oficial e espera o "sim".
-  async function confirmarComOuvinte(
-    titulo: string,
-    artista: string | null,
-    flagsBase: Record<string, unknown>,
-  ) {
-    const inst = artista
-      ? `você buscou e a música que o ouvinte pediu é "${titulo}", do ${artista}; confirme com ele de forma natural e curta, pedindo pra ele confirmar se é essa mesmo`
-      : `você buscou e a música que o ouvinte pediu é "${titulo}"; confirme com ele de forma natural e curta, pedindo pra ele confirmar se é essa mesmo`;
-    const fallback = artista
-      ? `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${titulo}", do ${artista}. Confirma?`
-      : `Essa aqui, né${primeiroNome ? " " + primeiroNome : ""}? "${titulo}". Confirma?`;
-    const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
+  // Nao achou a musica na busca: a Adriana pede o nome de novo, sem inventar nada.
+  async function reperguntarMusica(flagsBase: Record<string, unknown>) {
+    const inst = "você não encontrou a música que o ouvinte pediu; peça de forma calorosa e curta pra ele repetir o nome da música e quem canta, sem chutar nenhum nome";
+    const fallback = `Não encontrei essa aqui${primeiroNome ? ", " + primeiroNome : ""}, me diz de novo o nome da música e quem canta?`;
+    const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallback;
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
-      etapa: "confirma_musica",
-      contexto: {
-        flags: flagsBase,
-        historico: hist,
-        pending_musica: { titulo, artista, sentimento: "ama" },
-      },
+      etapa: "cadastro",
+      contexto: { flags: flagsBase, historico: hist },
     }).eq("id", conversaId);
     await reply(phone, conversaId, radioId, msg);
   }
@@ -1008,13 +1122,20 @@ Deno.serve(async (req: Request) => {
     const flags2: Record<string, unknown> = { ...flagsBase, musica_pedida: true };
     const prox = proximaPerguntaFaltante(ouvinte, flags2);
     const concluido = prox.campo === "concluido";
+    // O que foi realmente registrado: musica (com o nome oficial ja corrigido) ou so o cantor.
+    const oQueAnotou = titulo
+      ? (artista ? `a música "${titulo}", do ${artista}` : `a música "${titulo}"`)
+      : `o cantor ${artista}`;
     const inst = concluido
-      ? `a música que o ouvinte pediu foi anotada; agradeça de forma calorosa e convide ele a continuar ouvindo a ${RADIO_LABEL}`
-      : `a música que o ouvinte pediu foi anotada; agradeça rapidinho e, na sequência, ${intencaoProximoCampo(prox.campo)}`;
+      ? `você acabou de anotar ${oQueAnotou} pro ouvinte; avise com naturalidade e carinho que anotou isso (mencionando o nome que foi anotado) e convide ele a continuar ouvindo a ${RADIO_LABEL}`
+      : `você acabou de anotar ${oQueAnotou} pro ouvinte; avise com naturalidade e carinho que anotou isso (mencionando o nome que foi anotado) e, na sequência, ${intencaoProximoCampo(prox.campo)}`;
+    const anotadoFrase = titulo
+      ? (artista ? `Anotei "${titulo}", do ${artista}` : `Anotei "${titulo}"`)
+      : `Anotei o ${artista}`;
     const fallback = concluido
-      ? `Anotado${primeiroNome ? ", " + primeiroNome : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
-      : `Anotado! ${prox.texto}`;
-    let msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
+      ? `${anotadoFrase}${primeiroNome ? ", " + primeiroNome : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
+      : `${anotadoFrase}! ${prox.texto}`;
+    let msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallback;
     if (concluido && flags2.concluido !== true) {
       flags2.concluido = true;
       msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
@@ -1054,6 +1175,7 @@ Deno.serve(async (req: Request) => {
         const reask = (await falaAdriana(
           "o ouvinte nao deixou claro pra qual radio ele troca quando nao gosta da musica; pergunte de novo, de um jeito diferente e natural, o nome da radio que ele coloca",
           primeiroNome,
+          jaSaudou,
         )) ?? `E me diz${primeiroNome ? ", " + primeiroNome : ""}, qual rádio você coloca quando não curte a música que tá tocando?`;
         const hist = pushHist(ctx.historico, texto, reask);
         await db.from("conversas").update({
@@ -1074,7 +1196,7 @@ Deno.serve(async (req: Request) => {
     const fallbackMsg = concluido
       ? `Show${primeiroNome ? ", " + primeiroNome : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
       : `Show! ${prox.texto}`;
-    let msg = (await falaAdriana(inst, primeiroNome)) ?? fallbackMsg;
+    let msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallbackMsg;
     if (concluido && flags2.concluido !== true) {
       flags2.concluido = true;
       msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
@@ -1103,6 +1225,21 @@ Deno.serve(async (req: Request) => {
     // Primeiro nome ATUALIZADO (o nome pode ter acabado de ser gravado neste turno).
     const pn = ((ouv2.nome as string) ?? "").trim().split(/\s+/)[0] || primeiroNome;
     const prox = proximaPerguntaFaltante(ouv2, flags2);
+    // Se o proximo campo e a cidade, capturamos o endereco por CEP em vez de perguntar
+    // cidade/bairro em texto livre. Se o ouvinte ja desistiu do CEP (cep_desistiu), segue
+    // pelo fluxo antigo de texto livre, sem re-perguntar o CEP.
+    if (prox.campo === "cidade" && flags2.cep_desistiu !== true) {
+      const instCep = "peca o CEP da casa do ouvinte pra registrar certinho a cidade e o bairro onde ele mora";
+      const fbCep = `Pra fechar seu cadastro certinho${pn ? ", " + pn : ""}, me manda o CEP da sua casa?`;
+      const msgCep = (await falaAdriana(instCep, pn, jaSaudou)) ?? fbCep;
+      const histCep = pushHist(ctx.historico, texto, msgCep);
+      await db.from("conversas").update({
+        etapa: "aguarda_cep",
+        contexto: { flags: flags2, historico: histCep, ...(extraCtx ?? {}) },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msgCep);
+      return;
+    }
     const concluido = prox.campo === "concluido";
     const inst = concluido
       ? `agradeça e convide o ouvinte a continuar ouvindo a ${RADIO_LABEL}`
@@ -1110,7 +1247,7 @@ Deno.serve(async (req: Request) => {
     const fallback = concluido
       ? `Prontinho${pn ? ", " + pn : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
       : prox.texto;
-    let msg = (await falaAdriana(inst, pn)) ?? fallback;
+    let msg = (await falaAdriana(inst, pn, jaSaudou)) ?? fallback;
     if (concluido && flags2.concluido !== true) {
       flags2.concluido = true;
       msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
@@ -1132,7 +1269,7 @@ Deno.serve(async (req: Request) => {
     fallback: string,
     flagsMerge: Record<string, unknown>,
   ) {
-    const msg = (await falaAdriana(instrucao, primeiroNome)) ?? fallback;
+    const msg = (await falaAdriana(instrucao, primeiroNome, jaSaudou)) ?? fallback;
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
       etapa: "cadastro",
@@ -1340,15 +1477,7 @@ Deno.serve(async (req: Request) => {
       const n = (flags.bloqueio as number) ?? 0;
       const lista = ehOfensa ? RECUSAS_OFENSA : RECUSAS_DROGAS;
       const recusa = lista[Math.min(n, lista.length - 1)];
-      let pendente = "";
-      if (etapa === "confirma_musica" && ctx.pending_musica) {
-        const p = ctx.pending_musica as { titulo: string; artista: string | null };
-        pendente = p.artista
-          ? `Só confirma: é "${p.titulo}", do ${p.artista}? (sim ou não)`
-          : `Só confirma: é "${p.titulo}"? (sim ou não)`;
-      } else {
-        pendente = proximaPerguntaFaltante(ouvinte, flags).texto;
-      }
+      const pendente = proximaPerguntaFaltante(ouvinte, flags).texto;
       await db.from("conversas").update({
         contexto: { ...ctx, flags: { ...flags, bloqueio: n + 1 } },
       }).eq("id", conversaId);
@@ -1357,29 +1486,125 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // ===== PORTAO DETERMINISTICO: confirmacao de musica (nunca grava sem "sim") =====
-  if (etapa === "confirma_musica" && ctx.pending_musica) {
-    const pend = ctx.pending_musica as { titulo: string | null; artista: string | null };
+  // ===== ENDERECO POR CEP: pede, confirma e grava cidade+bairro (zona pela logica atual) =====
+  // Fallback manual (recusa / 2 falhas): volta ao fluxo antigo de cidade em texto livre.
+  async function pedirCidadeManual(flagsBase: Record<string, unknown>) {
+    const inst = "tudo bem, sem CEP; pergunte de forma leve em qual cidade o ouvinte mora";
+    const fb = "Sem problema! Em qual cidade você mora?";
+    const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fb;
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "cadastro",
+      contexto: { flags: { ...flagsBase, cep_desistiu: true }, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+  }
+
+  if (isTexto && etapa === "aguarda_cep") {
     const chave = normalizarSemAcento(texto);
-    if (AFIRMATIVAS.has(chave)) {
-      await gravarVotosESeguir(pend.titulo ?? null, pend.artista ?? null, flags);
+    // Recusa explicita ou "nao sei/nao tenho o CEP": cai no manual, sem travar o cadastro.
+    if (NEGATIVAS.has(chave) || /nao\s+(sei|lembro|tenho)/.test(chave)) {
+      await pedirCidadeManual(flags);
       return new Response("ok", { status: 200 });
     }
-    if (NEGATIVAS.has(chave)) {
-      const inst =
-        "o ouvinte disse que nao era essa musica; diga tranquilo e peca pra ele mandar de novo qual musica quer, com o nome do cantor se souber";
-      const fallback = `Sem problema${primeiroNome ? ", " + primeiroNome : ""}! Me manda de novo qual música você quer, e o cantor se souber.`;
-      const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
+    const end = await consultarCep(texto);
+    if (end) {
+      const cidadeCep = (end.localidade || "").trim();
+      const bairroCep = (end.bairro || "").trim();
+      const flags2 = { ...flags };
+      delete flags2.cep_tentativa;
+      const inst = bairroCep
+        ? `voce achou pelo CEP o endereco: bairro "${bairroCep}", cidade "${cidadeCep}". Confirme de forma calorosa se e por ai que a pessoa escuta a radio, pedindo um sim ou nao. NAO peca mais nada.`
+        : `voce achou pelo CEP a cidade "${cidadeCep}". Confirme de forma calorosa se e por ai que a pessoa escuta a radio, pedindo um sim ou nao. NAO peca mais nada.`;
+      const fb = bairroCep
+        ? `Achei aqui: ${bairroCep}, ${cidadeCep}. É por aí que você escuta a gente?`
+        : `Achei aqui: ${cidadeCep}. É por aí que você escuta a gente?`;
+      const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fb;
       const hist = pushHist(ctx.historico, texto, msg);
       await db.from("conversas").update({
-        etapa: "cadastro",
-        contexto: { flags, historico: hist },
+        etapa: "aguarda_confirma_endereco",
+        contexto: {
+          flags: flags2,
+          historico: hist,
+          endereco_pendente: { cidade: cidadeCep, bairro: bairroCep },
+        },
       }).eq("id", conversaId);
       await reply(phone, conversaId, radioId, msg);
       return new Response("ok", { status: 200 });
     }
-    // Resposta ambigua: a Adriana repete a confirmacao, sem perder o contexto.
-    await confirmarComOuvinte(pend.titulo ?? "", pend.artista ?? null, flags);
+    // Nao achou o CEP. Ja tentou uma vez? cai no manual. Senao, pede de novo.
+    if (flags.cep_tentativa === true) {
+      await pedirCidadeManual(flags);
+      return new Response("ok", { status: 200 });
+    }
+    const inst = "voce nao achou esse CEP; com leveza, peca pra pessoa conferir e mandar o CEP de novo";
+    const fb = "Não achei esse CEP aqui. Será que saiu trocado? Confere e manda de novo pra mim?";
+    const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fb;
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "aguarda_cep",
+      contexto: { flags: { ...flags, cep_tentativa: true }, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+    return new Response("ok", { status: 200 });
+  }
+
+  if (isTexto && etapa === "aguarda_confirma_endereco") {
+    const pend = (ctx.endereco_pendente as { cidade?: string; bairro?: string } | null) ?? null;
+    const chave = normalizarSemAcento(texto);
+    // Recusou o endereco: ja tentou? vai pro manual; senao pede o CEP de novo.
+    if (NEGATIVAS.has(chave)) {
+      if (flags.cep_tentativa === true) {
+        await pedirCidadeManual(flags);
+        return new Response("ok", { status: 200 });
+      }
+      const inst = "talvez o CEP tenha vindo trocado; peca com leveza pra pessoa conferir e mandar o CEP de novo";
+      const fb = "Ah, então talvez esse CEP esteja trocado. Sem problema! Me manda o CEP de novo?";
+      const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fb;
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: "aguarda_cep",
+        contexto: { flags: { ...flags, cep_tentativa: true }, historico: hist },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+    // Confirmou: resolve a zona pela MESMA logica de hoje e grava cidade+bairro.
+    const cidadeRaw = (pend?.cidade ?? "").trim();
+    const bairroRaw = (pend?.bairro ?? "").trim();
+    const alvoCidade = normalizarSemAcento(cidadeRaw);
+    let cidadeFinal = titleCasePtBr(cidadeRaw);
+    let zona = "Outras";
+    let capital = false;
+    if (alvoCidade === "sao paulo" || alvoCidade === "sp") {
+      cidadeFinal = "São Paulo";
+      capital = true;
+    } else {
+      const c = await resolverGrandeSP(cidadeRaw);
+      if (c) {
+        cidadeFinal = c;
+        zona = c;
+      }
+    }
+    let bairroFinal = titleCasePtBr(bairroRaw);
+    if (capital && bairroRaw) {
+      const ia = await interpretarBairro(bairroRaw);
+      if (ia && ia.bairro && ia.zona && ia.zona !== "Outras") {
+        bairroFinal = ia.bairro;
+        zona = ia.zona;
+      } else {
+        const { data: seeds } = await db.from("bairros_zonas").select("bairro, zona");
+        const achou = (seeds ?? []).find(
+          (b) => normalizarSemAcento(b.bairro as string) === normalizarSemAcento(bairroRaw),
+        );
+        zona = achou ? (achou.zona as string) : "Outras";
+      }
+    }
+    const flags2 = { ...flags };
+    delete flags2.cep_tentativa;
+    const upd: Record<string, unknown> = { cidade: cidadeFinal, zona };
+    if (bairroFinal) upd.bairro = bairroFinal;
+    await avancarCadastro(upd, flags2);
     return new Response("ok", { status: 200 });
   }
 
@@ -1406,7 +1631,7 @@ Deno.serve(async (req: Request) => {
         ? `o ouvinte nao quis pedir musica agora; agradeça e convide ele a continuar ouvindo a ${RADIO_LABEL}`
         : `o ouvinte nao quis pedir musica agora; diga tranquilo e ${intencaoProximoCampo(prox.campo)}`;
       const fallback = `Tranquilo${primeiroNome ? ", " + primeiroNome : ""}! ${prox.texto}`;
-      const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
+      const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallback;
       const hist = pushHist(ctx.historico, texto, msg);
       await db.from("conversas").update({
         etapa: prox.campo === "concluido" ? "concluido" : "cadastro",
@@ -1415,9 +1640,13 @@ Deno.serve(async (req: Request) => {
       await reply(phone, conversaId, radioId, msg);
       return new Response("ok", { status: 200 });
     }
-    // Tem cantor + texto de musica: busca a versao oficial e confirma.
+    // Tem cantor + texto de musica: busca a versao oficial. Achou => grava direto; nao achou => repergunta.
     const oficial = await resolverMusicaOficial(texto, artista);
-    await confirmarComOuvinte(oficial.titulo, oficial.artista ?? titleCasePtBr(artista), flags);
+    if (oficial) {
+      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? titleCasePtBr(artista), flags);
+    } else {
+      await reperguntarMusica(flags);
+    }
     return new Response("ok", { status: 200 });
   }
 
@@ -1432,12 +1661,20 @@ Deno.serve(async (req: Request) => {
     if (NAO_SEI.has(chave) || NEGATIVAS.has(chave)) {
       // Existe texto de musica: a Adriana busca a musica sozinha pra descobrir o cantor real.
       const oficial = await resolverMusicaOficial(musica, null);
-      await confirmarComOuvinte(oficial.titulo, oficial.artista ?? null, flags);
+      if (oficial) {
+        await gravarVotosESeguir(oficial.titulo, oficial.artista ?? null, flags);
+      } else {
+        await reperguntarMusica(flags);
+      }
       return new Response("ok", { status: 200 });
     }
-    // Tem musica + cantor: junta, busca e confirma.
+    // Tem musica + cantor: junta e busca. Achou => grava direto; nao achou => repergunta.
     const oficial = await resolverMusicaOficial(musica, texto);
-    await confirmarComOuvinte(oficial.titulo, oficial.artista ?? titleCasePtBr(texto), flags);
+    if (oficial) {
+      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? titleCasePtBr(texto), flags);
+    } else {
+      await reperguntarMusica(flags);
+    }
     return new Response("ok", { status: 200 });
   }
 
@@ -1596,10 +1833,14 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { status: 200 });
   }
 
-  // CASO 3: cantor + musica juntos -> busca a versao oficial e confirma.
+  // CASO 3: cantor + musica juntos -> busca a versao oficial. Achou => grava direto; nao achou => repergunta.
   if (dec.e_pedido_musica && musicaBruta && artistaHint && !overrideMsg) {
     const oficial = await resolverMusicaOficial(musicaBruta, artistaHint);
-    await confirmarComOuvinte(oficial.titulo, oficial.artista ?? titleCasePtBr(artistaHint), flagsNovas);
+    if (oficial) {
+      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? titleCasePtBr(artistaHint), flagsNovas);
+    } else {
+      await reperguntarMusica(flagsNovas);
+    }
     return new Response("ok", { status: 200 });
   }
 
@@ -1607,7 +1848,7 @@ Deno.serve(async (req: Request) => {
   if (dec.e_pedido_musica && musicaBruta && !artistaHint && !overrideMsg) {
     const inst = `o ouvinte pediu a música "${musicaBruta}"; pergunte de forma natural quem canta essa música`;
     const fallback = `Boa${primeiroNome ? ", " + primeiroNome : ""}! E quem canta "${musicaBruta}"?`;
-    const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
+    const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallback;
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
       etapa: "musica_aguarda_cantor",
@@ -1621,7 +1862,7 @@ Deno.serve(async (req: Request) => {
   if (dec.e_pedido_musica && artistaHint && !musicaBruta && !overrideMsg) {
     const inst = `o ouvinte quer ouvir o cantor ${artistaHint}; pergunte de forma animada qual música dele(a) o ouvinte quer ouvir`;
     const fallback = `${primeiroNome ? primeiroNome + ", " : ""}boa escolha! E qual música do ${artistaHint} você quer ouvir?`;
-    const msg = (await falaAdriana(inst, primeiroNome)) ?? fallback;
+    const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallback;
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
       etapa: "musica_aguarda_titulo",
