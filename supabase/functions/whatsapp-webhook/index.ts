@@ -726,8 +726,8 @@ function calcularIdade(iso: string): number {
   return idade;
 }
 
-// Identidade fixa da Nativa FM.
-const RADIO_LABEL = "Nativa FM";
+// Identidade fixa da Rádio Liverpool.
+const RADIO_LABEL = "Rádio Liverpool";
 const INSTAGRAM_URL = "https://www.instagram.com/nativa/";
 
 const AFIRMATIVAS = new Set([
@@ -741,6 +741,7 @@ const NEGATIVAS = new Set([
   "nao", "n", "nao tem", "nao tenho", "nenhuma", "nenhum", "nada", "nem uma",
   "nem um", "nao quero", "agora nao", "depois", "deixa", "deixa pra la",
   "to de boa", "nao obrigado", "nao mudo", "fico aqui", "fico na nativa",
+  "fico na liverpool",
   "nao e essa", "nao e", "errado", "nao era essa", "outra",
 ]);
 
@@ -756,11 +757,11 @@ function ehPremio(texto: string): boolean {
 }
 
 const PREMIO_CADASTRADO = [
-  "Pra concorrer aos prêmios da nossa Nativa é só você ficar na nossa escuta. Quando a gente falar pra você participar, você nos manda a mensagem!",
-  "Os prêmios da Nativa saem pra quem está na escuta! Fica ligado que, quando for a hora de participar, a gente avisa no ar e você me manda a mensagem.",
+  `Pra concorrer aos prêmios da nossa ${RADIO_LABEL} é só você ficar na nossa escuta. Quando a gente falar pra você participar, você nos manda a mensagem!`,
+  `Os prêmios da ${RADIO_LABEL} saem pra quem está na escuta! Fica ligado que, quando for a hora de participar, a gente avisa no ar e você me manda a mensagem.`,
 ];
 const PREMIO_NOVO =
-  "Pra concorrer a prêmios da Nativa FM você precisa participar da nossa pesquisa. Vamos participar? Qual é seu nome completo?";
+  `Pra concorrer a prêmios da ${RADIO_LABEL} você precisa participar da nossa pesquisa. Vamos participar? Qual é seu nome completo?`;
 
 // Termos de DROGAS bloqueados. Detectados por substring.
 const TERMOS_DROGAS = [
@@ -997,7 +998,7 @@ function extrairRadioDaFrase(texto: string): string {
 function ehNegativaRadio(texto: string): boolean {
   const n = normalizarSemAcento(texto);
   if (NEGATIVAS.has(n)) return true;
-  return /\b(nao (mudo|muda|troco|saio|mexo|mudo de radio)|fico (na nativa|aqui|com voces|com a nativa)|nenhuma|so (a )?nativa|nativa mesmo|nao troco)\b/
+  return /\b(nao (mudo|muda|troco|saio|mexo|mudo de radio)|fico (na nativa|na liverpool|aqui|com voces|com a nativa|com a liverpool)|nenhuma|so (a )?(nativa|liverpool)|(nativa|liverpool) mesmo|nao troco)\b/
     .test(n);
 }
 
@@ -1286,12 +1287,12 @@ Deno.serve(async (req: Request) => {
       }
       // 2a vez ainda vazio: desiste (flags2.radio_troca_pedida ja true) e segue.
     }
-    // Registrou ou ficou na Nativa: a Adriana agradece/segue pro proximo campo.
+    // Registrou ou ficou na Rádio Liverpool: a Adriana agradece/segue pro proximo campo.
     const prox = proximaPerguntaFaltante(ouvinte, flags2);
     const concluido = prox.campo === "concluido";
     const inst = concluido
       ? `agradeça e convide o ouvinte a continuar ouvindo a ${RADIO_LABEL}`
-      : `${registrou ? "anotei a rádio que ele troca quando não gosta; " : "tudo bem, ele fica na Nativa; "}na sequência, ${intencaoProximoCampo(prox.campo)}`;
+      : `${registrou ? "anotei a rádio que ele troca quando não gosta; " : `tudo bem, ele fica na ${RADIO_LABEL}; `}na sequência, ${intencaoProximoCampo(prox.campo)}`;
     const fallbackMsg = concluido
       ? `Show${primeiroNome ? ", " + primeiroNome : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
       : `Show! ${prox.texto}`;
@@ -1396,7 +1397,7 @@ Deno.serve(async (req: Request) => {
         SAUDACOES_NAO_NOME.has(normalizarSemAcento(base)) || soLetras.length < 2;
       if (naoEhNome && flags.nome_tentativa !== true) {
         await reperguntar(
-          "voce ainda nao pegou o nome do ouvinte; se apresente rapidinho como Adriana da Nativa FM e peca o nome completo dele, de um jeito diferente",
+          `voce ainda nao pegou o nome do ouvinte; se apresente rapidinho como Adriana da ${RADIO_LABEL} e peca o nome completo dele, de um jeito diferente`,
           "Antes da gente começar, como você se chama? Pode mandar seu nome completo.",
           { nome_tentativa: true },
         );

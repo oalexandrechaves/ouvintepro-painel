@@ -45,12 +45,8 @@ export default function Dashboard({ data }: { data: PainelData }) {
           <div className="flex flex-col gap-1.5">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src="/logo-nativa.png"
-              alt="Rede Nativa"
-              onError={(e) => {
-                const img = e.currentTarget as HTMLImageElement;
-                if (!img.src.endsWith(".svg")) img.src = "/logo-nativa.svg";
-              }}
+              src="/logo-radio-liverpool.png"
+              alt="Rádio Liverpool"
               className="h-14 w-auto shrink-0"
             />
             <p className="text-sm text-mist-300">Painel de ouvintes</p>
@@ -175,7 +171,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
 
         {/* Rodapé */}
         <footer className="mt-10 border-t border-white/5 pt-6 text-center text-xs text-mist-400">
-          Rede Nativa · powered by OuvintePro · Dados e Conexão na Rádio
+          Rádio Liverpool · powered by OuvintePro · Dados e Conexão na Rádio
         </footer>
       </main>
     </div>
