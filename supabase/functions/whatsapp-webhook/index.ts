@@ -403,9 +403,9 @@ async function sendText(phone: string, message: string) {
     },
     body: JSON.stringify({ phone, message, delayTyping }),
   });
+  const corpoResp = await res.text().catch(() => "");
   if (!res.ok) {
-    const corpo = await res.text().catch(() => "");
-    console.error(`Z-API send-text falhou: status=${res.status} corpo=${corpo}`);
+    console.error(`Z-API send-text falhou: status=${res.status} corpo=${corpoResp}`);
   }
 }
 
