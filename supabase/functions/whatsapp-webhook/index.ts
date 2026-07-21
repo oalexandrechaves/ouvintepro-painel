@@ -629,6 +629,65 @@ function extrairNomeProprio(texto: string): string {
   return s.replace(/^[\s,.!?;:-]+|[\s,.!?;:-]+$/g, "").trim();
 }
 
+// Extrai o nome proprio via Claude (mesma Haiku). Timeout 4s; qualquer falha retorna null
+// e o chamador cai no backup (extrairNomeProprio). Anti-invencao: so aceita nome cujas
+// palavras realmente aparecem na mensagem original (token normalizado, sem acento).
+async function extrairNomeIA(texto: string): Promise<string | null> {
+  if (!ANTHROPIC_API_KEY) return null;
+  const prompt =
+    `Você recebe a resposta de uma pessoa à pergunta "como você se chama?". ` +
+    `Extraia APENAS o nome próprio (primeiro nome, ou nome e sobrenome se houver). ` +
+    `Ignore saudações e cortesias como oi, olá, tudo bem, beleza, prazer, sou o, sou a, meu nome é, aqui é o. ` +
+    `Se NÃO houver nome próprio na mensagem, responda exatamente a palavra VAZIO. ` +
+    `NUNCA invente um nome que não esteja na mensagem. Responda só o nome, sem pontuação, sem frase.\n\n` +
+    `Mensagem: """${texto}"""`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 40,
+        temperature: 0,
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      console.error(`extrairNomeIA falhou: status=${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const txt = ((data?.content ?? []) as { type?: string; text?: string }[])
+      .filter((b) => b?.type === "text")
+      .map((b) => b?.text ?? "")
+      .join(" ").trim().replace(/^["']+|["']+$/g, "").trim();
+    if (!txt || normalizarSemAcento(txt) === "vazio") return null;
+    // Anti-invencao: cada palavra do nome tem que existir na mensagem original.
+    const limpaToken = (t: string) => t.replace(/[^a-z0-9]/g, "");
+    const tokensMsg = new Set(
+      normalizarSemAcento(texto).split(/\s+/).map(limpaToken).filter(Boolean),
+    );
+    const palavrasNome = normalizarSemAcento(txt).split(/\s+/).map(limpaToken).filter(Boolean);
+    if (!palavrasNome.length || !palavrasNome.every((p) => tokensMsg.has(p))) {
+      console.error(`extrairNomeIA descartado (nao deriva da mensagem): "${txt}"`);
+      return null;
+    }
+    return txt;
+  } catch (e) {
+    console.error(`extrairNomeIA excecao: ${e}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function normalizarSemAcento(s: string): string {
   return s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
@@ -893,8 +952,12 @@ async function falaAdriana(
 ): Promise<string | null> {
   // jaSaudou=true significa que a conversa ja teve mensagens antes (nao e o primeiro
   // contato). Nesse caso a Adriana NAO deve cumprimentar de novo, so ir direto ao ponto.
+  const temNome = primeiroNome.trim().length > 0;
+  const regraNomeSempre = temNome
+    ? ` Como uma locutora de radio que ja conhece a pessoa, use SEMPRE o primeiro nome dela ("${primeiroNome}") de forma natural e calorosa nesta mensagem, no meio ou no fim da frase (ex: "Qual e a sua data de nascimento, ${primeiroNome}?"). O nome deve aparecer fluido, NUNCA grudado no comeco como saudacao, e sem virar um novo cumprimento.`
+    : "";
   const regraSaudacao = jaSaudou
-    ? `Esta NAO e a primeira mensagem desta conversa. NAO cumprimente de novo: nada de "Oi", "Ola", "Opa", "Tudo bem", "Bom dia", "Boa tarde", "Boa noite". Va direto ao ponto da intencao. Voce pode usar o primeiro nome naturalmente no meio da frase, sem saudacao.`
+    ? `Esta NAO e a primeira mensagem desta conversa. NAO cumprimente de novo: nada de "Oi", "Ola", "Opa", "Tudo bem", "Bom dia", "Boa tarde", "Boa noite".${regraNomeSempre} Va direto ao ponto da intencao.`
     : `Se fizer sentido, voce pode cumprimentar o ouvinte de forma calorosa, usando o primeiro nome no cumprimento se houver.`;
   const prompt = `
 Você é a Adriana, atendente simpática e animada da rádio ${RADIO_LABEL} no WhatsApp. Fala português do Brasil com acentos corretos, tom de rádio, natural e caloroso. NUNCA use travessão. NUNCA escreva "(responde sim ou não)" nem instruções robóticas; a própria frase já convida a resposta.
@@ -1320,12 +1383,14 @@ Deno.serve(async (req: Request) => {
     const anoAtual = new Date().getUTCFullYear();
 
     if (campo === "nome") {
-      // Tira "ja falei que.../falei que..." e depois descarta saudacoes/prefixos do inicio.
+      // Tira "ja falei que.../falei que..." pra sobrar a resposta limpa.
       const semReclamacao = texto.replace(
         /^(ja falei[,\s]*(que\s+)?(é|eh|e)?|eu ja disse[,\s]*(que\s+)?|falei[,\s]*(que\s+)?)\s+/i,
         "",
       );
-      const base = extrairNomeProprio(semReclamacao);
+      // Captura pela IA (Claude); se falhar/timeout/nao derivar, cai no backup regex.
+      const viaIA = await extrairNomeIA(texto);
+      const base = viaIA ?? extrairNomeProprio(semReclamacao);
       const soLetras = base.replace(/[^A-Za-zÀ-ÿ]/g, "");
       const naoEhNome = base.trim().length === 0 ||
         SAUDACOES_NAO_NOME.has(normalizarSemAcento(base)) || soLetras.length < 2;
