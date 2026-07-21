@@ -30,6 +30,7 @@ interface Extra {
   artistasAmados: SerieItem[];
   artistasRejeitados: SerieItem[];
   zonas: SerieItem[];
+  faixaEtaria: SerieItem[];
   bairrosPorZona: Record<string, SerieItem[]>;
   bairrosGeral: SerieItem[];
   radios: SerieItem[];
@@ -46,7 +47,17 @@ function dataPtBr(iso: string | null): string {
   return d.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
 }
 
-export default function PainelExtra({ mode }: { mode: DisplayMode }) {
+export default function PainelExtra({
+  mode,
+  periodoDe,
+  periodoAte,
+  onData,
+}: {
+  mode: DisplayMode;
+  periodoDe: string | null;
+  periodoAte: string | null;
+  onData?: (d: Extra | null) => void;
+}) {
   const [faixa, setFaixa] = useState("todas");
   const [zona, setZona] = useState("todas");
   const [periodoIni, setPeriodoIni] = useState<string | null>(null);
@@ -59,17 +70,26 @@ export default function PainelExtra({ mode }: { mode: DisplayMode }) {
   useEffect(() => {
     let ativo = true;
     setCarregando(true);
+    // DateRange manual sobrescreve o periodo do topo (Hoje/30 dias/Ano).
+    const deEfetivo = periodoIni ?? periodoDe;
+    const ateEfetivo = periodoFim ?? periodoAte;
     const params: Record<string, string> = { faixa, zona };
-    if (periodoIni) params.de = periodoIni;
-    if (periodoFim) params.ate = periodoFim;
+    if (deEfetivo) params.de = deEfetivo;
+    if (ateEfetivo) params.ate = ateEfetivo;
     const qs = new URLSearchParams(params).toString();
     fetch(`/api/painel?${qs}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (ativo) setData(d);
+        if (ativo) {
+          setData(d);
+          onData?.(d);
+        }
       })
       .catch(() => {
-        if (ativo) setData(null);
+        if (ativo) {
+          setData(null);
+          onData?.(null);
+        }
       })
       .finally(() => {
         if (ativo) setCarregando(false);
@@ -77,7 +97,7 @@ export default function PainelExtra({ mode }: { mode: DisplayMode }) {
     return () => {
       ativo = false;
     };
-  }, [faixa, zona, periodoIni, periodoFim]);
+  }, [faixa, zona, periodoIni, periodoFim, periodoDe, periodoAte, onData]);
 
   const faixasOpts = useMemo(
     () => [

@@ -37,6 +37,7 @@ export interface PainelExtra {
   artistasAmados: SerieItem[];
   artistasRejeitados: SerieItem[];
   zonas: SerieItem[];
+  faixaEtaria: SerieItem[];
   bairrosPorZona: Record<string, SerieItem[]>;
   bairrosGeral: SerieItem[];
   radios: SerieItem[];
@@ -51,6 +52,7 @@ const vazio: PainelExtra = {
   artistasAmados: [],
   artistasRejeitados: [],
   zonas: [],
+  faixaEtaria: [],
   bairrosPorZona: {},
   bairrosGeral: [],
   radios: [],
@@ -166,6 +168,7 @@ export async function getPainelExtra(
     const zonasAll: string[] = [];
     const bairrosAll: string[] = [];
     const bairrosPorZonaMap = new Map<string, string[]>();
+    const faixaCount = new Map<number, number>();
 
     const ouvintes: OuvinteRow[] = rows.map((o) => {
       const ama: string[] = [];
@@ -203,6 +206,9 @@ export async function getPainelExtra(
         }
       }
       if (o.bairro) bairrosAll.push(o.bairro);
+      if (o.faixa_etaria != null) {
+        faixaCount.set(o.faixa_etaria, (faixaCount.get(o.faixa_etaria) ?? 0) + 1);
+      }
 
       return {
         id: o.id,
@@ -234,6 +240,9 @@ export async function getPainelExtra(
       artistasAmados: ranking(amaArt),
       artistasRejeitados: ranking(rejArt),
       zonas: ranking(zonasAll, 6),
+      faixaEtaria: faixas
+        .filter((f) => faixaCount.has(f.id))
+        .map((f) => ({ label: f.label, valor: faixaCount.get(f.id) ?? 0 })),
       bairrosPorZona,
       bairrosGeral: ranking(bairrosAll),
       radios: ranking(radiosAll),

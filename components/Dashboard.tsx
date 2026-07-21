@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { DisplayMode, Periodo } from "@/lib/mockData";
 import type { PainelData } from "@/lib/queries";
+import type { PainelExtra as PainelExtraData } from "@/lib/serverData";
 import AreaCadastros from "./AreaCadastros";
 import Background from "./Background";
 import BarList from "./BarList";
@@ -29,11 +30,50 @@ const corValor: Record<string, string> = {
   "neon-gold": "text-neon-gold",
 };
 
+// Data de hoje (YYYY-MM-DD) no fuso de Brasilia (America/Sao_Paulo).
+function hojeSaoPaulo(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+// Soma/subtrai dias a uma data YYYY-MM-DD, sempre no fuso de Brasilia.
+function addDiasSaoPaulo(iso: string, dias: number): string {
+  const d = new Date(`${iso}T12:00:00-03:00`);
+  d.setDate(d.getDate() + dias);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+// Converte o seletor do topo (Hoje/30 dias/Ano) em um intervalo de/ate.
+function rangeDoPeriodo(p: Periodo): { de: string; ate: string } {
+  const ate = hojeSaoPaulo();
+  if (p === "hoje") return { de: ate, ate };
+  if (p === "ano") return { de: `${ate.slice(0, 4)}-01-01`, ate };
+  return { de: addDiasSaoPaulo(ate, -29), ate };
+}
+
 export default function Dashboard({ data }: { data: PainelData }) {
   const { kpis, cadastrosPorPeriodo, zonas, faixaEtaria, musicas, hotlink } = data;
   const [periodo, setPeriodo] = useState<Periodo>("30dias");
   const [mode, setMode] = useState<DisplayMode>("numero");
+  const [extra, setExtra] = useState<PainelExtraData | null>(null);
   const serieArea = cadastrosPorPeriodo[periodo] ?? [];
+  const { de: periodoDe, ate: periodoAte } = useMemo(
+    () => rangeDoPeriodo(periodo),
+    [periodo],
+  );
+  // Enquanto os dados filtrados nao chegam, mostra os valores do load inicial.
+  const zonasView = extra?.zonas ?? zonas;
+  const faixaView = extra?.faixaEtaria ?? faixaEtaria;
+  const musicasView = extra?.musicasAmadas ?? musicas;
 
   return (
     <div className="relative min-h-screen bg-grid">
@@ -47,7 +87,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
             <img
               src="/logo-radio-liverpool.png"
               alt="Rádio Liverpool"
-              className="h-14 w-auto shrink-0"
+              className="h-16 w-auto shrink-0 sm:h-20"
             />
             <p className="text-sm text-mist-300">Painel de ouvintes</p>
           </div>
@@ -109,7 +149,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
 
           <div className="glass p-6">
             <h2 className="mb-5 text-lg font-semibold">Zonas</h2>
-            <BarList serie={zonas} mode={mode} />
+            <BarList serie={zonasView} mode={mode} />
           </div>
         </section>
 
@@ -117,12 +157,12 @@ export default function Dashboard({ data }: { data: PainelData }) {
         <section className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
           <div className="glass p-6">
             <h2 className="mb-5 text-lg font-semibold">Faixa etária</h2>
-            <BarList serie={faixaEtaria} mode={mode} />
+            <BarList serie={faixaView} mode={mode} />
           </div>
 
           <div className="glass p-6">
             <h2 className="mb-5 text-lg font-semibold">Músicas preferidas</h2>
-            <Ranking serie={musicas} mode={mode} />
+            <Ranking serie={musicasView} mode={mode} />
           </div>
 
           {/* Hotlink em dourado */}
@@ -167,7 +207,12 @@ export default function Dashboard({ data }: { data: PainelData }) {
         </section>
 
         {/* Painel expandido (filtros, rankings, zonas, radios, lista de ouvintes) */}
-        <PainelExtra mode={mode} />
+        <PainelExtra
+          mode={mode}
+          periodoDe={periodoDe}
+          periodoAte={periodoAte}
+          onData={setExtra}
+        />
 
         {/* Rodapé */}
         <footer className="mt-10 border-t border-white/5 pt-6 text-center text-xs text-mist-400">
