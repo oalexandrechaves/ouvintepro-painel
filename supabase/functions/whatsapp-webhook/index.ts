@@ -54,8 +54,28 @@ async function claudeJSON<T>(prompt: string, tentativas = 2): Promise<T | null> 
           temperature: 0.2,
           tools: [{
             name: "responder",
-            description: "Devolve a resposta estruturada exatamente no formato JSON pedido no prompt.",
-            input_schema: { type: "object", properties: {}, additionalProperties: true },
+            description: "Devolve a resposta estruturada exatamente no formato JSON pedido no prompt. Preencha CADA campo separadamente; NUNCA coloque o JSON inteiro dentro de resposta_ao_ouvinte.",
+            input_schema: {
+              type: "object",
+              properties: {
+                resposta_ao_ouvinte: {
+                  type: "string",
+                  description: "Somente o texto humano da fala da Adriana para o ouvinte, sem JSON, sem nomes de campo.",
+                },
+                campos_extraidos: {
+                  type: "object",
+                  description: "So os campos que a mensagem atual permitiu preencher.",
+                  additionalProperties: { type: "string" },
+                },
+                proximo_campo: { type: "string" },
+                e_pedido_musica: { type: "boolean" },
+                musica_bruta: { type: ["string", "null"] },
+                artista_bruto: { type: ["string", "null"] },
+                qualquer_do_artista: { type: "boolean" },
+              },
+              required: ["resposta_ao_ouvinte", "proximo_campo"],
+              additionalProperties: false,
+            },
           }],
           tool_choice: { type: "tool", name: "responder" },
           messages: [{ role: "user", content: prompt }],
@@ -505,6 +525,32 @@ function calcularDelayDigitando(message: string): number {
   return Math.min(9, Math.max(2, Math.round(segundos)));
 }
 
+// Marcadores estruturais do JSON de decisao do cerebroAdriana. Se aparecerem numa
+// fala, e porque o modelo vazou o JSON dentro do texto: cortamos antes de enviar.
+const MARCADORES_VAZAMENTO_JSON = [
+  '"campos_extraidos"',
+  '"proximo_campo"',
+  '"e_pedido_musica"',
+  '"musica_bruta"',
+  '"artista_bruto"',
+  '"qualquer_do_artista"',
+  '"resposta_ao_ouvinte"',
+];
+
+// Rede de seguranca: garante que NENHUM pedaco do JSON do cerebro chegue ao ouvinte.
+// Se a fala contiver um marcador do schema, corta ali e limpa aspas/chaves residuais.
+function limparVazamentoJSON(texto: string): string {
+  if (!texto) return texto;
+  let corte = -1;
+  for (const marca of MARCADORES_VAZAMENTO_JSON) {
+    const i = texto.indexOf(marca);
+    if (i !== -1 && (corte === -1 || i < corte)) corte = i;
+  }
+  if (corte === -1) return texto;
+  // Remove o lixo estrutural que costuma anteceder o marcador (ex: ...!","campos_extraidos").
+  return texto.slice(0, corte).replace(/["'{}\[\]\s,:]+$/g, "").trim();
+}
+
 async function sendText(phone: string, message: string) {
   const delayTyping = calcularDelayDigitando(message);
   const url = `https://api.z-api.io/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}/send-text`;
@@ -528,13 +574,14 @@ async function reply(
   radioId: string,
   message: string,
 ) {
-  await sendText(phone, message);
+  const limpo = limparVazamentoJSON(message);
+  await sendText(phone, limpo);
   await db.from("mensagens").insert({
     conversa_id: conversaId,
     radio_id: radioId,
     direcao: "enviada",
     tipo: "texto",
-    conteudo: message,
+    conteudo: limpo,
   });
 }
 
@@ -728,7 +775,16 @@ function calcularIdade(iso: string): number {
 
 // Identidade fixa da Rádio Liverpool.
 const RADIO_LABEL = "Rádio Liverpool";
-const INSTAGRAM_URL = "https://www.instagram.com/nativa/";
+const INSTAGRAM_URL = "https://www.instagram.com/estudiowa_?igsh=NjljZDdlMmc3d2Vs";
+
+// Campos cujo texto de pergunta segue o roteiro VERBATIM (sem parafrase da IA).
+const FALA_FIXA_CAMPOS = new Set([
+  "data_nascimento",
+  "pedido_musica",
+  "estilo_musical",
+  "radio_troca",
+  "programa_locutor",
+]);
 
 const AFIRMATIVAS = new Set([
   "sim", "s", "quero", "quero sim", "claro", "pode ser", "bora", "aceito",
@@ -857,7 +913,6 @@ function camposFaltantes(
   if (capital && !o.bairro) faltam.push("bairro");
   if (flags.musica_pedida !== true) faltam.push("pedido_musica");
   if (!o.estilo_musical && flags.pulou_estilo !== true) faltam.push("estilo_musical");
-  if (!o.outros_estilos && flags.pulou_outros !== true) faltam.push("outros_estilos");
   if (flags.radio_troca_pedida !== true) faltam.push("radio_troca");
   if (!o.programa_locutor && flags.pulou_programa !== true) faltam.push("programa_locutor");
   return faltam;
@@ -883,14 +938,13 @@ function proximaPerguntaFaltante(
 ): { campo: string; texto: string } {
   const capital = normalizarSemAcento((o.cidade as string) ?? "") === "sao paulo";
   if (!o.nome) return { campo: "nome", texto: "Pra te deixar ligado nas promoções, qual é o seu nome completo?" };
-  if (!o.data_nascimento) return { campo: "data_nascimento", texto: "Qual é a sua data de nascimento? Pode mandar no formato dia/mês/ano." };
+  if (!o.data_nascimento) return { campo: "data_nascimento", texto: `${o.nome ? (o.nome as string).split(/\s+/)[0] + ", v" : "V"}ocê pode me passar sua data de aniversário? Dia, mês e ano.` };
   if (!o.cidade) return { campo: "cidade", texto: "Em qual cidade você mora?" };
   if (capital && !o.bairro) return { campo: "bairro", texto: "E em qual bairro?" };
-  if (flags.musica_pedida !== true) return { campo: "pedido_musica", texto: "Quer pedir uma música? Me diz o nome dela e, se souber, o cantor." };
-  if (!o.estilo_musical) return { campo: "estilo_musical", texto: "Qual é o estilo musical que você mais gosta?" };
-  if (!o.outros_estilos) return { campo: "outros_estilos", texto: "E quais outros estilos você curte ouvir?" };
-  if (flags.radio_troca_pedida !== true) return { campo: "radio_troca", texto: "Quando toca uma música que você não curte, você troca pra qual rádio?" };
-  if (!o.programa_locutor) return { campo: "programa_locutor", texto: `Tem algum programa ou locutor aqui na ${RADIO_LABEL} que você mais gosta?` };
+  if (flags.musica_pedida !== true) return { campo: "pedido_musica", texto: "Que legal! Seu cadastro já foi preenchido. Você gostaria de pedir uma música? Qual seria?" };
+  if (!o.estilo_musical) return { campo: "estilo_musical", texto: "Aliás, qual estilo musical que você mais gosta?" };
+  if (flags.radio_troca_pedida !== true) return { campo: "radio_troca", texto: "Além da Rádio Liverpool, qual outra rádio você gosta de ouvir?" };
+  if (!o.programa_locutor) return { campo: "programa_locutor", texto: "O que você mais gosta aqui da Rádio Liverpool?" };
   return { campo: "concluido", texto: `Prontinho, é isso! Muito obrigada por participar. Continue ligado na ${RADIO_LABEL}!` };
 }
 
@@ -924,7 +978,7 @@ Primeiro nome do ouvinte (use só no cumprimento; pode estar vazio): "${primeiro
 Se o primeiro nome estiver vazio, NÃO use nome nenhum nem invente placeholder (nada de "[Nome do ouvinte]", "[nome]" ou parecido); apenas fale de forma natural, sem citar nome.
 Campos que ainda faltam coletar, em ordem de prioridade: ${JSON.stringify(faltantes)}
 
-Significado dos campos: nome=nome completo; data_nascimento=dia/mês/ano; cidade; bairro (só aparece na lista quando é São Paulo capital); pedido_musica=uma música que a pessoa queira ouvir; estilo_musical=estilo preferido; outros_estilos; radio_troca=pra qual rádio ela troca quando não gosta; programa_locutor=programa ou locutor preferido da ${RADIO_LABEL}.
+Significado dos campos: nome=nome completo; data_nascimento=dia/mês/ano; cidade; bairro (só aparece na lista quando é São Paulo capital); pedido_musica=uma música que a pessoa queira ouvir; estilo_musical=estilo preferido; radio_troca=outra rádio que ela também gosta de ouvir; programa_locutor=o que ela mais gosta na ${RADIO_LABEL}.
 
 Histórico recente da conversa:
 ${hist}
@@ -1017,8 +1071,6 @@ function intencaoProximoCampo(campo: string): string {
       return "pergunte se ele quer pedir uma música";
     case "estilo_musical":
       return "pergunte qual estilo musical ele mais gosta";
-    case "outros_estilos":
-      return "pergunte quais outros estilos ele curte ouvir";
     case "radio_troca":
       return "pergunte pra qual rádio ele troca quando não gosta da música que está tocando";
     case "programa_locutor":
@@ -1235,7 +1287,10 @@ Deno.serve(async (req: Request) => {
     const fallback = concluido
       ? `${anotadoFrase}${primeiroNome ? ", " + primeiroNome : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
       : `${anotadoFrase}! ${prox.texto}`;
-    let msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallback;
+    // Mantem o feedback "Anotei X" e usa a pergunta VERBATIM do roteiro pro proximo campo.
+    let msg = FALA_FIXA_CAMPOS.has(prox.campo)
+      ? `${anotadoFrase}! ${prox.texto}`
+      : ((await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallback);
     if (concluido && flags2.concluido !== true) {
       flags2.concluido = true;
       msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
@@ -1296,7 +1351,9 @@ Deno.serve(async (req: Request) => {
     const fallbackMsg = concluido
       ? `Show${primeiroNome ? ", " + primeiroNome : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
       : `Show! ${prox.texto}`;
-    let msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallbackMsg;
+    let msg = FALA_FIXA_CAMPOS.has(prox.campo)
+      ? prox.texto
+      : ((await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallbackMsg);
     if (concluido && flags2.concluido !== true) {
       flags2.concluido = true;
       msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
@@ -1329,9 +1386,7 @@ Deno.serve(async (req: Request) => {
     // cidade/bairro em texto livre. Se o ouvinte ja desistiu do CEP (cep_desistiu), segue
     // pelo fluxo antigo de texto livre, sem re-perguntar o CEP.
     if (prox.campo === "cidade" && flags2.cep_desistiu !== true) {
-      const instCep = "peca o CEP da casa do ouvinte pra registrar certinho a cidade e o bairro onde ele mora";
-      const fbCep = `Pra fechar seu cadastro certinho${pn ? ", " + pn : ""}, me manda o CEP da sua casa?`;
-      const msgCep = (await falaAdriana(instCep, pn, jaSaudou)) ?? fbCep;
+      const msgCep = "Você pode me passar certinho o CEP da sua casa?";
       const histCep = pushHist(ctx.historico, texto, msgCep);
       await db.from("conversas").update({
         etapa: "aguarda_cep",
@@ -1347,7 +1402,10 @@ Deno.serve(async (req: Request) => {
     const fallback = concluido
       ? `Prontinho${pn ? ", " + pn : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
       : prox.texto;
-    let msg = (await falaAdriana(inst, pn, jaSaudou)) ?? fallback;
+    // Campos do roteiro com texto fixo: envia verbatim, sem parafrase da IA.
+    let msg = FALA_FIXA_CAMPOS.has(prox.campo)
+      ? prox.texto
+      : ((await falaAdriana(inst, pn, jaSaudou)) ?? fallback);
     if (concluido && flags2.concluido !== true) {
       flags2.concluido = true;
       msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
@@ -1404,7 +1462,17 @@ Deno.serve(async (req: Request) => {
         return;
       }
       const nome = titleCasePtBr(naoEhNome ? texto.trim() : base) || texto.trim();
-      await avancarCadastro({ nome }, flags2);
+      // Grava o nome e pede o consentimento LGPD ANTES de seguir pra data de nascimento.
+      await db.from("ouvintes").update({ nome }).eq("id", ouvinteId);
+      const pn = (nome.split(/\s+/)[0] || nome);
+      const msgLGPD =
+        `Que legal que você está aqui com a gente, ${pn}! Podemos fazer um cadastro seu pra futuras promoções? E pode ficar tranquilo, seus dados estão protegidos de acordo com a LGPD 🙂`;
+      const histLGPD = pushHist(ctx.historico, texto, msgLGPD);
+      await db.from("conversas").update({
+        etapa: "aguarda_consentimento",
+        contexto: { flags: flags2, historico: histLGPD },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msgLGPD);
       return;
     }
 
@@ -1553,15 +1621,6 @@ Deno.serve(async (req: Request) => {
       return;
     }
 
-    if (campo === "outros_estilos") {
-      if (NEGATIVAS.has(normalizarSemAcento(texto))) {
-        await avancarCadastro({}, { ...flags2, pulou_outros: true });
-      } else {
-        await avancarCadastro({ outros_estilos: titleCasePtBr(texto) }, flags2);
-      }
-      return;
-    }
-
     if (campo === "programa_locutor") {
       if (NEGATIVAS.has(normalizarSemAcento(texto))) {
         await avancarCadastro({}, { ...flags2, pulou_programa: true });
@@ -1587,6 +1646,61 @@ Deno.serve(async (req: Request) => {
       await reply(phone, conversaId, radioId, `${recusa} ${pendente}`);
       return new Response("ok", { status: 200 });
     }
+  }
+
+  // ===== PROMOCAO por hashtag: "#nomedapromocao" registra a participacao =====
+  if (isTexto && texto.trim().startsWith("#")) {
+    const nomePromo = texto.trim().slice(1).trim().replace(/\s+/g, " ");
+    if (nomePromo) {
+      // PREPARADO: a tabela promocao_participacoes ainda NAO existe (sera criada em outra tarefa).
+      // O insert do supabase-js NAO lanca excecao: em erro (ex: tabela inexistente) so retorna { error },
+      // que apenas logamos. Assim o fluxo nunca quebra enquanto a tabela nao existir.
+      const { error: promoErr } = await db.from("promocao_participacoes").insert({
+        radio_id: radioId,
+        ouvinte_id: ouvinteId,
+        promocao_nome: nomePromo,
+      });
+      if (promoErr) {
+        console.error(`promocao_participacoes insert falhou (tabela pode nao existir ainda): ${promoErr.code} ${promoErr.message}`);
+      }
+      const msg = `Anotei sua participação na promoção ${nomePromo}! Boa sorte 🙂`;
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        contexto: { ...ctx, flags, historico: hist },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+  }
+
+  // ===== CONSENTIMENTO LGPD: pedido logo apos o nome, antes da data de nascimento =====
+  if (isTexto && etapa === "aguarda_consentimento") {
+    const chave = normalizarSemAcento(texto);
+    const recusou = NEGATIVAS.has(chave) ||
+      /\bnao\b|\bagora nao\b|\bnao quero\b|\bnao aceito\b/.test(chave);
+    if (recusou) {
+      const msg =
+        "Sem problema! Só que sem seus dados eu não consigo seguir com o atendimento. Se mudar de ideia e quiser continuar, é só me chamar!";
+      const hist = pushHist(ctx.historico, texto, msg);
+      await reply(phone, conversaId, radioId, msg);
+      await db.from("conversas").update({
+        status: "encerrada",
+        etapa: "encerrado_sem_consentimento",
+        encerrada_em: new Date().toISOString(),
+        contexto: { ...ctx, flags: { ...flags, consentimento: false }, historico: hist },
+      }).eq("id", conversaId);
+      return new Response("ok", { status: 200 });
+    }
+    // Qualquer confirmacao (ou resposta nao-negativa): segue pro nascimento.
+    const msg =
+      `${primeiroNome ? primeiroNome + ", v" : "V"}ocê pode me passar sua data de aniversário? Dia, mês e ano.`;
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "cadastro",
+      contexto: { ...ctx, flags: { ...flags, consentimento: true }, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+    return new Response("ok", { status: 200 });
   }
 
   // ===== ENDERECO POR CEP: pede, confirma e grava cidade+bairro (zona pela logica atual) =====
@@ -1616,13 +1730,9 @@ Deno.serve(async (req: Request) => {
       const bairroCep = (end.bairro || "").trim();
       const flags2 = { ...flags };
       delete flags2.cep_tentativa;
-      const inst = bairroCep
-        ? `voce achou pelo CEP o endereco: bairro "${bairroCep}", cidade "${cidadeCep}". Confirme de forma calorosa se e por ai que a pessoa escuta a radio, pedindo um sim ou nao. NAO peca mais nada.`
-        : `voce achou pelo CEP a cidade "${cidadeCep}". Confirme de forma calorosa se e por ai que a pessoa escuta a radio, pedindo um sim ou nao. NAO peca mais nada.`;
-      const fb = bairroCep
-        ? `Achei aqui: ${bairroCep}, ${cidadeCep}. É por aí que você escuta a gente?`
-        : `Achei aqui: ${cidadeCep}. É por aí que você escuta a gente?`;
-      const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fb;
+      const msg = bairroCep
+        ? `Achei aqui que você mora na ${bairroCep}, é isso mesmo?`
+        : `Achei aqui que você mora em ${cidadeCep}, é isso mesmo?`;
       const hist = pushHist(ctx.historico, texto, msg);
       await db.from("conversas").update({
         etapa: "aguarda_confirma_endereco",
@@ -1795,11 +1905,23 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // ===== Abertura: no primeiro contato, se apresenta e pede o nome (texto fixo do roteiro) =====
+  if (isTexto && !jaSaudou && !ouvinte.nome && flags.abertura_feita !== true) {
+    const msg = "Olá! Sou a Adriana da Rádio Liverpool, tudo bem? Qual é o seu nome?";
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "cadastro",
+      contexto: { ...ctx, flags: { ...flags, abertura_feita: true }, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+    return new Response("ok", { status: 200 });
+  }
+
   // ===== Cadastro deterministico: trata o campo ATUAL antes do cerebro (imune a 503/429, sem loop) =====
   const campoAtual = camposFaltantes(ouvinte, flags)[0];
   const CAMPOS_CADASTRO = new Set([
     "nome", "data_nascimento", "cidade", "bairro",
-    "estilo_musical", "outros_estilos", "programa_locutor",
+    "estilo_musical", "programa_locutor",
   ]);
   if (isTexto && CAMPOS_CADASTRO.has(campoAtual)) {
     await handleCampoCadastro(campoAtual);
@@ -1910,11 +2032,6 @@ Deno.serve(async (req: Request) => {
   const estiloCampo = val(campos.estilo_musical);
   if (estiloCampo) upd.estilo_musical = titleCasePtBr(estiloCampo);
 
-  const outrosCampo = val(campos.outros_estilos);
-  if (outrosCampo && !NEGATIVAS.has(normalizarSemAcento(outrosCampo))) {
-    upd.outros_estilos = titleCasePtBr(outrosCampo);
-  }
-
   const programaCampo = val(campos.programa_locutor);
   if (programaCampo && !NEGATIVAS.has(normalizarSemAcento(programaCampo))) {
     upd.programa_locutor = titleCasePtBr(programaCampo);
@@ -1949,9 +2066,7 @@ Deno.serve(async (req: Request) => {
 
   // CASO 2: SO a musica (sem cantor). Guarda a musica e pergunta quem canta. NAO busca ainda.
   if (dec.e_pedido_musica && musicaBruta && !artistaHint && !overrideMsg) {
-    const inst = `o ouvinte pediu a música "${musicaBruta}"; pergunte de forma natural quem canta essa música`;
-    const fallback = `Boa${primeiroNome ? ", " + primeiroNome : ""}! E quem canta "${musicaBruta}"?`;
-    const msg = (await falaAdriana(inst, primeiroNome, jaSaudou)) ?? fallback;
+    const msg = "Legal! E consegue me confirmar o nome do artista?";
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
       etapa: "musica_aguarda_cantor",
@@ -1988,8 +2103,13 @@ Deno.serve(async (req: Request) => {
     declinouMusica = true;
   }
   const proxAtual = proximaPerguntaFaltante(ouvinteAtual, flagsNovas);
+  // Se a fala do cerebro veio contaminada com o JSON de decisao, descarta e usa a pergunta deterministica.
+  const falaCerebro = val(dec.resposta_ao_ouvinte);
+  const falaLimpa = falaCerebro && falaCerebro === limparVazamentoJSON(falaCerebro)
+    ? falaCerebro
+    : null;
   let resposta = overrideMsg ??
-    (declinouMusica ? proxAtual.texto : (val(dec.resposta_ao_ouvinte) ?? proxAtual.texto));
+    (declinouMusica ? proxAtual.texto : (falaLimpa ?? proxAtual.texto));
   const concluido = !overrideMsg && proxAtual.campo === "concluido";
   if (concluido && flagsNovas.concluido !== true) {
     flagsNovas.concluido = true;
