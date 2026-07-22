@@ -1652,16 +1652,16 @@ Deno.serve(async (req: Request) => {
   if (isTexto && texto.trim().startsWith("#")) {
     const nomePromo = texto.trim().slice(1).trim().replace(/\s+/g, " ");
     if (nomePromo) {
-      // PREPARADO: a tabela promocao_participacoes ainda NAO existe (sera criada em outra tarefa).
-      // O insert do supabase-js NAO lanca excecao: em erro (ex: tabela inexistente) so retorna { error },
-      // que apenas logamos. Assim o fluxo nunca quebra enquanto a tabela nao existir.
+      // Grava a participacao na tabela promocao_participacoes (RLS ligado; o service role do bot
+      // grava normalmente). O insert do supabase-js nao lanca excecao: em erro so retorna { error },
+      // que apenas logamos, entao o fluxo do atendimento nunca quebra.
       const { error: promoErr } = await db.from("promocao_participacoes").insert({
         radio_id: radioId,
         ouvinte_id: ouvinteId,
         promocao_nome: nomePromo,
       });
       if (promoErr) {
-        console.error(`promocao_participacoes insert falhou (tabela pode nao existir ainda): ${promoErr.code} ${promoErr.message}`);
+        console.error(`promocao_participacoes insert falhou: ${promoErr.code} ${promoErr.message}`);
       }
       const msg = `Anotei sua participação na promoção ${nomePromo}! Boa sorte 🙂`;
       const hist = pushHist(ctx.historico, texto, msg);
