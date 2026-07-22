@@ -13,20 +13,31 @@ function getServiceClient() {
   return createClient(url!, serviceKey!, { auth: { persistSession: false } });
 }
 
+export interface PromocaoRow {
+  label: string;
+  participantes: number;
+  participacoes: number;
+}
+
 export interface OuvinteRow {
   id: string;
   nome: string | null;
+  telefoneMasc: string | null;
   bairro: string | null;
   zona: string | null;
   cidade: string | null;
   estado: string | null;
   idade: number | null;
+  dataNascimento: string | null;
   faixa: string | null;
+  estiloMusical: string | null;
   cadastroEm: string | null;
   participacoes: number;
   ama: string[];
   rejeita: string[];
   radios: string[];
+  promocoes: string[];
+  temConversa: boolean;
 }
 
 export interface PainelExtra {
@@ -41,6 +52,7 @@ export interface PainelExtra {
   bairrosPorZona: Record<string, SerieItem[]>;
   bairrosGeral: SerieItem[];
   radios: SerieItem[];
+  promocoes: PromocaoRow[];
   ouvintes: OuvinteRow[];
 }
 
@@ -56,8 +68,19 @@ const vazio: PainelExtra = {
   bairrosPorZona: {},
   bairrosGeral: [],
   radios: [],
+  promocoes: [],
   ouvintes: [],
 };
+
+// Mascara o telefone mantendo DDD/pais e os ultimos 4 digitos (ex: 5511*****7060).
+function mascararTelefone(tel: string | null | undefined): string | null {
+  const t = (tel ?? "").replace(/\D/g, "");
+  if (!t) return null;
+  if (t.length <= 8) return t.slice(0, 2) + "*".repeat(Math.max(0, t.length - 6)) + t.slice(-4);
+  const inicio = t.slice(0, 4);
+  const fim = t.slice(-4);
+  return `${inicio}${"*".repeat(t.length - 8)}${fim}`;
+}
 
 // Conta ocorrencias agrupando por chave canonica (minusculo, sem acento),
 // exibindo o primeiro rotulo visto. Devolve ranking desc.
@@ -101,11 +124,14 @@ interface RadioEmbed {
 interface OuvinteEmbed {
   id: string;
   nome: string | null;
+  telefone: string | null;
   bairro: string | null;
   zona: string | null;
   cidade: string | null;
   estado: string | null;
   idade: number | null;
+  data_nascimento: string | null;
+  estilo_musical: string | null;
   faixa_etaria: number | null;
   primeiro_contato_em: string | null;
   participacoes: number | null;
@@ -141,7 +167,7 @@ export async function getPainelExtra(
     let q = sb
       .from("ouvintes")
       .select(
-        "id, nome, bairro, zona, cidade, estado, idade, faixa_etaria, primeiro_contato_em, participacoes, musicas(sentimento, artista, titulo, nome), radios_concorrentes(nome_radio, nome_canonico)",
+        "id, nome, telefone, bairro, zona, cidade, estado, idade, data_nascimento, estilo_musical, faixa_etaria, primeiro_contato_em, participacoes, musicas(sentimento, artista, titulo, nome), radios_concorrentes(nome_radio, nome_canonico)",
       )
       .order("primeiro_contato_em", { ascending: false })
       .limit(2000);
@@ -149,16 +175,57 @@ export async function getPainelExtra(
     if (zona) q = q.eq("zona", zona);
     // Filtro por data de cadastro: as datas escolhidas sao dias de Brasilia
     // (UTC-03:00 fixo, sem horario de verao). Converte pra UTC antes de consultar.
-    if (de) q = q.gte("primeiro_contato_em", `${de}T03:00:00.000Z`);
+    const deUtc = de ? `${de}T03:00:00.000Z` : null;
+    let ateUtc: string | null = null;
     if (ate) {
       const fim = new Date(`${ate}T03:00:00.000Z`);
       fim.setUTCDate(fim.getUTCDate() + 1); // ate < dia seguinte (03:00Z)
-      q = q.lt("primeiro_contato_em", fim.toISOString());
+      ateUtc = fim.toISOString();
     }
+    if (deUtc) q = q.gte("primeiro_contato_em", deUtc);
+    if (ateUtc) q = q.lt("primeiro_contato_em", ateUtc);
 
-    const { data, error } = await q;
+    // Promocoes: mesma janela de periodo (por criado_em). Agrega participantes distintos.
+    let qPromo = sb
+      .from("promocao_participacoes")
+      .select("promocao_nome, ouvinte_id")
+      .limit(20000);
+    if (deUtc) qPromo = qPromo.gte("criado_em", deUtc);
+    if (ateUtc) qPromo = qPromo.lt("criado_em", ateUtc);
+
+    const [{ data, error }, promoRes, msgRes] = await Promise.all([
+      q,
+      qPromo,
+      // So para saber QUAIS ouvintes tem conversa (nao traz o conteudo aqui).
+      sb.from("mensagens").select("conversa_id, conversas(ouvinte_id)").limit(50000),
+    ]);
     if (error) throw error;
     const rows = (data ?? []) as unknown as OuvinteEmbed[];
+
+    // Ouvintes que tem ao menos uma mensagem registrada (via conversa).
+    const comConversa = new Set<string>();
+    for (const m of (msgRes.data ?? []) as unknown as { conversas: { ouvinte_id: string | null } | null }[]) {
+      const oid = m.conversas?.ouvinte_id;
+      if (oid) comConversa.add(oid);
+    }
+
+    // Promocoes por ouvinte (para o detalhe) e agregado geral (para o card).
+    const promoPorOuvinte = new Map<string, string[]>();
+    const promoAgg = new Map<string, { label: string; participacoes: number; ouvintes: Set<string> }>();
+    for (const p of (promoRes.data ?? []) as unknown as { promocao_nome: string | null; ouvinte_id: string | null }[]) {
+      const raw = (p.promocao_nome ?? "").trim();
+      if (!raw || !p.ouvinte_id) continue;
+      const key = raw.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const cur = promoAgg.get(key);
+      if (cur) { cur.participacoes += 1; cur.ouvintes.add(p.ouvinte_id); }
+      else promoAgg.set(key, { label: raw, participacoes: 1, ouvintes: new Set([p.ouvinte_id]) });
+      const lista = promoPorOuvinte.get(p.ouvinte_id) ?? [];
+      if (!lista.includes(raw)) lista.push(raw);
+      promoPorOuvinte.set(p.ouvinte_id, lista);
+    }
+    const promocoes: PromocaoRow[] = Array.from(promoAgg.values())
+      .map((v) => ({ label: v.label, participantes: v.ouvintes.size, participacoes: v.participacoes }))
+      .sort((a, b) => b.participantes - a.participantes || b.participacoes - a.participacoes);
 
     const amaMus: string[] = [];
     const rejMus: string[] = [];
@@ -213,17 +280,22 @@ export async function getPainelExtra(
       return {
         id: o.id,
         nome: o.nome,
+        telefoneMasc: mascararTelefone(o.telefone),
         bairro: o.bairro,
         zona: o.zona,
         cidade: o.cidade,
         estado: o.estado,
         idade: o.idade,
+        dataNascimento: o.data_nascimento,
         faixa: o.faixa_etaria ? faixaLabel.get(o.faixa_etaria) ?? null : null,
+        estiloMusical: o.estilo_musical,
         cadastroEm: o.primeiro_contato_em,
         participacoes: o.participacoes ?? 0,
         ama,
         rejeita,
         radios,
+        promocoes: promoPorOuvinte.get(o.id) ?? [],
+        temConversa: comConversa.has(o.id),
       };
     });
 
@@ -246,9 +318,51 @@ export async function getPainelExtra(
       bairrosPorZona,
       bairrosGeral: ranking(bairrosAll),
       radios: ranking(radiosAll),
+      promocoes,
       ouvintes,
     };
   } catch {
     return vazio;
+  }
+}
+
+export interface MensagemChat {
+  id: string;
+  direcao: "recebida" | "enviada";
+  tipo: string | null;
+  conteudo: string | null;
+  criadoEm: string | null;
+}
+
+// Busca o historico de conversa de UM ouvinte, sempre pelo ouvinte_id (UUID interno),
+// nunca pelo telefone. Ordem cronologica (mais antiga primeiro). Service role.
+export async function getConversa(ouvinteId: string): Promise<MensagemChat[]> {
+  const sb = getServiceClient();
+  if (!sb) return [];
+  try {
+    const { data: convs } = await sb
+      .from("conversas")
+      .select("id")
+      .eq("ouvinte_id", ouvinteId);
+    const ids = (convs ?? []).map((c) => c.id as string);
+    if (ids.length === 0) return [];
+    const { data, error } = await sb
+      .from("mensagens")
+      .select("id, direcao, tipo, conteudo, criado_em")
+      .in("conversa_id", ids)
+      .order("criado_em", { ascending: true })
+      .limit(2000);
+    if (error) throw error;
+    return (data ?? []).map((m) => ({
+      id: m.id as string,
+      direcao: (m.direcao === "enviada" ? "enviada" : "recebida") as
+        | "recebida"
+        | "enviada",
+      tipo: (m.tipo as string) ?? null,
+      conteudo: (m.conteudo as string) ?? null,
+      criadoEm: (m.criado_em as string) ?? null,
+    }));
+  } catch {
+    return [];
   }
 }
