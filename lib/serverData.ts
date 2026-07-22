@@ -40,6 +40,18 @@ export interface OuvinteRow {
   temConversa: boolean;
 }
 
+export interface KpisExtra {
+  cadastrados: number;
+  novos: number;
+  total: number;
+}
+
+export interface HotlinkExtra {
+  acessos: number;
+  conversoes: number;
+  taxa: number;
+}
+
 export interface PainelExtra {
   configurado: boolean;
   faixas: { id: number; label: string }[];
@@ -53,6 +65,8 @@ export interface PainelExtra {
   bairrosGeral: SerieItem[];
   radios: SerieItem[];
   promocoes: PromocaoRow[];
+  kpis: KpisExtra;
+  hotlink: HotlinkExtra;
   ouvintes: OuvinteRow[];
 }
 
@@ -69,6 +83,8 @@ const vazio: PainelExtra = {
   bairrosGeral: [],
   radios: [],
   promocoes: [],
+  kpis: { cadastrados: 0, novos: 0, total: 0 },
+  hotlink: { acessos: 0, conversoes: 0, taxa: 0 },
   ouvintes: [],
 };
 
@@ -193,11 +209,30 @@ export async function getPainelExtra(
     if (deUtc) qPromo = qPromo.gte("criado_em", deUtc);
     if (ateUtc) qPromo = qPromo.lt("criado_em", ateUtc);
 
-    const [{ data, error }, promoRes, msgRes] = await Promise.all([
+    // Conversas concluidas (cadastro completo) para o KPI "ja cadastrados".
+    // conversas nao tem coluna de data util pra janela; a restricao de periodo vem
+    // da propria base (idsBase, filtrada por primeiro_contato_em) na interseccao abaixo.
+    const qConv = sb
+      .from("conversas")
+      .select("ouvinte_id")
+      .eq("etapa", "concluido")
+      .limit(20000);
+
+    // Hotlink: cliques na mesma janela (a view painel_hotlink nao filtra data).
+    let qHot = sb
+      .from("hotlink_cliques")
+      .select("convertido")
+      .limit(100000);
+    if (deUtc) qHot = qHot.gte("criado_em", deUtc);
+    if (ateUtc) qHot = qHot.lt("criado_em", ateUtc);
+
+    const [{ data, error }, promoRes, msgRes, convRes, hotRes] = await Promise.all([
       q,
       qPromo,
       // So para saber QUAIS ouvintes tem conversa (nao traz o conteudo aqui).
       sb.from("mensagens").select("conversa_id, conversas(ouvinte_id)").limit(50000),
+      qConv,
+      qHot,
     ]);
     if (error) throw error;
     const rows = (data ?? []) as unknown as OuvinteEmbed[];
@@ -304,6 +339,30 @@ export async function getPainelExtra(
       bairrosPorZona[z] = ranking(lista);
     });
 
+    // KPIs no periodo: total/novos = ouvintes que entraram no intervalo (mesma base
+    // filtrada por primeiro_contato_em); ja cadastrados = os que concluiram cadastro
+    // dentro do intervalo (conversa etapa=concluido). Restringe aos ouvintes da base.
+    const idsBase = new Set(rows.map((o) => o.id));
+    const concluidos = new Set<string>();
+    for (const c of (convRes.data ?? []) as unknown as { ouvinte_id: string | null }[]) {
+      if (c.ouvinte_id && idsBase.has(c.ouvinte_id)) concluidos.add(c.ouvinte_id);
+    }
+    const kpis: KpisExtra = {
+      cadastrados: concluidos.size,
+      novos: rows.length,
+      total: rows.length,
+    };
+
+    // Hotlink no periodo: conta cliques e conversoes na janela.
+    const cliques = (hotRes.data ?? []) as unknown as { convertido: boolean | null }[];
+    const acessos = cliques.length;
+    const conversoes = cliques.filter((h) => h.convertido).length;
+    const hotlink: HotlinkExtra = {
+      acessos,
+      conversoes,
+      taxa: acessos > 0 ? Math.round((1000 * conversoes) / acessos) / 10 : 0,
+    };
+
     return {
       configurado: true,
       faixas,
@@ -319,6 +378,8 @@ export async function getPainelExtra(
       bairrosGeral: ranking(bairrosAll),
       radios: ranking(radiosAll),
       promocoes,
+      kpis,
+      hotlink,
       ouvintes,
     };
   } catch {

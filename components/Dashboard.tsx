@@ -164,6 +164,16 @@ export default function Dashboard({ data }: { data: PainelData }) {
   const faixaView = extra?.faixaEtaria?.length ? extra.faixaEtaria : faixaEtaria;
   const musicasView = extra?.musicasAmadas?.length ? extra.musicasAmadas : musicas;
 
+  // KPIs e hotlink respeitam o periodo quando o service role responde (extra
+  // configurado). Ordem dos KPIs: 0=ja cadastrados, 1=novos, 2=total.
+  // Sem service role, cai no anon (nao filtrado) para nao quebrar os cards.
+  const kpisView = useMemo(() => {
+    if (!extra?.configurado) return kpis;
+    const vals = [extra.kpis.cadastrados, extra.kpis.novos, extra.kpis.total];
+    return kpis.map((k, i) => ({ ...k, valor: vals[i] ?? k.valor }));
+  }, [extra, kpis]);
+  const hotlinkView = extra?.configurado ? extra.hotlink : hotlink;
+
   return (
     <div className="relative min-h-screen bg-grid">
       <Background />
@@ -220,7 +230,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
 
         {/* KPIs */}
         <section className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {kpis.map((kpi) => (
+          {kpisView.map((kpi) => (
             <div key={kpi.label} className="glass p-5">
               <p className="text-sm text-mist-300">{kpi.label}</p>
               <p
@@ -281,7 +291,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
                     Acessos
                   </p>
                   <p className="font-display text-3xl font-bold tabular-nums text-neon-gold">
-                    <CountUp value={hotlink.acessos} />
+                    <CountUp value={hotlinkView.acessos} />
                   </p>
                 </div>
                 <div className="flex items-end justify-between">
@@ -290,7 +300,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
                       Conversões
                     </p>
                     <p className="font-display text-2xl font-bold tabular-nums text-mist-50">
-                      <CountUp value={hotlink.conversoes} />
+                      <CountUp value={hotlinkView.conversoes} />
                     </p>
                   </div>
                   <div className="text-right">
@@ -298,7 +308,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
                       Taxa
                     </p>
                     <p className="font-display text-2xl font-bold tabular-nums text-neon-gold">
-                      <CountUp value={hotlink.taxa} decimals={1} suffix="%" />
+                      <CountUp value={hotlinkView.taxa} decimals={1} suffix="%" />
                     </p>
                   </div>
                 </div>

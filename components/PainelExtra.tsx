@@ -53,6 +53,8 @@ interface Extra {
   bairrosGeral: SerieItem[];
   radios: SerieItem[];
   promocoes: PromocaoRow[];
+  kpis: { cadastrados: number; novos: number; total: number };
+  hotlink: { acessos: number; conversoes: number; taxa: number };
   ouvintes: OuvinteRow[];
 }
 
