@@ -83,12 +83,10 @@ export default function Dashboard({ data }: { data: PainelData }) {
         {/* Topo */}
         <header className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-col gap-1.5">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src="/logo-radio-liverpool.png"
-              alt="Rádio Liverpool"
-              className="h-16 w-auto shrink-0 sm:h-20"
-            />
+            <h1 className="font-display text-4xl font-black italic tracking-tight sm:text-5xl">
+              <span className="text-mist-50">Rádio</span>{" "}
+              <span className="text-[#D32029]">Liverpool</span>
+            </h1>
             <p className="text-sm text-mist-300">Painel de ouvintes</p>
           </div>
 
