@@ -71,9 +71,11 @@ export default function Dashboard({ data }: { data: PainelData }) {
     [periodo],
   );
   // Enquanto os dados filtrados nao chegam, mostra os valores do load inicial.
-  const zonasView = extra?.zonas ?? zonas;
-  const faixaView = extra?.faixaEtaria ?? faixaEtaria;
-  const musicasView = extra?.musicasAmadas ?? musicas;
+  // So usa o extra (service role) quando ele tem dados; se vier vazio (service
+  // role indisponivel), mantem os dados do anon em vez de esvaziar os cards.
+  const zonasView = extra?.zonas?.length ? extra.zonas : zonas;
+  const faixaView = extra?.faixaEtaria?.length ? extra.faixaEtaria : faixaEtaria;
+  const musicasView = extra?.musicasAmadas?.length ? extra.musicasAmadas : musicas;
 
   return (
     <div className="relative min-h-screen bg-grid">
