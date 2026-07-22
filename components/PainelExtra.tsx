@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { formatValue, somaSerie } from "@/lib/mockData";
 import type { DisplayMode, SerieItem } from "@/lib/mockData";
-import DateRange from "./DateRange";
 import Ranking from "./Ranking";
 
 interface OuvinteRow {
@@ -101,8 +100,6 @@ export default function PainelExtra({
 }) {
   const [faixa, setFaixa] = useState("todas");
   const [zona, setZona] = useState("todas");
-  const [periodoIni, setPeriodoIni] = useState<string | null>(null);
-  const [periodoFim, setPeriodoFim] = useState<string | null>(null);
   const [data, setData] = useState<Extra | null>(null);
   const [carregando, setCarregando] = useState(true);
   const [zonaAberta, setZonaAberta] = useState<string | null>(null);
@@ -111,12 +108,10 @@ export default function PainelExtra({
   useEffect(() => {
     let ativo = true;
     setCarregando(true);
-    // DateRange manual sobrescreve o periodo do topo (Hoje/30 dias/Ano).
-    const deEfetivo = periodoIni ?? periodoDe;
-    const ateEfetivo = periodoFim ?? periodoAte;
+    // O periodo vem unificado do topo (Hoje/30 dias/Ano/Personalizado).
     const params: Record<string, string> = { faixa, zona };
-    if (deEfetivo) params.de = deEfetivo;
-    if (ateEfetivo) params.ate = ateEfetivo;
+    if (periodoDe) params.de = periodoDe;
+    if (periodoAte) params.ate = periodoAte;
     const qs = new URLSearchParams(params).toString();
     fetch(`/api/painel?${qs}`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
@@ -138,7 +133,7 @@ export default function PainelExtra({
     return () => {
       ativo = false;
     };
-  }, [faixa, zona, periodoIni, periodoFim, periodoDe, periodoAte, onData]);
+  }, [faixa, zona, periodoDe, periodoAte, onData]);
 
   const faixasOpts = useMemo(
     () => [
@@ -179,14 +174,6 @@ export default function PainelExtra({
               ...ZONAS.map((z) => ({ value: z, label: z })),
             ]}
             label="Zona"
-          />
-          <DateRange
-            inicio={periodoIni}
-            fim={periodoFim}
-            onChange={(i, f) => {
-              setPeriodoIni(i);
-              setPeriodoFim(f);
-            }}
           />
         </div>
       </div>

@@ -1,20 +1,28 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { DisplayMode, Periodo } from "@/lib/mockData";
+import type { DisplayMode, Periodo, PontoArea } from "@/lib/mockData";
 import type { PainelData } from "@/lib/queries";
-import type { PainelExtra as PainelExtraData } from "@/lib/serverData";
+import type {
+  OuvinteRow,
+  PainelExtra as PainelExtraData,
+} from "@/lib/serverData";
 import AreaCadastros from "./AreaCadastros";
 import Background from "./Background";
 import BarList from "./BarList";
 import CountUp from "./CountUp";
+import DateRange from "./DateRange";
 import PainelExtra from "./PainelExtra";
 import Ranking from "./Ranking";
 
-const periodos: { id: Periodo; label: string }[] = [
+// Seletor de periodo do topo: os nomeados + o intervalo personalizado.
+type Sel = Periodo | "custom";
+
+const seletores: { id: Sel; label: string }[] = [
   { id: "hoje", label: "Hoje" },
   { id: "30dias", label: "30 dias" },
   { id: "ano", label: "Ano" },
+  { id: "custom", label: "Personalizado" },
 ];
 
 const modos: { id: DisplayMode; label: string }[] = [
@@ -60,16 +68,95 @@ function rangeDoPeriodo(p: Periodo): { de: string; ate: string } {
   return { de: addDiasSaoPaulo(ate, -29), ate };
 }
 
+// Intervalo personalizado: aplica defaults sensatos e nao permite datas futuras.
+function rangeCustom(
+  de: string | null,
+  ate: string | null,
+): { de: string; ate: string } {
+  const hoje = hojeSaoPaulo();
+  let d = de;
+  let a = ate;
+  if (!d && !a) {
+    d = hoje;
+    a = hoje;
+  } else if (d && !a) {
+    a = hoje; // so o inicio escolhido: ate = hoje
+  } else if (!d && a) {
+    d = a; // so o fim escolhido: um unico dia
+  }
+  // Nao permitir datas futuras.
+  if (d! > hoje) d = hoje;
+  if (a! > hoje) a = hoje;
+  // Fim nunca antes do inicio.
+  if (a! < d!) a = d;
+  return { de: d!, ate: a! };
+}
+
+function diaBr(iso: string): string {
+  const [ano, mes, dia] = iso.split("-");
+  return `${dia}/${mes}/${ano}`;
+}
+
+// Constroi a serie diaria de cadastros para o intervalo personalizado, a partir
+// dos ouvintes ja filtrados pelo periodo (contagem por dia de primeiro contato,
+// no fuso de Brasilia). Preenche os dias sem cadastro com zero para o grafico.
+function serieDeOuvintes(
+  ouvintes: OuvinteRow[],
+  de: string,
+  ate: string,
+): PontoArea[] {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const cont = new Map<string, number>();
+  for (const o of ouvintes) {
+    if (!o.cadastroEm) continue;
+    const dia = fmt.format(new Date(o.cadastroEm));
+    if (dia < de || dia > ate) continue;
+    cont.set(dia, (cont.get(dia) ?? 0) + 1);
+  }
+  const pontos: PontoArea[] = [];
+  let cur = de;
+  let guarda = 0;
+  while (cur <= ate && guarda < 400) {
+    pontos.push({ rotulo: `${cur.slice(8, 10)}/${cur.slice(5, 7)}`, cadastros: cont.get(cur) ?? 0 });
+    cur = addDiasSaoPaulo(cur, 1);
+    guarda++;
+  }
+  return pontos;
+}
+
 export default function Dashboard({ data }: { data: PainelData }) {
   const { kpis, cadastrosPorPeriodo, zonas, faixaEtaria, musicas, hotlink } = data;
-  const [periodo, setPeriodo] = useState<Periodo>("30dias");
+  const [sel, setSel] = useState<Sel>("30dias");
+  const [customDe, setCustomDe] = useState<string | null>(null);
+  const [customAte, setCustomAte] = useState<string | null>(null);
   const [mode, setMode] = useState<DisplayMode>("numero");
   const [extra, setExtra] = useState<PainelExtraData | null>(null);
-  const serieArea = cadastrosPorPeriodo[periodo] ?? [];
+
+  // Intervalo efetivo que governa TODAS as secoes do painel.
   const { de: periodoDe, ate: periodoAte } = useMemo(
-    () => rangeDoPeriodo(periodo),
-    [periodo],
+    () => (sel === "custom" ? rangeCustom(customDe, customAte) : rangeDoPeriodo(sel)),
+    [sel, customDe, customAte],
   );
+
+  // No modo personalizado o grafico de cadastros e derivado dos ouvintes do
+  // periodo; nos modos nomeados usa a serie pre-calculada (anon).
+  const serieArea = useMemo(
+    () =>
+      sel === "custom"
+        ? serieDeOuvintes(extra?.ouvintes ?? [], periodoDe, periodoAte)
+        : cadastrosPorPeriodo[sel] ?? [],
+    [sel, extra, periodoDe, periodoAte, cadastrosPorPeriodo],
+  );
+
+  const rotuloPeriodo =
+    sel === "custom"
+      ? `${diaBr(periodoDe)} a ${diaBr(periodoAte)}`
+      : seletores.find((s) => s.id === sel)?.label;
   // Enquanto os dados filtrados nao chegam, mostra os valores do load inicial.
   // So usa o extra (service role) quando ele tem dados; se vier vazio (service
   // role indisponivel), mantem os dados do anon em vez de esvaziar os cards.
@@ -94,10 +181,26 @@ export default function Dashboard({ data }: { data: PainelData }) {
 
           <div className="flex flex-wrap items-center gap-3">
             <SegMenu
-              options={periodos}
-              value={periodo}
-              onChange={(v) => setPeriodo(v as Periodo)}
+              options={seletores}
+              value={sel}
+              onChange={(v) => setSel(v as Sel)}
             />
+            {sel === "custom" ? (
+              <div className="flex items-center gap-2">
+                <DateRange
+                  inicio={customDe}
+                  fim={customAte}
+                  onChange={(i, f) => {
+                    const h = hojeSaoPaulo();
+                    setCustomDe(i && i > h ? h : i);
+                    setCustomAte(f && f > h ? h : f);
+                  }}
+                />
+                <span className="hidden text-xs text-mist-300 sm:inline">
+                  {diaBr(periodoDe)} a {diaBr(periodoAte)}
+                </span>
+              </div>
+            ) : null}
             <SegMenu
               options={modos}
               value={mode}
@@ -140,9 +243,7 @@ export default function Dashboard({ data }: { data: PainelData }) {
           <div className="glass p-6 lg:col-span-2">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-semibold">Cadastros por período</h2>
-              <span className="text-xs text-mist-400">
-                {periodos.find((p) => p.id === periodo)?.label}
-              </span>
+              <span className="text-xs text-mist-400">{rotuloPeriodo}</span>
             </div>
             <AreaCadastros data={serieArea} />
           </div>
