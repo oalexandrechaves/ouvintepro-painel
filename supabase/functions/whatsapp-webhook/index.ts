@@ -274,12 +274,15 @@ async function buscarMusicaCatalogo(
       const j = await r.json();
       const arr = (j?.results ?? []).filter((h: Record<string, unknown>) => h.artistName && h.trackName);
       if (arr.length) {
-        arr.sort((a: Record<string, unknown>, b: Record<string, unknown>) => {
-          const da = Date.parse((a.releaseDate as string) ?? "") || 0;
-          const dbb = Date.parse((b.releaseDate as string) ?? "") || 0;
-          return dbb - da;
-        });
-        return { artista: arr[0].artistName, titulo: arr[0].trackName };
+        // Rankeia pelo MAIS PARECIDO com a consulta (titulo + artista), nao pelo mais novo.
+        const qTokens = tokensMusica(q);
+        const pontua = (h: Record<string, unknown>) => {
+          const cand = new Set(tokensMusica(`${h.trackName} ${h.artistName}`));
+          const hits = qTokens.filter((t) => cand.has(t)).length;
+          return qTokens.length ? hits / qTokens.length : 0;
+        };
+        arr.sort((a: Record<string, unknown>, b: Record<string, unknown>) => pontua(b) - pontua(a));
+        return { artista: arr[0].artistName as string, titulo: arr[0].trackName as string };
       }
     }
   } catch (_) { /* ignora */ }
@@ -323,18 +326,34 @@ async function confirmarArtista(termo: string): Promise<string | null> {
   return null;
 }
 
-// Resolve a musica oficial: grounding (Google) -> catalogo. Retorna null quando nao acha (nunca inventa).
+// Resolve a musica oficial: grounding (busca web) -> catalogo. Sempre combina titulo + artista
+// numa consulta unica e VALIDA que o resultado bate com o pedido. Retorna null quando nao acha
+// ou quando o retorno nao e parecido com o pedido (nunca grava algo diferente).
 async function resolverMusicaOficial(
   textoBruto: string,
   artistaHint?: string | null,
 ): Promise<{ titulo: string; artista: string | null } | null> {
-  const g = await buscarMusicaGrounding(textoBruto, artistaHint);
+  const consulta = [textoBruto, artistaHint]
+    .filter((x) => x && String(x).trim())
+    .join(" ")
+    .trim();
+  // 1) Grounding (busca web da Claude) como fonte de verdade, com titulo + artista juntos.
+  const g = await buscarMusicaGrounding(consulta, artistaHint);
   if (g && g.titulo) {
-    return { titulo: g.titulo, artista: g.artista ?? (artistaHint ? titleCasePtBr(artistaHint) : null) };
+    const tituloOk = pareceMatchCampo(textoBruto, g.titulo);
+    const artistaOk = !!artistaHint && pareceMatchCampo(artistaHint, g.artista);
+    if (tituloOk || artistaOk) {
+      return {
+        titulo: g.titulo,
+        artista: g.artista ?? (artistaHint ? titleCasePtBr(artistaHint) : null),
+      };
+    }
   }
-  const termo = artistaHint ? `${artistaHint} ${textoBruto}` : textoBruto;
-  const cat = await buscarMusicaCatalogo(termo);
-  if (cat) return { titulo: cat.titulo, artista: cat.artista };
+  // 2) Catalogo (iTunes/Deezer) como backup, tambem combinado e validado.
+  const cat = await buscarMusicaCatalogo(consulta);
+  if (cat && pareceMatch(textoBruto, artistaHint ?? null, cat.titulo, cat.artista)) {
+    return { titulo: cat.titulo, artista: cat.artista };
+  }
   return null;
 }
 
@@ -342,6 +361,41 @@ async function resolverMusicaOficial(
 function normaliza(s: string): string {
   return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, " ").trim();
+}
+
+// ==== Similaridade de musica: valida que o resultado bate com o pedido ====
+const STOP_MUSICA = new Set([
+  "the", "and", "de", "da", "do", "of", "a", "o", "e", "feat", "ft", "part",
+  "in", "la", "el", "los", "las", "band", "os", "as", "um", "uma",
+]);
+
+function tokensMusica(s: string): string[] {
+  return normaliza(s).replace(/[^a-z0-9\s]/g, " ").split(/\s+/)
+    .filter((w) => w.length >= 2 && !STOP_MUSICA.has(w));
+}
+
+// True se o texto achado for razoavelmente parecido com o pedido (sobreposicao de palavras).
+function pareceMatchCampo(pedido: string | null, achou: string | null): boolean {
+  const p = tokensMusica(pedido ?? "");
+  const a = tokensMusica(achou ?? "");
+  if (p.length === 0) return true;
+  if (a.length === 0) return false;
+  const setA = new Set(a);
+  const setP = new Set(p);
+  const h1 = p.filter((t) => setA.has(t)).length / p.length;
+  const h2 = a.filter((t) => setP.has(t)).length / a.length;
+  return Math.max(h1, h2) >= 0.5;
+}
+
+// Valida titulo (sempre) e artista (se foi informado) do resultado contra o pedido.
+function pareceMatch(
+  pedTitulo: string | null,
+  pedArtista: string | null,
+  achTitulo: string | null,
+  achArtista: string | null,
+): boolean {
+  return pareceMatchCampo(pedTitulo, achTitulo) &&
+    (!pedArtista || pareceMatchCampo(pedArtista, achArtista));
 }
 
 // Resolve nome de radio concorrente pela tabela de apelidos (deterministico).
@@ -764,6 +818,124 @@ function parseAniversario(texto: string): string | null {
   return `${ano}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
 }
 
+// Dias do mes considerando ano bissexto (mes 1-12).
+function diasNoMes(mes: number, ano: number): number {
+  return new Date(Date.UTC(ano, mes, 0)).getUTCDate();
+}
+
+const MESES_EXTENSO: Record<string, number> = {
+  janeiro: 1, jan: 1, fevereiro: 2, fev: 2, marco: 3, mar: 3, abril: 4, abr: 4,
+  maio: 5, mai: 5, junho: 6, jun: 6, julho: 7, jul: 7, agosto: 8, ago: 8,
+  setembro: 9, set: 9, outubro: 10, out: 10, novembro: 11, nov: 11,
+  dezembro: 12, dez: 12,
+};
+
+// Infere o seculo de um ano com 2 digitos, ano atual como referencia.
+// Se 20XX for futuro -> 19XX; se 19XX passar de ~105 anos -> 20XX; senao ambiguo.
+function inferirSeculo(
+  xx: number,
+): { ano: number | null; ano19: number; ano20: number; ambiguo: boolean } {
+  const anoAtual = new Date().getUTCFullYear();
+  const ano19 = 1900 + xx;
+  const ano20 = 2000 + xx;
+  if (ano20 > anoAtual) return { ano: ano19, ano19, ano20, ambiguo: false };
+  if (anoAtual - ano19 > 105) return { ano: ano20, ano19, ano20, ambiguo: false };
+  return { ano: null, ano19, ano20, ambiguo: true };
+}
+
+type DataInterpretada =
+  | { status: "ok"; iso: string }
+  | { status: "ambiguo"; dia: number; mes: number; ano19: number; ano20: number }
+  | { status: "dia_invalido"; dia: number; mes: number }
+  | { status: "sem_ano"; dia: number; mes: number }
+  | { status: "invalido" };
+
+// Interpreta a data em varios formatos e valida dia/mes de verdade (bissexto incluso).
+// Aceita 27/10/1965, 27/10/65, 27-10-65, 271065 e "27 de outubro de 1965".
+function interpretarData(texto: string): DataInterpretada {
+  const t = texto.trim();
+  let dia = 0;
+  let mes = 0;
+  let anoStr = "";
+  const num = t.match(/^(\d{1,2})[\/\-.\s](\d{1,2})[\/\-.\s](\d{2,4})$/);
+  const ext = normalizarSemAcento(t).match(
+    /(\d{1,2})\s+de\s+([a-z]+)(?:\s+de)?\s+(\d{2,4})/,
+  );
+  if (num) {
+    dia = parseInt(num[1], 10);
+    mes = parseInt(num[2], 10);
+    anoStr = num[3];
+  } else if (ext && MESES_EXTENSO[ext[2]] !== undefined) {
+    dia = parseInt(ext[1], 10);
+    mes = MESES_EXTENSO[ext[2]];
+    anoStr = ext[3];
+  } else {
+    const d = t.replace(/\D/g, "");
+    if (d.length === 8) {
+      dia = parseInt(d.slice(0, 2), 10);
+      mes = parseInt(d.slice(2, 4), 10);
+      anoStr = d.slice(4, 8);
+    } else if (d.length === 6) {
+      dia = parseInt(d.slice(0, 2), 10);
+      mes = parseInt(d.slice(2, 4), 10);
+      anoStr = d.slice(4, 6);
+    }
+  }
+  // So dia/mes, sem ano.
+  if (!anoStr) {
+    const dm = t.match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})$/);
+    const extDm = normalizarSemAcento(t).match(/^(\d{1,2})\s+de\s+([a-z]+)$/);
+    if (dm) {
+      const dd = parseInt(dm[1], 10);
+      const mm = parseInt(dm[2], 10);
+      if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+        return { status: "sem_ano", dia: dd, mes: mm };
+      }
+      return { status: "dia_invalido", dia: dd, mes: mm };
+    }
+    if (extDm && MESES_EXTENSO[extDm[2]] !== undefined) {
+      return { status: "sem_ano", dia: parseInt(extDm[1], 10), mes: MESES_EXTENSO[extDm[2]] };
+    }
+    return { status: "invalido" };
+  }
+  if (mes < 1 || mes > 12) return { status: "dia_invalido", dia, mes };
+  if (dia < 1 || dia > 31) return { status: "dia_invalido", dia, mes };
+  let ano: number;
+  if (anoStr.length >= 3) {
+    ano = parseInt(anoStr, 10);
+  } else {
+    const inf = inferirSeculo(parseInt(anoStr, 10));
+    if (inf.ambiguo) {
+      if (dia <= diasNoMes(mes, inf.ano19) && dia <= diasNoMes(mes, inf.ano20)) {
+        return { status: "ambiguo", dia, mes, ano19: inf.ano19, ano20: inf.ano20 };
+      }
+      ano = dia <= diasNoMes(mes, inf.ano20) ? inf.ano20 : inf.ano19;
+    } else {
+      ano = inf.ano!;
+    }
+  }
+  if (ano < 1900 || ano > new Date().getUTCFullYear()) return { status: "invalido" };
+  if (dia > diasNoMes(mes, ano)) return { status: "dia_invalido", dia, mes };
+  const iso = `${ano}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
+  return { status: "ok", iso };
+}
+
+// Interpreta a resposta do ouvinte a "voce nasceu em X ou Y?".
+function escolherAno(texto: string, ano19: number, ano20: number): number | null {
+  const anos = texto.match(/\d{4}/g);
+  if (anos) {
+    for (const s of anos) {
+      const n = parseInt(s, 10);
+      if (n === ano19) return ano19;
+      if (n === ano20) return ano20;
+    }
+  }
+  const t = normalizarSemAcento(texto);
+  if (/\b19\b/.test(t) || /mil\s*nove/.test(t)) return ano19;
+  if (/\b20\b/.test(t) || /dois\s*mil/.test(t)) return ano20;
+  return null;
+}
+
 function calcularIdade(iso: string): number {
   const nasc = new Date(iso);
   const hoje = new Date();
@@ -800,6 +972,53 @@ const NEGATIVAS = new Set([
   "fico na liverpool",
   "nao e essa", "nao e", "errado", "nao era essa", "outra",
 ]);
+
+// Detecta que o ouvinte esta CORRIGINDO a musica que acabou de ser anotada.
+const CORRECAO_MUSICA_RE =
+  /(nao e (essa|esse|isso|ela|ele)|nao era (essa|esse|isso)|nao,? e |ta errad|esta errad|errad[oa]|nao foi (essa|isso)|corrig|na verdade|a musica (e |certa|correta|nao e)|o (artista|cantor|banda) (e |certo|correto|nao e)|nao e a musica|nao e o (artista|cantor)|outra musica)/;
+
+function ehCorrecaoMusica(texto: string): boolean {
+  return CORRECAO_MUSICA_RE.test(normalizarSemAcento(texto));
+}
+
+// Extrai o titulo/artista corrigidos da mensagem do ouvinte (heuristico, best effort).
+function extrairCorrecaoMusica(
+  texto: string,
+): { titulo: string | null; artista: string | null } {
+  const t = texto.trim();
+  let titulo: string | null = null;
+  let artista: string | null = null;
+  const mMus = t.match(
+    /a\s+m[uú]sica\s+(?:certa\s+|correta\s+)?(?:e|eh|é)\s+(.+?)(?:\s+(?:do|da|de|by)\s+|$)/i,
+  );
+  if (mMus) titulo = mMus[1].trim();
+  const mArt = t.match(
+    /(?:o\s+)?(?:artista|cantor|banda)\s+(?:certo\s+|correto\s+)?(?:e|eh|é)\s+(.+)$/i,
+  );
+  if (mArt) artista = mArt[1].trim();
+  if (!titulo && !artista) {
+    const mDupla = t.match(/(?:e|eh|é)\s+(.+?)\s+d[oae]\s+(.+)$/i);
+    if (mDupla) {
+      titulo = mDupla[1].trim();
+      artista = mDupla[2].trim();
+    }
+  }
+  if (!titulo && !artista) {
+    const limpo = t
+      .replace(
+        /^\s*(nao|não|n)[,\s]+(e|eh|é|era|foi)?\s*(essa|esse|isso|a\s+m[uú]sica|o\s+artista)?\s*/i,
+        "",
+      )
+      .trim();
+    if (
+      limpo && limpo.length >= 2 &&
+      normalizarSemAcento(limpo) !== normalizarSemAcento(t)
+    ) {
+      titulo = limpo;
+    }
+  }
+  return { titulo, artista };
+}
 
 // Termos que indicam pergunta sobre premio/promocao (fast-path deterministico).
 const TERMOS_PREMIO = [
@@ -1266,12 +1485,18 @@ Deno.serve(async (req: Request) => {
     titulo: string | null,
     artista: string | null,
     flagsBase: Record<string, unknown>,
+    pedido?: { titulo: string | null; artista: string | null },
   ) {
     const textoOrig = (titulo && artista)
       ? `${titulo} - ${artista}`
       : (titulo ?? artista ?? "");
-    await gravarMusica(radioId, ouvinteId, "ama", artista, titulo, textoOrig);
-    const flags2: Record<string, unknown> = { ...flagsBase, musica_pedida: true };
+    const musicaId = await gravarMusica(radioId, ouvinteId, "ama", artista, titulo, textoOrig);
+    const ped = pedido ?? { titulo, artista };
+    const flags2: Record<string, unknown> = {
+      ...flagsBase,
+      musica_pedida: true,
+      aguardando_correcao_musica: true,
+    };
     const prox = proximaPerguntaFaltante(ouvinte, flags2);
     const concluido = prox.campo === "concluido";
     // O que foi realmente registrado: musica (com o nome oficial ja corrigido) ou so o cantor.
@@ -1301,7 +1526,90 @@ Deno.serve(async (req: Request) => {
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
       etapa: concluido ? "concluido" : "cadastro",
-      contexto: { flags: flags2, historico: hist },
+      contexto: {
+        flags: flags2,
+        historico: hist,
+        ultima_musica: {
+          id: musicaId,
+          titulo,
+          artista,
+          pedidoTitulo: ped.titulo,
+          pedidoArtista: ped.artista,
+        },
+      },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+  }
+
+  // Trata a correcao do ouvinte quando a musica anotada estava errada.
+  // Apaga o registro anterior, refaz a busca com a info corrigida e confirma o novo.
+  async function handleCorrecaoMusica(ultima: Record<string, unknown>) {
+    const oldId = (ultima.id as string | null) ?? null;
+    if (oldId) await db.from("musicas").delete().eq("id", oldId);
+    const corr = extrairCorrecaoMusica(texto);
+    const pedTitulo = corr.titulo ?? (ultima.pedidoTitulo as string | null) ?? null;
+    const pedArtista = corr.artista ?? (ultima.pedidoArtista as string | null) ?? null;
+    const oficial = (pedTitulo || pedArtista)
+      ? await resolverMusicaOficial(pedTitulo ?? pedArtista ?? "", pedArtista)
+      : null;
+    if (oficial) {
+      const novoTitulo = oficial.titulo;
+      const novoArtista = oficial.artista ??
+        (pedArtista ? titleCasePtBr(pedArtista) : null);
+      const textoOrig = (novoTitulo && novoArtista)
+        ? `${novoTitulo} - ${novoArtista}`
+        : (novoTitulo ?? novoArtista ?? "");
+      const novoId = await gravarMusica(
+        radioId, ouvinteId, "ama", novoArtista, novoTitulo, textoOrig,
+      );
+      const flags2: Record<string, unknown> = {
+        ...flags,
+        musica_pedida: true,
+        aguardando_correcao_musica: true,
+      };
+      const prox = proximaPerguntaFaltante(ouvinte, flags2);
+      const concluido = prox.campo === "concluido";
+      const anotado = novoArtista
+        ? `"${novoTitulo}", do ${novoArtista}`
+        : `"${novoTitulo}"`;
+      let msg = concluido
+        ? `Ops, foi mal! Agora sim, anotei ${anotado}${primeiroNome ? ", " + primeiroNome : ""}! Obrigada por participar. Continue ligado na ${RADIO_LABEL}!`
+        : `Ops, foi mal! Agora sim, anotei ${anotado}! ${prox.texto}`;
+      if (concluido && flags2.concluido !== true) {
+        flags2.concluido = true;
+        msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
+        await db.from("ouvintes").update({
+          participacoes: (ouvinte.participacoes ?? 0) + 1,
+        }).eq("id", ouvinteId);
+      }
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: concluido ? "concluido" : "cadastro",
+        contexto: {
+          flags: flags2,
+          historico: hist,
+          ultima_musica: {
+            id: novoId,
+            titulo: novoTitulo,
+            artista: novoArtista,
+            pedidoTitulo: pedTitulo,
+            pedidoArtista: pedArtista,
+          },
+        },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return;
+    }
+    // Nao achou: pergunta e volta o passo da musica (nao segue adiante).
+    const msg =
+      `Ops, foi mal! Não encontrei essa aqui${primeiroNome ? ", " + primeiroNome : ""}, me confirma o nome da música e quem canta?`;
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "cadastro",
+      contexto: {
+        flags: { ...flags, musica_pedida: false, aguardando_correcao_musica: false },
+        historico: hist,
+      },
     }).eq("id", conversaId);
     await reply(phone, conversaId, radioId, msg);
   }
@@ -1477,22 +1785,84 @@ Deno.serve(async (req: Request) => {
     }
 
     if (campo === "data_nascimento") {
-      // Sub-passo: aguardando so o ANO.
+      const gravarDataIso = async (iso: string) => {
+        const idade = calcularIdade(iso);
+        const { data: faixa } = await db.from("faixas_etarias").select("id")
+          .lte("idade_min", idade).or(`idade_max.gte.${idade},idade_max.is.null`)
+          .order("id").limit(1).maybeSingle();
+        const f2: Record<string, unknown> = { ...flags };
+        for (const k of ["aguardando_ano", "ano_tentativa", "data_tentativa", "aguardando_seculo", "data_dia", "data_mes", "data_ano19", "data_ano20"]) {
+          delete f2[k];
+        }
+        await avancarCadastro({
+          data_nascimento: iso,
+          idade,
+          faixa_etaria: faixa?.id ?? null,
+        }, f2);
+      };
+      const pedirSeculo = async (dia: number, mes: number, ano19: number, ano20: number) => {
+        await reperguntar(
+          `a data tem ano de 2 digitos que pode ser ${ano19} ou ${ano20}; pergunte com leveza em qual desses dois anos ele nasceu`,
+          `Só pra confirmar, você nasceu em ${ano19} ou ${ano20}?`,
+          { aguardando_seculo: true, aguardando_ano: false, data_dia: dia, data_mes: mes, data_ano19: ano19, data_ano20: ano20 },
+        );
+      };
+
+      // Sub-passo: confirmacao do seculo (data ambigua ja perguntada).
+      if (flags.aguardando_seculo === true) {
+        const ano19 = Number(flags.data_ano19);
+        const ano20 = Number(flags.data_ano20);
+        const dia = Number(flags.data_dia) || 1;
+        const mes = Number(flags.data_mes) || 1;
+        const escolha = escolherAno(texto, ano19, ano20);
+        if (escolha) {
+          await gravarDataIso(`${escolha}-${String(mes).padStart(2, "0")}-${String(dia).padStart(2, "0")}`);
+          return;
+        }
+        const rpc = interpretarData(texto);
+        if (rpc.status === "ok") {
+          await gravarDataIso(rpc.iso);
+          return;
+        }
+        await reperguntar(
+          `o ouvinte ainda nao confirmou o ano; pergunte de novo, natural, se ele nasceu em ${ano19} ou ${ano20}`,
+          `Me diz certinho: ${ano19} ou ${ano20}?`,
+          { aguardando_seculo: true, data_ano19: ano19, data_ano20: ano20, data_dia: dia, data_mes: mes },
+        );
+        return;
+      }
+
+      // Sub-passo: aguardando so o ANO (ja tinha dia/mes valido).
       if (flags.aguardando_ano === true) {
+        const rp = interpretarData(texto);
+        if (rp.status === "ok") {
+          await gravarDataIso(rp.iso);
+          return;
+        }
+        if (rp.status === "ambiguo") {
+          await pedirSeculo(rp.dia, rp.mes, rp.ano19, rp.ano20);
+          return;
+        }
+        const diaG = Number(flags.data_dia) || 1;
+        const mesG = Number(flags.data_mes) || 1;
         const d = texto.replace(/\D/g, "");
         let ano = 0;
-        if (d.length === 4) ano = parseInt(d, 10);
-        else if (d.length === 2) {
-          const a = parseInt(d, 10);
-          ano = a <= 25 ? 2000 + a : 1900 + a;
+        if (d.length === 4) {
+          ano = parseInt(d, 10);
+        } else if (d.length === 2) {
+          const inf = inferirSeculo(parseInt(d, 10));
+          if (inf.ambiguo) {
+            await pedirSeculo(diaG, mesG, inf.ano19, inf.ano20);
+            return;
+          }
+          ano = inf.ano!;
         }
         if (!ano || ano < 1900 || ano > anoAtual) {
           if (flags.ano_tentativa === true) {
-            // Desiste da data pra nao travar (pula).
             const f2: Record<string, unknown> = { ...flags };
-            delete f2.aguardando_ano;
-            delete f2.ano_tentativa;
-            delete f2.data_tentativa;
+            for (const k of ["aguardando_ano", "ano_tentativa", "data_tentativa", "data_dia", "data_mes"]) {
+              delete f2[k];
+            }
             f2.data_pulada = true;
             await avancarCadastro({}, f2);
             return;
@@ -1504,42 +1874,36 @@ Deno.serve(async (req: Request) => {
           );
           return;
         }
-        const iso = `${ano}-01-01`;
-        const idade = anoAtual - ano;
-        const { data: faixa } = await db.from("faixas_etarias").select("id")
-          .lte("idade_min", idade).or(`idade_max.gte.${idade},idade_max.is.null`)
-          .order("id").limit(1).maybeSingle();
-        const f2: Record<string, unknown> = { ...flags };
-        delete f2.aguardando_ano;
-        delete f2.ano_tentativa;
-        delete f2.data_tentativa;
-        await avancarCadastro({
-          data_nascimento: iso,
-          idade,
-          faixa_etaria: faixa?.id ?? null,
-        }, f2);
+        await gravarDataIso(`${ano}-${String(mesG).padStart(2, "0")}-${String(diaG).padStart(2, "0")}`);
         return;
       }
-      const iso = parseAniversario(texto);
-      if (iso) {
-        const idade = calcularIdade(iso);
-        const { data: faixa } = await db.from("faixas_etarias").select("id")
-          .lte("idade_min", idade).or(`idade_max.gte.${idade},idade_max.is.null`)
-          .order("id").limit(1).maybeSingle();
-        await avancarCadastro({
-          data_nascimento: iso,
-          idade,
-          faixa_etaria: faixa?.id ?? null,
-        }, flags2);
+
+      // Primeira interpretacao da data completa.
+      const rp = interpretarData(texto);
+      if (rp.status === "ok") {
+        await gravarDataIso(rp.iso);
         return;
       }
-      const temDiaMes = /\d{1,2}\s*[\/\-.\s]\s*\d{1,2}/.test(texto);
-      const temAno4 = /\d{4}/.test(texto);
-      if (temDiaMes && !temAno4) {
+      if (rp.status === "ambiguo") {
+        await pedirSeculo(rp.dia, rp.mes, rp.ano19, rp.ano20);
+        return;
+      }
+      if (rp.status === "dia_invalido") {
+        const problema = rp.mes < 1 || rp.mes > 12
+          ? "esse mes nao existe"
+          : "esse dia nao existe nesse mes";
+        await reperguntar(
+          `a data que o ouvinte mandou parece errada (${problema}); diga isso com leveza e peca a data completa de novo, no formato dia/mes/ano`,
+          "Essa data parece errada, esse dia não existe. Pode conferir e mandar de novo (ex: 28/01/1995)?",
+          { data_tentativa: true },
+        );
+        return;
+      }
+      if (rp.status === "sem_ano") {
         await reperguntar(
           "faltou o ano na data de nascimento; pergunte em que ano ele nasceu, de forma natural",
           "Faltou o ano. Em que ano você nasceu? (ex: 1990)",
-          { aguardando_ano: true },
+          { aguardando_ano: true, data_dia: rp.dia, data_mes: rp.mes },
         );
         return;
       }
@@ -1551,7 +1915,6 @@ Deno.serve(async (req: Request) => {
         );
         return;
       }
-      // 2a falha: pede so o ano.
       await reperguntar(
         "peca so o ano de nascimento, com 4 numeros, de forma natural",
         "Sem problema. Me diz só o ano que você nasceu, tipo 1990.",
@@ -1833,7 +2196,7 @@ Deno.serve(async (req: Request) => {
     ]);
     if (QUALQUER.has(chave)) {
       const artCanon = (await confirmarArtista(artista)) ?? titleCasePtBr(artista);
-      await gravarVotosESeguir(null, artCanon, flags);
+      await gravarVotosESeguir(null, artCanon, flags, { titulo: null, artista });
       return new Response("ok", { status: 200 });
     }
     if (NEGATIVAS.has(chave)) {
@@ -1856,7 +2219,7 @@ Deno.serve(async (req: Request) => {
     // Tem cantor + texto de musica: busca a versao oficial. Achou => grava direto; nao achou => repergunta.
     const oficial = await resolverMusicaOficial(texto, artista);
     if (oficial) {
-      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? titleCasePtBr(artista), flags);
+      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? titleCasePtBr(artista), flags, { titulo: texto, artista });
     } else {
       await reperguntarMusica(flags);
     }
@@ -1875,7 +2238,7 @@ Deno.serve(async (req: Request) => {
       // Existe texto de musica: a Adriana busca a musica sozinha pra descobrir o cantor real.
       const oficial = await resolverMusicaOficial(musica, null);
       if (oficial) {
-        await gravarVotosESeguir(oficial.titulo, oficial.artista ?? null, flags);
+        await gravarVotosESeguir(oficial.titulo, oficial.artista ?? null, flags, { titulo: musica, artista: null });
       } else {
         await reperguntarMusica(flags);
       }
@@ -1884,7 +2247,7 @@ Deno.serve(async (req: Request) => {
     // Tem musica + cantor: junta e busca. Achou => grava direto; nao achou => repergunta.
     const oficial = await resolverMusicaOficial(musica, texto);
     if (oficial) {
-      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? titleCasePtBr(texto), flags);
+      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? titleCasePtBr(texto), flags, { titulo: musica, artista: texto });
     } else {
       await reperguntarMusica(flags);
     }
@@ -1915,6 +2278,17 @@ Deno.serve(async (req: Request) => {
     }).eq("id", conversaId);
     await reply(phone, conversaId, radioId, msg);
     return new Response("ok", { status: 200 });
+  }
+
+  // ===== Correcao de musica: janela logo apos anotar uma musica =====
+  // Se o ouvinte corrige ("nao e essa", "a musica e X"...), NAO segue pro proximo campo:
+  // apaga o registro errado, refaz a busca e confirma. Se nao for correcao, fecha a janela.
+  if (isTexto && flags.aguardando_correcao_musica === true && ctx.ultima_musica) {
+    if (ehCorrecaoMusica(texto)) {
+      await handleCorrecaoMusica(ctx.ultima_musica as Record<string, unknown>);
+      return new Response("ok", { status: 200 });
+    }
+    flags.aguardando_correcao_musica = false;
   }
 
   // ===== Cadastro deterministico: trata o campo ATUAL antes do cerebro (imune a 503/429, sem loop) =====
@@ -1971,13 +2345,17 @@ Deno.serve(async (req: Request) => {
 
   const dataCampo = val(campos.data_nascimento);
   if (dataCampo) {
-    const rawSemAno = /\d{1,2}\s*[\/\-.\s]\s*\d{1,2}/.test(texto) && !/\d{4}/.test(texto);
-    const iso = /^\d{4}-\d{2}-\d{2}$/.test(dataCampo) ? dataCampo : parseAniversario(dataCampo);
-    const anoOk = !!iso && (() => {
-      const y = parseInt(iso!.slice(0, 4), 10);
-      return y >= 1900 && y <= new Date().getUTCFullYear();
-    })();
-    if (iso && anoOk && !rawSemAno) {
+    const rpTexto = interpretarData(texto);
+    let iso: string | null = rpTexto.status === "ok" ? rpTexto.iso : null;
+    if (!iso && /^\d{4}-\d{2}-\d{2}$/.test(dataCampo)) {
+      const y = parseInt(dataCampo.slice(0, 4), 10);
+      const mo = parseInt(dataCampo.slice(5, 7), 10);
+      const da = parseInt(dataCampo.slice(8, 10), 10);
+      if (y >= 1900 && y <= new Date().getUTCFullYear() && mo >= 1 && mo <= 12 && da >= 1 && da <= diasNoMes(mo, y)) {
+        iso = dataCampo;
+      }
+    }
+    if (iso) {
       upd.data_nascimento = iso;
       const idade = calcularIdade(iso);
       upd.idade = idade;
@@ -1985,6 +2363,10 @@ Deno.serve(async (req: Request) => {
         .lte("idade_min", idade).or(`idade_max.gte.${idade},idade_max.is.null`)
         .order("id").limit(1).maybeSingle();
       upd.faixa_etaria = faixa?.id ?? null;
+    } else if (rpTexto.status === "dia_invalido") {
+      overrideMsg = "Essa data parece errada, esse dia não existe. Pode conferir e mandar de novo (ex: 28/01/1995)?";
+    } else if (rpTexto.status === "ambiguo") {
+      overrideMsg = `Só pra confirmar, você nasceu em ${rpTexto.ano19} ou ${rpTexto.ano20}?`;
     } else {
       overrideMsg = "Faltou o ano. Em que ano você nasceu? (ex: 1990)";
     }
@@ -2049,7 +2431,7 @@ Deno.serve(async (req: Request) => {
   // "Qualquer uma do X": registra SO o voto de cantor e segue (sem confirmacao, sem busca).
   if (dec.qualquer_do_artista && artistaHint && !overrideMsg) {
     const artCanon = (await confirmarArtista(artistaHint)) ?? titleCasePtBr(artistaHint);
-    await gravarVotosESeguir(null, artCanon, flagsNovas);
+    await gravarVotosESeguir(null, artCanon, flagsNovas, { titulo: null, artista: artistaHint });
     return new Response("ok", { status: 200 });
   }
 
@@ -2057,7 +2439,7 @@ Deno.serve(async (req: Request) => {
   if (dec.e_pedido_musica && musicaBruta && artistaHint && !overrideMsg) {
     const oficial = await resolverMusicaOficial(musicaBruta, artistaHint);
     if (oficial) {
-      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? titleCasePtBr(artistaHint), flagsNovas);
+      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? titleCasePtBr(artistaHint), flagsNovas, { titulo: musicaBruta, artista: artistaHint });
     } else {
       await reperguntarMusica(flagsNovas);
     }
