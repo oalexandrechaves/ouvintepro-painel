@@ -410,19 +410,103 @@ async function resolverRadio(texto: string): Promise<string> {
 }
 
 // Interpreta bairro de Sao Paulo capital e devolve forma canonica + zona.
+// Zonas cardeais validas da capital. "Outras" NAO conta como resolvida.
+const ZONAS_REAIS = new Set(["Norte", "Sul", "Leste", "Oeste", "Centro"]);
+
+// IA dedicada: resolve o bairro canonico e a zona da capital a partir de
+// cidade + bairro + CEP (o CEP e o sinal mais forte). Usa tool schema PROPRIO
+// (bairro/zona), e NAO o do cerebro do cadastro, que proibia esses campos.
+// Timeout curto (4s via AbortController) pra nao travar o webhook. Retorna null
+// em qualquer falha (sem chave, erro HTTP, timeout, zona invalida ou "Outras"),
+// pra cair no fallback deterministico.
 async function interpretarBairro(
-  texto: string,
+  bairro: string,
+  cep?: string | null,
 ): Promise<{ bairro: string; zona: string } | null> {
+  if (!ANTHROPIC_API_KEY) return null;
+  const cepLinha = cep ? `\nCEP informado: ${cep}` : "";
   const prompt = `
-O ouvinte informou em qual bairro da cidade de Sao Paulo (capital) ele esta, em texto informal e possivelmente com erros de grafia.
-Identifique o bairro na forma canonica e a zona da cidade: uma de "Norte", "Sul", "Leste", "Oeste", "Centro".
-Conheca apelidos e formas curtas (ex.: "Sao Miguel" e Sao Miguel Paulista, na Zona Leste).
-Se nao reconhecer como bairro de Sao Paulo capital, use zona "Outras".
-Nao invente. Responda APENAS com JSON, sem texto fora do JSON:
-{"bairro":"Forma Canonica","zona":"Norte|Sul|Leste|Oeste|Centro|Outras"}
-Resposta do ouvinte: """${texto}"""
+Uma pessoa mora na cidade de Sao Paulo (capital). Com base no bairro e no CEP,
+identifique o bairro na forma canonica e a ZONA da cidade.
+Zonas possiveis: "Norte", "Sul", "Leste", "Oeste", "Centro". Se realmente nao
+for possivel determinar, use "Outras". Conheca apelidos e formas curtas (ex.:
+"Sao Miguel" e Sao Miguel Paulista, na Zona Leste; "Barra Funda" e Oeste).
+Nao invente. Quando houver conflito, priorize o CEP.
+Bairro informado: """${bairro}"""${cepLinha}
 `;
-  return await claudeJSON<{ bairro: string; zona: string }>(prompt);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 200,
+        temperature: 0,
+        tools: [{
+          name: "classificar_zona",
+          description: "Devolve o bairro canonico e a zona da cidade de Sao Paulo.",
+          input_schema: {
+            type: "object",
+            properties: {
+              bairro: { type: "string", description: "Bairro na forma canonica." },
+              zona: {
+                type: "string",
+                enum: ["Norte", "Sul", "Leste", "Oeste", "Centro", "Outras"],
+              },
+            },
+            required: ["bairro", "zona"],
+            additionalProperties: false,
+          },
+        }],
+        tool_choice: { type: "tool", name: "classificar_zona" },
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      console.error(`interpretarBairro falhou: status=${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const bloco = (data?.content ?? []).find(
+      (b: { type?: string }) => b?.type === "tool_use",
+    );
+    const inp = bloco?.input as { bairro?: string; zona?: string } | undefined;
+    if (inp && inp.zona && ZONAS_REAIS.has(inp.zona)) {
+      return { bairro: (inp.bairro || bairro).trim(), zona: inp.zona };
+    }
+    return null; // zona invalida ou "Outras" -> trata como falha
+  } catch (e) {
+    console.error(`interpretarBairro excecao (timeout/erro): ${e}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Fallback DETERMINISTICO: faixa de CEP -> zona (capital), pela regiao postal
+// (2 primeiros digitos). So entra quando a IA nao responde, pra nunca deixar
+// tudo em "Outras" por queda da IA. Nao substitui a IA (a regiao postal erra em
+// fronteiras, ex.: Barra Funda tem CEP 011xx / Centro, mas e Oeste).
+function zonaPorFaixaCep(cep?: string | null): string | null {
+  if (!cep) return null;
+  const d = cep.replace(/\D/g, "");
+  if (d.length < 5 || d[0] !== "0") return null;
+  const mapa: Record<string, string> = {
+    "01": "Centro",
+    "02": "Norte",
+    "03": "Leste",
+    "04": "Sul",
+    "05": "Oeste",
+    "08": "Leste",
+  };
+  return mapa[d.slice(0, 2)] ?? null;
 }
 
 // Fallback de zona por bairro contra a tabela bairros_zonas (usado quando a IA
@@ -446,6 +530,30 @@ async function zonaPorBairroSeed(bairro: string): Promise<string | null> {
     }
   }
   return melhor ? melhor.zona : null;
+}
+
+// Resolucao de zona da capital em camadas: IA (primaria, sem manutencao) ->
+// faixa de CEP (deterministica) -> tabela seed (ultimo recurso) -> "Outras".
+// Loga quando cai em cada fallback, pra dar pra medir se a IA falha muito.
+async function resolverZonaCapital(
+  bairro: string,
+  cep?: string | null,
+): Promise<{ zona: string; bairro: string }> {
+  const bairroBase = titleCasePtBr(bairro);
+  const ia = await interpretarBairro(bairro, cep);
+  if (ia) return { zona: ia.zona, bairro: ia.bairro || bairroBase };
+  const zFaixa = zonaPorFaixaCep(cep);
+  if (zFaixa) {
+    console.error(`zona: fallback FAIXA_CEP bairro="${bairro}" cep="${cep ?? ""}" -> ${zFaixa}`);
+    return { zona: zFaixa, bairro: bairroBase };
+  }
+  const zSeed = await zonaPorBairroSeed(bairro);
+  if (zSeed) {
+    console.error(`zona: fallback SEED bairro="${bairro}" -> ${zSeed}`);
+    return { zona: zSeed, bairro: bairroBase };
+  }
+  console.error(`zona: SEM_RESOLUCAO bairro="${bairro}" cep="${cep ?? ""}" -> Outras`);
+  return { zona: "Outras", bairro: bairroBase };
 }
 
 // ===== ENDERECO POR CEP (portado do EthnosPRO, adaptado para a Adriana) =====
@@ -1997,19 +2105,9 @@ Deno.serve(async (req: Request) => {
       let bairroFinal = titleCasePtBr(texto);
       let zona = loc.zona || "Outras";
       if (loc.tipo === "capital") {
-        const ia = await interpretarBairro(texto);
-        if (ia && ia.bairro && ia.zona && ia.zona !== "Outras") {
-          bairroFinal = ia.bairro;
-          zona = ia.zona;
-        } else {
-          const zSeed = await zonaPorBairroSeed(texto);
-          if (zSeed) {
-            zona = zSeed;
-            if (ia?.bairro) bairroFinal = ia.bairro;
-          } else {
-            zona = "Outras";
-          }
-        }
+        const r = await resolverZonaCapital(texto);
+        bairroFinal = r.bairro;
+        zona = r.zona;
       }
       await avancarCadastro({ bairro: bairroFinal, zona }, flags2);
       return;
@@ -2145,7 +2243,11 @@ Deno.serve(async (req: Request) => {
         contexto: {
           flags: flags2,
           historico: hist,
-          endereco_pendente: { cidade: cidadeCep, bairro: bairroCep },
+          endereco_pendente: {
+            cidade: cidadeCep,
+            bairro: bairroCep,
+            cep: texto.replace(/\D/g, ""),
+          },
         },
       }).eq("id", conversaId);
       await reply(phone, conversaId, radioId, msg);
@@ -2169,7 +2271,7 @@ Deno.serve(async (req: Request) => {
   }
 
   if (isTexto && etapa === "aguarda_confirma_endereco") {
-    const pend = (ctx.endereco_pendente as { cidade?: string; bairro?: string } | null) ?? null;
+    const pend = (ctx.endereco_pendente as { cidade?: string; bairro?: string; cep?: string } | null) ?? null;
     const chave = normalizarSemAcento(texto);
     // Recusou o endereco: ja tentou? vai pro manual; senao pede o CEP de novo.
     if (NEGATIVAS.has(chave)) {
@@ -2207,13 +2309,9 @@ Deno.serve(async (req: Request) => {
     }
     let bairroFinal = titleCasePtBr(bairroRaw);
     if (capital && bairroRaw) {
-      const ia = await interpretarBairro(bairroRaw);
-      if (ia && ia.bairro && ia.zona && ia.zona !== "Outras") {
-        bairroFinal = ia.bairro;
-        zona = ia.zona;
-      } else {
-        zona = (await zonaPorBairroSeed(bairroRaw)) ?? "Outras";
-      }
+      const r = await resolverZonaCapital(bairroRaw, pend?.cep);
+      bairroFinal = r.bairro;
+      zona = r.zona;
     }
     const flags2 = { ...flags };
     delete flags2.cep_tentativa;
@@ -2429,17 +2527,9 @@ Deno.serve(async (req: Request) => {
     let bairroFinal = titleCasePtBr(bairroCampo);
     let zona = "Outras";
     if (capital) {
-      const ia = await interpretarBairro(bairroCampo);
-      if (ia && ia.bairro && ia.zona && ia.zona !== "Outras") {
-        bairroFinal = ia.bairro;
-        zona = ia.zona;
-      } else {
-        const zSeed = await zonaPorBairroSeed(bairroCampo);
-        if (zSeed) {
-          zona = zSeed;
-          if (ia?.bairro) bairroFinal = ia.bairro;
-        }
-      }
+      const r = await resolverZonaCapital(bairroCampo);
+      bairroFinal = r.bairro;
+      zona = r.zona;
     } else {
       const gsp = await resolverGrandeSP(cidStr);
       zona = gsp ?? "Outras";
