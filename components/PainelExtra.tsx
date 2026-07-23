@@ -502,11 +502,10 @@ function ModalOuvinte({ o, onClose }: { o: OuvinteRow; onClose: () => void }) {
   const [carregando, setCarregando] = useState(false);
 
   // Carrega as mensagens SOB DEMANDA (so ao abrir), sempre por ouvinte_id.
+  // Sempre consulta a API: o campo temConversa vindo do painel pode ser um
+  // falso-negativo (ouvintes com varias conversas), entao a fonte da verdade
+  // e sempre a resposta de /api/conversa.
   useEffect(() => {
-    if (!o.temConversa) {
-      setMensagens([]);
-      return;
-    }
     let ativo = true;
     setCarregando(true);
     fetch(`/api/conversa?ouvinte=${encodeURIComponent(o.id)}`, {
@@ -525,7 +524,7 @@ function ModalOuvinte({ o, onClose }: { o: OuvinteRow; onClose: () => void }) {
     return () => {
       ativo = false;
     };
-  }, [o.id, o.temConversa]);
+  }, [o.id]);
 
   // Fecha com Esc.
   useEffect(() => {
@@ -589,11 +588,7 @@ function ModalOuvinte({ o, onClose }: { o: OuvinteRow; onClose: () => void }) {
 
         {/* Historico da conversa */}
         <div className="flex-1 overflow-y-auto bg-ink-950/40 px-4 py-4">
-          {!o.temConversa ? (
-            <p className="py-8 text-center text-sm text-mist-400">
-              Sem conversa registrada.
-            </p>
-          ) : carregando || mensagens === null ? (
+          {carregando || mensagens === null ? (
             <p className="py-8 text-center text-sm text-mist-400">
               Carregando conversa...
             </p>

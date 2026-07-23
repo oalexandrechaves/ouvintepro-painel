@@ -425,6 +425,29 @@ Resposta do ouvinte: """${texto}"""
   return await claudeJSON<{ bairro: string; zona: string }>(prompt);
 }
 
+// Fallback de zona por bairro contra a tabela bairros_zonas (usado quando a IA
+// nao resolveu). Alem do match EXATO, tenta CONTINENCIA: os nomes oficiais do
+// ViaCEP costumam ser mais longos que os da tabela (ex.: "Varzea da Barra Funda"
+// contem "Barra Funda"), o que antes caia em "Outras". Em caso de varios matches
+// por continencia, prefere o bairro conhecido MAIS LONGO (mais especifico).
+async function zonaPorBairroSeed(bairro: string): Promise<string | null> {
+  const alvo = normalizarSemAcento(bairro);
+  if (!alvo) return null;
+  const { data: seeds } = await db.from("bairros_zonas").select("bairro, zona");
+  const lista = (seeds ?? []) as { bairro: string; zona: string }[];
+  const exato = lista.find((b) => normalizarSemAcento(b.bairro) === alvo);
+  if (exato) return exato.zona;
+  let melhor: { zona: string; len: number } | null = null;
+  for (const b of lista) {
+    const nb = normalizarSemAcento(b.bairro);
+    if (!nb) continue;
+    if (alvo.includes(nb) || nb.includes(alvo)) {
+      if (!melhor || nb.length > melhor.len) melhor = { zona: b.zona, len: nb.length };
+    }
+  }
+  return melhor ? melhor.zona : null;
+}
+
 // ===== ENDERECO POR CEP (portado do EthnosPRO, adaptado para a Adriana) =====
 // So alimenta cidade e bairro; a zona continua sendo resolvida pela logica atual.
 // fetch com timeout curto (via AbortController) para nao travar o webhook.
@@ -1160,7 +1183,7 @@ function proximaPerguntaFaltante(
   if (!o.data_nascimento) return { campo: "data_nascimento", texto: `${o.nome ? (o.nome as string).split(/\s+/)[0] + ", v" : "V"}ocê pode me passar sua data de aniversário? Dia, mês e ano.` };
   if (!o.cidade) return { campo: "cidade", texto: "Em qual cidade você mora?" };
   if (capital && !o.bairro) return { campo: "bairro", texto: "E em qual bairro?" };
-  if (flags.musica_pedida !== true) return { campo: "pedido_musica", texto: "Que legal! Seu cadastro já foi preenchido. Você gostaria de pedir uma música? Qual seria?" };
+  if (flags.musica_pedida !== true) return { campo: "pedido_musica", texto: "Que legal! Seu cadastro já está certinho! Você quer aproveitar e pedir uma música?" };
   if (!o.estilo_musical) return { campo: "estilo_musical", texto: "Aliás, qual estilo musical que você mais gosta?" };
   if (flags.radio_troca_pedida !== true) return { campo: "radio_troca", texto: "Além da Rádio Liverpool, qual outra rádio você gosta de ouvir?" };
   if (!o.programa_locutor) return { campo: "programa_locutor", texto: "O que você mais gosta aqui da Rádio Liverpool?" };
@@ -1401,6 +1424,22 @@ Deno.serve(async (req: Request) => {
 
   let conversa = aberta;
   if (!aberta || intervaloMs > JANELA_MS) {
+    // Enquanto o cadastro estiver INCOMPLETO (faltam campos obrigatorios), a
+    // demora nao pode resetar o fluxo: a nova conversa (criada so para registro)
+    // HERDA a etapa e o contexto da anterior, para retomar exatamente de onde
+    // parou (mesmo endereco_pendente, mesmas flags), mesmo horas ou dias depois.
+    // So nao herdamos de um encerramento explicito por recusa de consentimento.
+    const ctxAnterior =
+      (recente?.contexto as Record<string, unknown> | null) ?? {};
+    const flagsAnterior =
+      (ctxAnterior.flags as Record<string, unknown> | null) ?? {};
+    const etapaAnterior = (recente?.etapa as string) ?? "";
+    const cadastroIncompleto =
+      proximaPerguntaFaltante(ouvinte, flagsAnterior).campo !== "concluido";
+    const retomavel = !!recente &&
+      cadastroIncompleto &&
+      etapaAnterior !== "encerrado_sem_consentimento";
+
     if (aberta) {
       await db
         .from("conversas")
@@ -1409,7 +1448,12 @@ Deno.serve(async (req: Request) => {
     }
     const { data: nova } = await db
       .from("conversas")
-      .insert({ radio_id: radioId, ouvinte_id: ouvinteId, etapa: "cadastro" })
+      .insert({
+        radio_id: radioId,
+        ouvinte_id: ouvinteId,
+        etapa: retomavel ? etapaAnterior : "cadastro",
+        contexto: retomavel ? ctxAnterior : {},
+      })
       .select("*")
       .single();
     conversa = nova;
@@ -1958,13 +2002,9 @@ Deno.serve(async (req: Request) => {
           bairroFinal = ia.bairro;
           zona = ia.zona;
         } else {
-          const alvo = normalizarSemAcento(texto);
-          const { data: seeds } = await db.from("bairros_zonas").select("bairro, zona");
-          const achou = (seeds ?? []).find(
-            (b) => normalizarSemAcento(b.bairro as string) === alvo,
-          );
-          if (achou) {
-            zona = achou.zona as string;
+          const zSeed = await zonaPorBairroSeed(texto);
+          if (zSeed) {
+            zona = zSeed;
             if (ia?.bairro) bairroFinal = ia.bairro;
           } else {
             zona = "Outras";
@@ -2011,9 +2051,12 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // ===== PROMOCAO por hashtag: "#nomedapromocao" registra a participacao =====
-  if (isTexto && texto.trim().startsWith("#")) {
-    const nomePromo = texto.trim().slice(1).trim().replace(/\s+/g, " ");
+  // ===== PROMOCAO por hashtag: detecta "#nomedapromocao" em QUALQUER posicao =====
+  // Ex.: "Quero participar da promocao #volvo" -> registra "volvo". O nome vai do
+  // # ate o proximo espaco (ou o fim / outra #).
+  const mHash = isTexto ? texto.match(/#([^\s#]+)/) : null;
+  if (mHash) {
+    const nomePromo = mHash[1].trim();
     if (nomePromo) {
       // Grava a participacao na tabela promocao_participacoes (RLS ligado; o service role do bot
       // grava normalmente). O insert do supabase-js nao lanca excecao: em erro so retorna { error },
@@ -2169,11 +2212,7 @@ Deno.serve(async (req: Request) => {
         bairroFinal = ia.bairro;
         zona = ia.zona;
       } else {
-        const { data: seeds } = await db.from("bairros_zonas").select("bairro, zona");
-        const achou = (seeds ?? []).find(
-          (b) => normalizarSemAcento(b.bairro as string) === normalizarSemAcento(bairroRaw),
-        );
-        zona = achou ? (achou.zona as string) : "Outras";
+        zona = (await zonaPorBairroSeed(bairroRaw)) ?? "Outras";
       }
     }
     const flags2 = { ...flags };
@@ -2395,11 +2434,9 @@ Deno.serve(async (req: Request) => {
         bairroFinal = ia.bairro;
         zona = ia.zona;
       } else {
-        const alvo = normalizarSemAcento(bairroCampo);
-        const { data: seeds } = await db.from("bairros_zonas").select("bairro, zona");
-        const achou = (seeds ?? []).find((b) => normalizarSemAcento(b.bairro as string) === alvo);
-        if (achou) {
-          zona = achou.zona as string;
+        const zSeed = await zonaPorBairroSeed(bairroCampo);
+        if (zSeed) {
+          zona = zSeed;
           if (ia?.bairro) bairroFinal = ia.bairro;
         }
       }

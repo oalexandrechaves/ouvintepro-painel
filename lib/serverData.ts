@@ -8,9 +8,18 @@ const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 export const serviceConfigured = Boolean(url && serviceKey);
 
+// fetch que desativa o Data Cache do Next.js. Sem isso, os GET do supabase-js
+// entram no cache e o painel passa a servir numeros congelados (ex.: promocoes
+// e cards que "nao filtram"). Cobre TODAS as leituras server-side deste cliente.
+const noStoreFetch: typeof fetch = (input, init) =>
+  fetch(input, { ...init, cache: "no-store" });
+
 function getServiceClient() {
   if (!serviceConfigured) return null;
-  return createClient(url!, serviceKey!, { auth: { persistSession: false } });
+  return createClient(url!, serviceKey!, {
+    auth: { persistSession: false },
+    global: { fetch: noStoreFetch },
+  });
 }
 
 export interface PromocaoRow {
@@ -234,22 +243,32 @@ export async function getPainelExtra(
     if (deUtc) qHot = qHot.gte("criado_em", deUtc);
     if (ateUtc) qHot = qHot.lt("criado_em", ateUtc);
 
-    const [{ data, error }, promoRes, msgRes, convRes, hotRes] = await Promise.all([
-      q,
-      qPromo,
-      // So para saber QUAIS ouvintes tem conversa (nao traz o conteudo aqui).
-      sb.from("mensagens").select("conversa_id, conversas(ouvinte_id)").limit(50000),
-      qConv,
-      qHot,
-    ]);
+    // Ouvintes com conversa: em vez de um embed reverso (mensagens ->
+    // conversas(ouvinte_id)), que dava falso-negativo para quem tem varias
+    // conversas, buscamos as duas tabelas e mapeamos conversa_id -> ouvinte_id.
+    let qMsgConv = sb.from("mensagens").select("conversa_id").limit(50000);
+    if (radioId) qMsgConv = qMsgConv.eq("radio_id", radioId);
+    let qConvOwner = sb.from("conversas").select("id, ouvinte_id").limit(50000);
+    if (radioId) qConvOwner = qConvOwner.eq("radio_id", radioId);
+
+    const [{ data, error }, promoRes, msgRes, convOwnerRes, convRes, hotRes] =
+      await Promise.all([q, qPromo, qMsgConv, qConvOwner, qConv, qHot]);
     if (error) throw error;
     const rows = (data ?? []) as unknown as OuvinteEmbed[];
 
     // Ouvintes que tem ao menos uma mensagem registrada (via conversa).
+    const conversasComMensagem = new Set<string>();
+    for (const m of (msgRes.data ?? []) as { conversa_id: string | null }[]) {
+      if (m.conversa_id) conversasComMensagem.add(m.conversa_id);
+    }
     const comConversa = new Set<string>();
-    for (const m of (msgRes.data ?? []) as unknown as { conversas: { ouvinte_id: string | null } | null }[]) {
-      const oid = m.conversas?.ouvinte_id;
-      if (oid) comConversa.add(oid);
+    for (const c of (convOwnerRes.data ?? []) as {
+      id: string;
+      ouvinte_id: string | null;
+    }[]) {
+      if (c.ouvinte_id && conversasComMensagem.has(c.id)) {
+        comConversa.add(c.ouvinte_id);
+      }
     }
 
     // Promocoes: agrupa variacoes parecidas (Levenshtein) sob o nome canonico.
