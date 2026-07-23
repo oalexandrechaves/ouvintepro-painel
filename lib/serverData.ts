@@ -167,11 +167,16 @@ export async function getPainelExtra(
   if (!sb) return vazio;
 
   try {
-    const { data: faixasRows } = await sb
-      .from("faixas_etarias")
-      .select("id, label, idade_min")
-      .gte("idade_min", 10)
-      .order("id");
+    const [{ data: faixasRows }, { data: radioRow }] = await Promise.all([
+      sb
+        .from("faixas_etarias")
+        .select("id, label, idade_min")
+        .gte("idade_min", 10)
+        .order("id"),
+      // Radio deste painel (deploy single-tenant): usado pra nao vazar promocoes entre radios.
+      sb.from("radios").select("id").eq("ativo", true).limit(1).maybeSingle(),
+    ]);
+    const radioId = (radioRow?.id as string | undefined) ?? null;
     const faixas = (faixasRows ?? []).map((f) => ({
       id: f.id as number,
       label: f.label as string,
@@ -206,6 +211,7 @@ export async function getPainelExtra(
       .from("promocao_participacoes")
       .select("promocao_nome, ouvinte_id")
       .limit(20000);
+    if (radioId) qPromo = qPromo.eq("radio_id", radioId);
     if (deUtc) qPromo = qPromo.gte("criado_em", deUtc);
     if (ateUtc) qPromo = qPromo.lt("criado_em", ateUtc);
 
