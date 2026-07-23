@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatValue, somaSerie } from "@/lib/mockData";
 import type { DisplayMode, SerieItem } from "@/lib/mockData";
 import Ranking from "./Ranking";
@@ -27,9 +27,48 @@ interface OuvinteRow {
 }
 
 interface PromocaoRow {
+  slug: string;
   label: string;
+  variacoes: string[];
   participantes: number;
   participacoes: number;
+}
+
+interface PromoVitoria {
+  promocao: string;
+  data: string | null;
+}
+
+interface PromoParticipante {
+  ouvinteId: string;
+  nome: string | null;
+  telefoneMasc: string | null;
+  bairro: string | null;
+  zona: string | null;
+  cidade: string | null;
+  estado: string | null;
+  participacoes: number;
+  primeiraEm: string | null;
+  ultimaEm: string | null;
+  variacaoExata: string;
+  jaGanhou: PromoVitoria[];
+}
+
+interface PromoGanhador {
+  id: string;
+  ouvinteId: string;
+  nome: string | null;
+  telefoneMasc: string | null;
+  bairro: string | null;
+  confirmadoEm: string | null;
+}
+
+interface PromocaoDetalhe {
+  slug: string;
+  label: string;
+  variacoes: string[];
+  participantes: PromoParticipante[];
+  ganhadores: PromoGanhador[];
 }
 
 interface Mensagem {
@@ -106,6 +145,7 @@ export default function PainelExtra({
   const [carregando, setCarregando] = useState(true);
   const [zonaAberta, setZonaAberta] = useState<string | null>(null);
   const [ouvinteAberto, setOuvinteAberto] = useState<OuvinteRow | null>(null);
+  const [promoAberta, setPromoAberta] = useState<PromocaoRow | null>(null);
 
   useEffect(() => {
     let ativo = true;
@@ -239,7 +279,7 @@ export default function PainelExtra({
               <RankingOuVazio serie={data.radios} mode={mode} />
             </Card>
             <Card titulo="Promoções">
-              <PromocoesLista promocoes={data.promocoes} />
+              <PromocoesLista promocoes={data.promocoes} onOpen={setPromoAberta} />
             </Card>
           </div>
 
@@ -286,11 +326,26 @@ export default function PainelExtra({
           onClose={() => setOuvinteAberto(null)}
         />
       ) : null}
+
+      {promoAberta ? (
+        <ModalPromocao
+          promo={promoAberta}
+          periodoDe={periodoDe}
+          periodoAte={periodoAte}
+          onClose={() => setPromoAberta(null)}
+        />
+      ) : null}
     </section>
   );
 }
 
-function PromocoesLista({ promocoes }: { promocoes: PromocaoRow[] }) {
+function PromocoesLista({
+  promocoes,
+  onOpen,
+}: {
+  promocoes: PromocaoRow[];
+  onOpen: (p: PromocaoRow) => void;
+}) {
   if (!promocoes || promocoes.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-1 py-6 text-center">
@@ -307,8 +362,14 @@ function PromocoesLista({ promocoes }: { promocoes: PromocaoRow[] }) {
   return (
     <div className="flex flex-col gap-3">
       {promocoes.map((p) => (
-        <div key={p.label} className="flex flex-col gap-1.5">
-          <div className="flex items-baseline justify-between">
+        <button
+          key={p.slug}
+          type="button"
+          onClick={() => onOpen(p)}
+          title="Ver participantes e sortear"
+          className="flex w-full flex-col gap-1.5 rounded-lg px-1.5 py-1.5 text-left transition-colors hover:bg-white/5"
+        >
+          <div className="flex items-baseline justify-between gap-2">
             <span className="text-sm text-mist-100">{p.label}</span>
             <span className="font-display text-sm tabular-nums text-mist-50">
               {p.participantes}
@@ -317,13 +378,18 @@ function PromocoesLista({ promocoes }: { promocoes: PromocaoRow[] }) {
               </span>
             </span>
           </div>
+          {p.variacoes.length > 0 ? (
+            <span className="text-[11px] text-mist-400">
+              inclui: {p.variacoes.join(", ")}
+            </span>
+          ) : null}
           <div className="h-2 w-full overflow-hidden rounded-full bg-ink-800">
             <div
               className="bar-fill h-full"
               style={{ width: `${(p.participantes / max) * 100}%` }}
             />
           </div>
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -611,5 +677,291 @@ function Select({
         ))}
       </select>
     </label>
+  );
+}
+
+// Modal de uma promocao: participantes, sorteio e ganhadores. Espelha o padrao
+// do ModalOuvinte (overlay, fecha no Esc/clique fora). Sempre por ouvinte_id.
+function ModalPromocao({
+  promo,
+  periodoDe,
+  periodoAte,
+  onClose,
+}: {
+  promo: PromocaoRow;
+  periodoDe: string | null;
+  periodoAte: string | null;
+  onClose: () => void;
+}) {
+  const [detalhe, setDetalhe] = useState<PromocaoDetalhe | null>(null);
+  const [carregando, setCarregando] = useState(true);
+  const [sorteado, setSorteado] = useState<PromoParticipante | null>(null);
+  const [confirmando, setConfirmando] = useState(false);
+  const [aviso, setAviso] = useState<string | null>(null);
+
+  const carregar = useCallback(() => {
+    setCarregando(true);
+    const params = new URLSearchParams({ slug: promo.slug });
+    if (periodoDe) params.set("de", periodoDe);
+    if (periodoAte) params.set("ate", periodoAte);
+    return fetch(`/api/promocao?${params.toString()}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : { detalhe: null }))
+      .then((d) => setDetalhe((d?.detalhe ?? null) as PromocaoDetalhe | null))
+      .catch(() => setDetalhe(null))
+      .finally(() => setCarregando(false));
+  }, [promo.slug, periodoDe, periodoAte]);
+
+  useEffect(() => {
+    carregar();
+  }, [carregar]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const participantes = detalhe?.participantes ?? [];
+  const ganhadores = detalhe?.ganhadores ?? [];
+  const label = detalhe?.label ?? promo.label;
+  const variacoes = detalhe?.variacoes ?? promo.variacoes;
+
+  function sortear() {
+    setAviso(null);
+    if (participantes.length === 0) {
+      setSorteado(null);
+      return;
+    }
+    const escolhido =
+      participantes[Math.floor(Math.random() * participantes.length)];
+    setSorteado(escolhido);
+  }
+
+  async function confirmar() {
+    if (!sorteado || !detalhe) return;
+    setConfirmando(true);
+    setAviso(null);
+    try {
+      const r = await fetch("/api/promocao/ganhador", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ouvinte: sorteado.ouvinteId,
+          promocao: detalhe.label,
+          variacao: sorteado.variacaoExata,
+        }),
+      });
+      const d = (await r.json().catch(() => ({ ok: false }))) as { ok?: boolean };
+      if (d?.ok) {
+        setAviso(`${sorteado.nome ?? "Ganhador"} confirmado!`);
+        setSorteado(null);
+        await carregar();
+      } else {
+        setAviso("Não foi possível registrar o ganhador. Tente de novo.");
+      }
+    } finally {
+      setConfirmando(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="glass flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Cabecalho */}
+        <div className="flex items-start justify-between border-b border-white/10 px-6 py-4">
+          <div>
+            <h3 className="font-display text-lg font-bold text-mist-50">{label}</h3>
+            <p className="text-xs text-mist-400">
+              {participantes.length}{" "}
+              {participantes.length === 1 ? "participante" : "participantes"}
+            </p>
+            {variacoes.length > 0 ? (
+              <p className="mt-0.5 text-[11px] text-mist-400">
+                inclui: {variacoes.join(", ")}
+              </p>
+            ) : null}
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-white/10 bg-ink-900/60 px-2.5 py-1 text-sm text-mist-300 transition-colors hover:text-mist-50"
+            title="Fechar"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Sorteio */}
+        <div className="border-b border-white/10 px-6 py-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={sortear}
+              disabled={carregando || participantes.length === 0}
+              className="rounded-xl bg-neon-violet/30 px-4 py-2 text-sm font-semibold text-mist-50 transition-colors hover:bg-neon-violet/45 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {sorteado ? "Sortear novamente" : "Sortear"}
+            </button>
+            {aviso ? (
+              <span className="text-sm text-mist-200">{aviso}</span>
+            ) : null}
+          </div>
+
+          {sorteado ? (
+            <div className="mt-4 rounded-2xl border border-neon-violet/40 bg-ink-900/60 p-4">
+              {sorteado.jaGanhou.length > 0 ? (
+                <div className="mb-3 rounded-xl border border-amber-400/50 bg-amber-500/15 px-3 py-2 text-sm text-amber-200">
+                  <strong className="font-semibold">Atenção:</strong> esta pessoa
+                  já ganhou{" "}
+                  {sorteado.jaGanhou
+                    .map((v) => `${v.promocao} em ${dataPtBr(v.data)}`)
+                    .join("; ")}
+                  .
+                </div>
+              ) : null}
+              <p className="text-[11px] uppercase tracking-wide text-mist-400">
+                Ganhador sorteado
+              </p>
+              <p className="font-display text-xl font-bold text-mist-50">
+                {sorteado.nome ?? "Ouvinte sem nome"}
+              </p>
+              <p className="text-sm text-mist-300">
+                {[sorteado.telefoneMasc, sorteado.bairro].filter(Boolean).join(" · ") ||
+                  "-"}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={confirmar}
+                  disabled={confirmando}
+                  className="rounded-xl bg-emerald-500/25 px-4 py-2 text-sm font-semibold text-emerald-100 transition-colors hover:bg-emerald-500/40 disabled:opacity-40"
+                >
+                  {confirmando ? "Confirmando..." : "Confirmar ganhador"}
+                </button>
+                <button
+                  type="button"
+                  onClick={sortear}
+                  disabled={confirmando}
+                  className="rounded-xl border border-white/10 bg-ink-900/60 px-4 py-2 text-sm text-mist-200 transition-colors hover:text-mist-50 disabled:opacity-40"
+                >
+                  Sortear novamente
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {/* Ganhadores confirmados */}
+        <div className="border-b border-white/10 px-6 py-4">
+          <p className="mb-2 text-[11px] uppercase tracking-wide text-mist-400">
+            Ganhadores confirmados ({ganhadores.length})
+          </p>
+          {ganhadores.length === 0 ? (
+            <p className="text-sm text-mist-400">
+              Nenhum ganhador confirmado ainda.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {ganhadores.map((g) => (
+                <div
+                  key={g.id}
+                  className="flex items-center justify-between rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-3 py-2"
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-mist-50">
+                      {g.nome ?? "Ouvinte sem nome"}
+                    </p>
+                    <p className="text-xs text-mist-300">
+                      {[g.telefoneMasc, g.bairro].filter(Boolean).join(" · ") || "-"}
+                    </p>
+                  </div>
+                  <span className="text-xs tabular-nums text-mist-400">
+                    {dataPtBr(g.confirmadoEm)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Participantes */}
+        <div className="flex-1 overflow-y-auto bg-ink-950/40 px-4 py-4">
+          {carregando ? (
+            <p className="py-8 text-center text-sm text-mist-400">
+              Carregando participantes...
+            </p>
+          ) : participantes.length === 0 ? (
+            <p className="py-8 text-center text-sm text-mist-400">
+              Nenhum participante no período selecionado.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[680px] text-left text-sm">
+                <thead className="text-xs uppercase tracking-wide text-mist-400">
+                  <tr className="border-b border-white/10">
+                    <th className="py-2 pr-3">Nome</th>
+                    <th className="py-2 pr-3">Telefone</th>
+                    <th className="py-2 pr-3">Bairro/Zona</th>
+                    <th className="py-2 pr-3">Cidade/UF</th>
+                    <th className="py-2 pr-3">Participou</th>
+                    <th className="py-2 pr-3">Digitou</th>
+                    <th className="py-2 pr-3">Part.</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {participantes.map((p) => (
+                    <tr
+                      key={p.ouvinteId}
+                      className="border-b border-white/5 text-mist-100"
+                    >
+                      <td className="py-2 pr-3">
+                        <span className="flex items-center gap-1.5">
+                          {p.nome ?? "Ouvinte sem nome"}
+                          {p.jaGanhou.length > 0 ? (
+                            <span
+                              title="Já ganhou promoção antes"
+                              className="rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-200"
+                            >
+                              já ganhou
+                            </span>
+                          ) : null}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums text-mist-300">
+                        {p.telefoneMasc ?? "-"}
+                      </td>
+                      <td className="py-2 pr-3 text-mist-300">
+                        {[p.bairro, p.zona].filter(Boolean).join(" / ") || "-"}
+                      </td>
+                      <td className="py-2 pr-3 text-mist-300">
+                        {p.cidade
+                          ? `${p.cidade}${p.estado ? "/" + p.estado : ""}`
+                          : "-"}
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums text-mist-300">
+                        {dataPtBr(p.primeiraEm)}
+                      </td>
+                      <td className="py-2 pr-3 text-mist-400">
+                        {p.variacaoExata || "-"}
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums text-mist-300">
+                        {p.participacoes}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

@@ -14,7 +14,9 @@ function getServiceClient() {
 }
 
 export interface PromocaoRow {
+  slug: string;
   label: string;
+  variacoes: string[];
   participantes: number;
   participacoes: number;
 }
@@ -250,23 +252,29 @@ export async function getPainelExtra(
       if (oid) comConversa.add(oid);
     }
 
-    // Promocoes por ouvinte (para o detalhe) e agregado geral (para o card).
+    // Promocoes: agrupa variacoes parecidas (Levenshtein) sob o nome canonico.
+    const partsRaw: ParticipacaoRaw[] = (promoRes.data ?? []).map((p) => ({
+      ouvinteId: (p as { ouvinte_id: string | null }).ouvinte_id ?? "",
+      raw: (p as { promocao_nome: string | null }).promocao_nome ?? "",
+      criadoEm: null,
+    }));
+    const gruposPromo = agruparPromocoes(partsRaw);
+    // Nome canonico por ouvinte, para o detalhe do ModalOuvinte.
     const promoPorOuvinte = new Map<string, string[]>();
-    const promoAgg = new Map<string, { label: string; participacoes: number; ouvintes: Set<string> }>();
-    for (const p of (promoRes.data ?? []) as unknown as { promocao_nome: string | null; ouvinte_id: string | null }[]) {
-      const raw = (p.promocao_nome ?? "").trim();
-      if (!raw || !p.ouvinte_id) continue;
-      const key = raw.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-      const cur = promoAgg.get(key);
-      if (cur) { cur.participacoes += 1; cur.ouvintes.add(p.ouvinte_id); }
-      else promoAgg.set(key, { label: raw, participacoes: 1, ouvintes: new Set([p.ouvinte_id]) });
-      const lista = promoPorOuvinte.get(p.ouvinte_id) ?? [];
-      if (!lista.includes(raw)) lista.push(raw);
-      promoPorOuvinte.set(p.ouvinte_id, lista);
+    for (const g of gruposPromo) {
+      for (const oid of Array.from(g.ouvintes)) {
+        const lista = promoPorOuvinte.get(oid) ?? [];
+        if (!lista.includes(g.label)) lista.push(g.label);
+        promoPorOuvinte.set(oid, lista);
+      }
     }
-    const promocoes: PromocaoRow[] = Array.from(promoAgg.values())
-      .map((v) => ({ label: v.label, participantes: v.ouvintes.size, participacoes: v.participacoes }))
-      .sort((a, b) => b.participantes - a.participantes || b.participacoes - a.participacoes);
+    const promocoes: PromocaoRow[] = gruposPromo.map((g) => ({
+      slug: g.slug,
+      label: g.label,
+      variacoes: g.variacoes,
+      participantes: g.ouvintes.size,
+      participacoes: g.participacoes,
+    }));
 
     const amaMus: string[] = [];
     const rejMus: string[] = [];
@@ -431,5 +439,405 @@ export async function getConversa(ouvinteId: string): Promise<MensagemChat[]> {
     }));
   } catch {
     return [];
+  }
+}
+
+// ===================== PROMOCOES: agrupamento e sorteios =====================
+
+// Normaliza o nome da promocao pra comparar variacoes (minusculas, sem acento,
+// espacos colapsados).
+function normalizaPromo(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Distancia de Levenshtein entre duas strings (agrupa erros de digitacao).
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  let cur = new Array<number>(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const custo = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + custo);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[b.length];
+}
+
+interface ParticipacaoRaw {
+  ouvinteId: string;
+  raw: string;
+  criadoEm: string | null;
+}
+
+export interface GrupoPromo {
+  slug: string;
+  label: string;
+  variacoes: string[];
+  chaves: Set<string>;
+  participacoes: number;
+  ouvintes: Set<string>;
+}
+
+// Agrupa participacoes por nome, fundindo variacoes muito parecidas (Levenshtein
+// agressivo) sob o nome canonico (o raw com mais participacoes). Determinista:
+// o mesmo conjunto sempre gera os mesmos grupos e slugs.
+export function agruparPromocoes(parts: ParticipacaoRaw[]): GrupoPromo[] {
+  const porChave = new Map<
+    string,
+    { rawCount: Map<string, number>; participacoes: number; ouvintes: Set<string> }
+  >();
+  for (const p of parts) {
+    const raw = (p.raw ?? "").trim();
+    if (!raw || !p.ouvinteId) continue;
+    const key = normalizaPromo(raw);
+    if (!key) continue;
+    let g = porChave.get(key);
+    if (!g) {
+      g = { rawCount: new Map(), participacoes: 0, ouvintes: new Set() };
+      porChave.set(key, g);
+    }
+    g.rawCount.set(raw, (g.rawCount.get(raw) ?? 0) + 1);
+    g.participacoes += 1;
+    g.ouvintes.add(p.ouvinteId);
+  }
+
+  // Funde chaves parecidas: as mais frequentes viram base dos super-grupos.
+  const ordenadas = Array.from(porChave.entries()).sort(
+    (a, b) => b[1].participacoes - a[1].participacoes,
+  );
+  const limiar = (len: number) => Math.max(1, Math.floor(0.34 * len));
+  const supergrupos: { chaves: string[] }[] = [];
+  for (const [key] of ordenadas) {
+    let alvo: { chaves: string[] } | null = null;
+    for (const sg of supergrupos) {
+      const base = sg.chaves[0];
+      if (levenshtein(key, base) <= limiar(Math.max(key.length, base.length))) {
+        alvo = sg;
+        break;
+      }
+    }
+    if (alvo) alvo.chaves.push(key);
+    else supergrupos.push({ chaves: [key] });
+  }
+
+  const grupos: GrupoPromo[] = supergrupos.map((sg) => {
+    const rawCount = new Map<string, number>();
+    let participacoes = 0;
+    const ouvintes = new Set<string>();
+    for (const k of sg.chaves) {
+      const g = porChave.get(k)!;
+      participacoes += g.participacoes;
+      for (const o of Array.from(g.ouvintes)) ouvintes.add(o);
+      for (const [raw, c] of Array.from(g.rawCount.entries())) {
+        rawCount.set(raw, (rawCount.get(raw) ?? 0) + c);
+      }
+    }
+    let label = "";
+    let best = -1;
+    for (const [raw, c] of Array.from(rawCount.entries())) {
+      if (c > best) {
+        best = c;
+        label = raw;
+      }
+    }
+    const variacoes = Array.from(rawCount.keys()).filter((r) => r !== label);
+    return {
+      slug: normalizaPromo(label),
+      label,
+      variacoes,
+      chaves: new Set(sg.chaves),
+      participacoes,
+      ouvintes,
+    };
+  });
+
+  return grupos.sort(
+    (a, b) => b.ouvintes.size - a.ouvintes.size || b.participacoes - a.participacoes,
+  );
+}
+
+// Resolve a radio deste painel (deploy single-tenant).
+async function resolverRadioId(
+  sb: ReturnType<typeof getServiceClient>,
+): Promise<string | null> {
+  if (!sb) return null;
+  const { data } = await sb
+    .from("radios")
+    .select("id")
+    .eq("ativo", true)
+    .limit(1)
+    .maybeSingle();
+  return (data?.id as string | undefined) ?? null;
+}
+
+// Converte um dia de Brasilia (YYYY-MM-DD) no par de limites UTC [de, ate).
+function janelaUtc(
+  de: string | null,
+  ate: string | null,
+): { deUtc: string | null; ateUtc: string | null } {
+  const deUtc = de ? `${de}T03:00:00.000Z` : null;
+  let ateUtc: string | null = null;
+  if (ate) {
+    const fim = new Date(`${ate}T03:00:00.000Z`);
+    fim.setUTCDate(fim.getUTCDate() + 1);
+    ateUtc = fim.toISOString();
+  }
+  return { deUtc, ateUtc };
+}
+
+export interface PromoVitoria {
+  promocao: string;
+  data: string | null;
+}
+
+export interface PromoParticipante {
+  ouvinteId: string;
+  nome: string | null;
+  telefoneMasc: string | null;
+  bairro: string | null;
+  zona: string | null;
+  cidade: string | null;
+  estado: string | null;
+  participacoes: number;
+  primeiraEm: string | null;
+  ultimaEm: string | null;
+  variacaoExata: string;
+  jaGanhou: PromoVitoria[];
+}
+
+export interface PromoGanhador {
+  id: string;
+  ouvinteId: string;
+  nome: string | null;
+  telefoneMasc: string | null;
+  bairro: string | null;
+  confirmadoEm: string | null;
+}
+
+export interface PromocaoDetalhe {
+  slug: string;
+  label: string;
+  variacoes: string[];
+  participantes: PromoParticipante[];
+  ganhadores: PromoGanhador[];
+}
+
+const detalheVazio = (slug: string): PromocaoDetalhe => ({
+  slug,
+  label: slug,
+  variacoes: [],
+  participantes: [],
+  ganhadores: [],
+});
+
+// Detalhe de UMA promocao (pelo slug canonico), respeitando o periodo do painel.
+// A checagem de "ja ganhou" ignora o periodo (olha todo o historico da radio) e
+// inclui vitorias na propria promocao. Sempre por ouvinte_id; telefone mascarado.
+export async function getPromocaoDetalhe(
+  slug: string,
+  de: string | null = null,
+  ate: string | null = null,
+): Promise<PromocaoDetalhe> {
+  const sb = getServiceClient();
+  if (!sb) return detalheVazio(slug);
+  try {
+    const radioId = await resolverRadioId(sb);
+    const { deUtc, ateUtc } = janelaUtc(de, ate);
+
+    let qParts = sb
+      .from("promocao_participacoes")
+      .select("promocao_nome, ouvinte_id, criado_em")
+      .limit(20000);
+    if (radioId) qParts = qParts.eq("radio_id", radioId);
+    if (deUtc) qParts = qParts.gte("criado_em", deUtc);
+    if (ateUtc) qParts = qParts.lt("criado_em", ateUtc);
+    const { data: partsData } = await qParts;
+
+    const parts: ParticipacaoRaw[] = (partsData ?? []).map((p) => ({
+      ouvinteId: (p.ouvinte_id as string) ?? "",
+      raw: (p.promocao_nome as string) ?? "",
+      criadoEm: (p.criado_em as string) ?? null,
+    }));
+
+    const grupo = agruparPromocoes(parts).find((g) => g.slug === slug);
+    if (!grupo) return detalheVazio(slug);
+
+    // Estatisticas por ouvinte no grupo (1 participante mesmo com varios #).
+    interface Acc {
+      participacoes: number;
+      primeiraEm: string | null;
+      ultimaEm: string | null;
+      variacaoExata: string;
+    }
+    const porOuvinte = new Map<string, Acc>();
+    for (const p of parts) {
+      if (!p.ouvinteId) continue;
+      if (!grupo.chaves.has(normalizaPromo(p.raw))) continue;
+      const acc = porOuvinte.get(p.ouvinteId);
+      if (!acc) {
+        porOuvinte.set(p.ouvinteId, {
+          participacoes: 1,
+          primeiraEm: p.criadoEm,
+          ultimaEm: p.criadoEm,
+          variacaoExata: p.raw.trim(),
+        });
+      } else {
+        acc.participacoes += 1;
+        if (p.criadoEm && (!acc.primeiraEm || p.criadoEm < acc.primeiraEm)) {
+          acc.primeiraEm = p.criadoEm;
+        }
+        if (p.criadoEm && (!acc.ultimaEm || p.criadoEm > acc.ultimaEm)) {
+          acc.ultimaEm = p.criadoEm;
+          acc.variacaoExata = p.raw.trim();
+        }
+      }
+    }
+
+    const ids = Array.from(porOuvinte.keys());
+    if (ids.length === 0) {
+      return {
+        slug: grupo.slug,
+        label: grupo.label,
+        variacoes: grupo.variacoes,
+        participantes: [],
+        ganhadores: [],
+      };
+    }
+
+    // Dados dos ouvintes (por id) e historico COMPLETO de vitorias (sem periodo).
+    let qVit = sb
+      .from("promocao_ganhadores")
+      .select("ouvinte_id, promocao_nome, confirmado_em")
+      .in("ouvinte_id", ids);
+    if (radioId) qVit = qVit.eq("radio_id", radioId);
+    const [{ data: ouvData }, { data: vitData }] = await Promise.all([
+      sb
+        .from("ouvintes")
+        .select("id, nome, telefone, bairro, zona, cidade, estado")
+        .in("id", ids),
+      qVit,
+    ]);
+
+    const ouvMap = new Map(
+      (ouvData ?? []).map(
+        (o) => [o.id as string, o] as [string, Record<string, unknown>],
+      ),
+    );
+    const vitPorOuvinte = new Map<string, PromoVitoria[]>();
+    for (const v of vitData ?? []) {
+      const oid = v.ouvinte_id as string;
+      const lista = vitPorOuvinte.get(oid) ?? [];
+      lista.push({
+        promocao: (v.promocao_nome as string) ?? "",
+        data: (v.confirmado_em as string) ?? null,
+      });
+      vitPorOuvinte.set(oid, lista);
+    }
+
+    const participantes: PromoParticipante[] = ids.map((id) => {
+      const acc = porOuvinte.get(id)!;
+      const o = ouvMap.get(id);
+      return {
+        ouvinteId: id,
+        nome: (o?.nome as string) ?? null,
+        telefoneMasc: mascararTelefone((o?.telefone as string) ?? null),
+        bairro: (o?.bairro as string) ?? null,
+        zona: (o?.zona as string) ?? null,
+        cidade: (o?.cidade as string) ?? null,
+        estado: (o?.estado as string) ?? null,
+        participacoes: acc.participacoes,
+        primeiraEm: acc.primeiraEm,
+        ultimaEm: acc.ultimaEm,
+        variacaoExata: acc.variacaoExata,
+        jaGanhou: vitPorOuvinte.get(id) ?? [],
+      };
+    });
+    participantes.sort((a, b) => {
+      const da = a.primeiraEm ?? "";
+      const db = b.primeiraEm ?? "";
+      return da < db ? -1 : da > db ? 1 : 0;
+    });
+
+    // Ganhadores ja confirmados DESTA promocao (pelo nome canonico).
+    let qGan = sb
+      .from("promocao_ganhadores")
+      .select("id, ouvinte_id, confirmado_em")
+      .eq("promocao_nome", grupo.label)
+      .order("confirmado_em", { ascending: false });
+    if (radioId) qGan = qGan.eq("radio_id", radioId);
+    const { data: ganData } = await qGan;
+    const ganIds = Array.from(
+      new Set((ganData ?? []).map((g) => g.ouvinte_id as string)),
+    );
+    let ganOuvMap = new Map<string, Record<string, unknown>>();
+    if (ganIds.length) {
+      const { data: go } = await sb
+        .from("ouvintes")
+        .select("id, nome, telefone, bairro")
+        .in("id", ganIds);
+      ganOuvMap = new Map(
+        (go ?? []).map(
+          (o) => [o.id as string, o] as [string, Record<string, unknown>],
+        ),
+      );
+    }
+    const ganhadores: PromoGanhador[] = (ganData ?? []).map((g) => {
+      const o = ganOuvMap.get(g.ouvinte_id as string);
+      return {
+        id: g.id as string,
+        ouvinteId: g.ouvinte_id as string,
+        nome: (o?.nome as string) ?? null,
+        telefoneMasc: mascararTelefone((o?.telefone as string) ?? null),
+        bairro: (o?.bairro as string) ?? null,
+        confirmadoEm: (g.confirmado_em as string) ?? null,
+      };
+    });
+
+    return {
+      slug: grupo.slug,
+      label: grupo.label,
+      variacoes: grupo.variacoes,
+      participantes,
+      ganhadores,
+    };
+  } catch {
+    return detalheVazio(slug);
+  }
+}
+
+// Registra um ganhador confirmado. Retorna true em sucesso. Sempre por ouvinte_id.
+export async function registrarGanhador(input: {
+  ouvinteId: string;
+  promocaoNome: string;
+  variacaoDigitada?: string | null;
+}): Promise<boolean> {
+  const sb = getServiceClient();
+  if (!sb) return false;
+  try {
+    const radioId = await resolverRadioId(sb);
+    if (!radioId) return false;
+    const agora = new Date().toISOString();
+    const { error } = await sb.from("promocao_ganhadores").insert({
+      radio_id: radioId,
+      ouvinte_id: input.ouvinteId,
+      promocao_nome: input.promocaoNome,
+      variacao_digitada: input.variacaoDigitada ?? null,
+      sorteado_em: agora,
+      confirmado_em: agora,
+    });
+    return !error;
+  } catch {
+    return false;
   }
 }
