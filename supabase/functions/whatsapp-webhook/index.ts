@@ -2050,9 +2050,10 @@ Deno.serve(async (req: Request) => {
       if (naoEhNome) {
         // Teto rigido de 3 tentativas. NUNCA grava a frase inteira como nome.
         if (tentativas >= 2) {
-          // Esgotou: segue SEM nome (nome_pulado) e pede o consentimento assim mesmo.
+          // Esgotou: segue SEM nome (nome_pulado). Transicao honesta: reconhece que
+          // segue sem o nome mesmo, para nao contradizer o "preciso do nome" anterior.
           const msgLGPD =
-            "Que legal que você está aqui com a gente! Podemos fazer um cadastro seu pra futuras promoções? Seus dados ficam protegidos de acordo com a LGPD, a Lei Geral de Proteção de Dados 🙂";
+            "Sem problema, seguimos sem o nome mesmo! Podemos fazer um cadastro seu pra futuras promoções? Seus dados ficam protegidos de acordo com a LGPD, a Lei Geral de Proteção de Dados 🙂";
           const histLGPD = pushHist(ctx.historico, texto, msgLGPD);
           await db.from("conversas").update({
             etapa: "aguarda_consentimento",
@@ -2062,6 +2063,17 @@ Deno.serve(async (req: Request) => {
           return;
         }
         const proxTent = tentativas + 1;
+        // CORRECAO 1: pedido (musica/promocao/premio) em vez do nome -> reconhece o
+        // pedido, promete atender e pede o nome. NAO diz que ja anotou (nao guardamos
+        // o pedido na v81; o passo 6 pergunta sobre musica de qualquer forma).
+        if (pareceIntencao(texto)) {
+          await reperguntar(
+            "o ouvinte respondeu com um PEDIDO (uma musica, uma promocao ou um premio) em vez de dizer o nome. Reconheca o pedido com simpatia e prometa que vai atender ja ja. Explique que antes so precisa completar o cadastro rapidinho. Termine perguntando o primeiro nome dele. IMPORTANTE: NAO diga que ja anotou, ja registrou nem ja pegou o pedido, porque isso ainda NAO aconteceu; prometa apenas que vai chegar la, nunca que ja foi feito.",
+            "Pode deixar que a gente vê isso pra você já já! Antes só preciso completar seu cadastro rapidinho. Qual é o seu nome?",
+            { nome_tentativas: proxTent },
+          );
+          return;
+        }
         if (proxTent === 2) {
           // Ultima pergunta antes de pular: fechada e mecanica, sem reformular a mesma coisa.
           await reperguntar(
