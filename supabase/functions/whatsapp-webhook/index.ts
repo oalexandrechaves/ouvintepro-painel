@@ -490,6 +490,94 @@ Bairro informado: """${bairro}"""${cepLinha}
   }
 }
 
+// CORRECAO 3 (v81): classifica a resposta na etapa de consentimento com CONTEXTO
+// (nome gravado, ultima pergunta da Adriana, nome_suspeito). Retorna a intencao e, se
+// for correcao de nome, o nome informado. Timeout CURTO (2.5s): o chamador cai no
+// fallback determinístico FAIL-CLOSED quando isto retorna null (IA fora, timeout, erro).
+async function classificarConsentimento(
+  texto: string,
+  contexto: { nomeGravado: string; ultimaPergunta: string; nomeSuspeito: boolean },
+): Promise<{ tipo: string; nome_corrigido: string | null } | null> {
+  if (!ANTHROPIC_API_KEY) return null;
+  const prompt = `
+Você classifica a resposta de uma pessoa no WhatsApp de uma rádio. A atendente Adriana acabou de pedir o CONSENTIMENTO da pessoa para guardar os dados dela num cadastro de promoções, citando a LGPD, a Lei Geral de Proteção de Dados.
+
+Contexto:
+- Nome hoje gravado no cadastro: "${contexto.nomeGravado || "(vazio)"}"
+- Esse nome gravado parece suspeito, como se tivesse sido capturado errado (por exemplo, um pedido de música virou nome)? ${contexto.nomeSuspeito ? "SIM" : "não"}
+- Última coisa que a Adriana disse: "${contexto.ultimaPergunta || "(pediu o consentimento para guardar os dados)"}"
+- Resposta da pessoa agora: """${texto}"""
+
+Classifique a resposta em UMA categoria:
+- "aceite": a pessoa concorda ou autoriza guardar os dados (ex.: "sim", "pode", "claro", "tudo bem", "autorizo", "pode sim", ou um emoji de positivo como 👍 👌 ✅ e equivalentes). Trate esses emojis como aceite, nunca como assunto solto.
+- "recusa": a pessoa não quer ou não autoriza (ex.: "não", "não quero", "agora não", "prefiro não", ou um emoji de negativo como 👎 e equivalentes).
+- "correcao_de_nome": a pessoa NÃO está respondendo ao consentimento; ela está informando ou corrigindo o próprio NOME. Ex.: o nome gravado é "Quero" e a pessoa manda "Wesley"; ou "não é isso, meu nome é Ana". Extraia o nome informado em nome_corrigido.
+- "outro": qualquer coisa que não seja claramente aceite, recusa ou correção de nome (uma dúvida, uma pergunta, um assunto solto).
+
+Regras:
+- Só use "aceite" quando a concordância for clara. Na dúvida entre "aceite" e "outro", escolha "outro".
+- Use "correcao_de_nome" apenas quando a mensagem for claramente um nome de pessoa, não uma frase de intenção como "quero pedir música". Na dúvida entre "correcao_de_nome" e "outro", escolha "outro".
+- nome_corrigido: preencha SÓ quando tipo for "correcao_de_nome"; nos demais casos, deixe null.
+`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2500);
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 80,
+        temperature: 0,
+        tools: [{
+          name: "classificar_consentimento",
+          description: "Devolve a intencao da resposta do ouvinte na etapa de consentimento.",
+          input_schema: {
+            type: "object",
+            properties: {
+              tipo: {
+                type: "string",
+                enum: ["aceite", "recusa", "correcao_de_nome", "outro"],
+              },
+              nome_corrigido: {
+                type: ["string", "null"],
+                description: "Nome informado quando tipo=correcao_de_nome; senao null.",
+              },
+            },
+            required: ["tipo"],
+            additionalProperties: false,
+          },
+        }],
+        tool_choice: { type: "tool", name: "classificar_consentimento" },
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      console.error(`classificarConsentimento falhou: status=${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const bloco = (data?.content ?? []).find(
+      (b: { type?: string }) => b?.type === "tool_use",
+    );
+    const inp = bloco?.input as { tipo?: string; nome_corrigido?: string | null } | undefined;
+    const tiposValidos = new Set(["aceite", "recusa", "correcao_de_nome", "outro"]);
+    if (!inp || !inp.tipo || !tiposValidos.has(inp.tipo)) return null;
+    const nome = typeof inp.nome_corrigido === "string" ? inp.nome_corrigido.trim() : null;
+    return { tipo: inp.tipo, nome_corrigido: nome && nome.length > 0 ? nome : null };
+  } catch (e) {
+    console.error(`classificarConsentimento excecao (timeout/erro): ${e}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Fallback DETERMINISTICO: faixa de CEP -> zona (capital), pela regiao postal
 // (2 primeiros digitos). So entra quando a IA nao responde, pra nunca deixar
 // tudo em "Outras" por queda da IA. Nao substitui a IA (a regiao postal erra em
@@ -1104,6 +1192,38 @@ const NEGATIVAS = new Set([
   "nao e essa", "nao e", "errado", "nao era essa", "outra",
 ]);
 
+// ===== CONSENTIMENTO LGPD: classificacao EXPLICITA (v81) =====
+// So concede consentimento em aceite explicito. Ambiguidade NAO concede.
+const CONSENT_ACEITE = new Set([
+  "sim", "s", "aceito", "aceito sim", "sim aceito", "sim quero", "pode",
+  "pode sim", "pode fazer", "podemos", "quero", "quero sim", "claro",
+  "com certeza", "concordo", "autorizo", "tudo bem", "ta bom", "ta", "beleza",
+  "ok", "okay", "pode ser", "positivo", "bora", "vamos", "de acordo",
+]);
+function consentimentoAceite(texto: string): boolean {
+  const chave = normalizarSemAcento(texto);
+  if (chave.startsWith("nao")) return false;
+  if (CONSENT_ACEITE.has(chave)) return true;
+  return /\b(aceito|autorizo|concordo|pode fazer|pode sim|quero sim|tudo bem)\b/.test(chave);
+}
+function consentimentoRecusa(texto: string): boolean {
+  const chave = normalizarSemAcento(texto);
+  if (NEGATIVAS.has(chave)) return true;
+  return /\bnao\b/.test(chave) &&
+    /\bnao quero\b|\bnao aceito\b|\bnao autorizo\b|\bnao concordo\b|\bnao pode\b|\bnao obrigad/.test(chave) ||
+    /^nao$|^nao,?\s*(obrigad|quero|aceito|pode|autorizo|concordo)/.test(chave);
+}
+
+// CORRECAO 1: frases de INTENCAO (pedido de musica etc.) NAO sao nome. Evita capturar
+// "quero pedir uma musica" como se fosse o nome do ouvinte.
+function pareceIntencao(texto: string): boolean {
+  const n = normalizarSemAcento(texto);
+  if (/\b(quero|queria|gostaria|pode|poderia|posso|vou)\b.*\b(pedir|ouvir|tocar|escutar|colocar|mandar|botar|por|poe)\b/.test(n)) return true;
+  if (/\b(pedir|ouvir|tocar|escutar|coloca|manda)\b.*\b(musica|som|cancao|funk|sertanejo|pagode|rock)\b/.test(n)) return true;
+  if (/\bmusica\b/.test(n) && /\b(quero|pedir|ouvir|tocar|escutar|coloca|manda)\b/.test(n)) return true;
+  return false;
+}
+
 // Detecta que o ouvinte esta CORRIGINDO a musica que acabou de ser anotada.
 const CORRECAO_MUSICA_RE =
   /(nao e (essa|esse|isso|ela|ele)|nao era (essa|esse|isso)|nao,? e |ta errad|esta errad|errad[oa]|nao foi (essa|isso)|corrig|na verdade|a musica (e |certa|correta|nao e)|o (artista|cantor|banda) (e |certo|correto|nao e)|nao e a musica|nao e o (artista|cantor)|outra musica)/;
@@ -1257,7 +1377,7 @@ function camposFaltantes(
 ): string[] {
   const capital = normalizarSemAcento((o.cidade as string) ?? "") === "sao paulo";
   const faltam: string[] = [];
-  if (!o.nome) faltam.push("nome");
+  if (!o.nome && flags.nome_pulado !== true) faltam.push("nome");
   if (!o.data_nascimento && flags.data_pulada !== true) faltam.push("data_nascimento");
   if (!o.cidade) faltam.push("cidade");
   if (capital && !o.bairro) faltam.push("bairro");
@@ -1287,7 +1407,7 @@ function proximaPerguntaFaltante(
   flags: Record<string, unknown>,
 ): { campo: string; texto: string } {
   const capital = normalizarSemAcento((o.cidade as string) ?? "") === "sao paulo";
-  if (!o.nome) return { campo: "nome", texto: "Pra te deixar ligado nas promoções, qual é o seu nome completo?" };
+  if (!o.nome && flags.nome_pulado !== true) return { campo: "nome", texto: "Pra te deixar ligado nas promoções, qual é o seu nome completo?" };
   if (!o.data_nascimento) return { campo: "data_nascimento", texto: `${o.nome ? (o.nome as string).split(/\s+/)[0] + ", v" : "V"}ocê pode me passar sua data de aniversário? Dia, mês e ano.` };
   if (!o.cidade) return { campo: "cidade", texto: "Em qual cidade você mora?" };
   if (capital && !o.bairro) return { campo: "bairro", texto: "E em qual bairro?" };
@@ -1305,6 +1425,15 @@ function pushHist(
 ): { de: string; texto: string }[] {
   const anterior = Array.isArray(hist) ? hist as { de: string; texto: string }[] : [];
   return [...anterior, { de: "ouvinte", texto: ouvinteTexto }, { de: "adriana", texto: adriaTexto }].slice(-8);
+}
+
+// Ultima fala da Adriana no historico (para dar contexto ao classificador de consentimento).
+function ultimaFalaAdriana(hist: unknown): string {
+  const arr = Array.isArray(hist) ? hist as { de: string; texto: string }[] : [];
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i]?.de === "adriana") return arr[i].texto ?? "";
+  }
+  return "";
 }
 
 async function cerebroAdriana(
@@ -1902,6 +2031,9 @@ Deno.serve(async (req: Request) => {
     const anoAtual = new Date().getUTCFullYear();
 
     if (campo === "nome") {
+      const tentativas = typeof flags.nome_tentativas === "number"
+        ? flags.nome_tentativas as number
+        : 0;
       // Tira "ja falei que.../falei que..." pra sobrar a resposta limpa.
       const semReclamacao = texto.replace(
         /^(ja falei[,\s]*(que\s+)?(é|eh|e)?|eu ja disse[,\s]*(que\s+)?|falei[,\s]*(que\s+)?)\s+/i,
@@ -1911,22 +2043,47 @@ Deno.serve(async (req: Request) => {
       const viaIA = await extrairNomeIA(texto);
       const base = viaIA ?? extrairNomeProprio(semReclamacao);
       const soLetras = base.replace(/[^A-Za-zÀ-ÿ]/g, "");
-      const naoEhNome = base.trim().length === 0 ||
+      // Classificacao de intencao: "quero pedir uma musica" NAO vira nome.
+      const naoEhNome = base.trim().length === 0 || pareceIntencao(texto) ||
         SAUDACOES_NAO_NOME.has(normalizarSemAcento(base)) || soLetras.length < 2;
-      if (naoEhNome && flags.nome_tentativa !== true) {
-        await reperguntar(
-          `voce ainda nao pegou o nome do ouvinte; se apresente rapidinho como Adriana da ${RADIO_LABEL} e peca o nome completo dele, de um jeito diferente`,
-          "Antes da gente começar, como você se chama? Pode mandar seu nome completo.",
-          { nome_tentativa: true },
-        );
+
+      if (naoEhNome) {
+        // Teto rigido de 3 tentativas. NUNCA grava a frase inteira como nome.
+        if (tentativas >= 2) {
+          // Esgotou: segue SEM nome (nome_pulado) e pede o consentimento assim mesmo.
+          const msgLGPD =
+            "Que legal que você está aqui com a gente! Podemos fazer um cadastro seu pra futuras promoções? Seus dados ficam protegidos de acordo com a LGPD, a Lei Geral de Proteção de Dados 🙂";
+          const histLGPD = pushHist(ctx.historico, texto, msgLGPD);
+          await db.from("conversas").update({
+            etapa: "aguarda_consentimento",
+            contexto: { flags: { ...flags2, nome_pulado: true }, historico: histLGPD },
+          }).eq("id", conversaId);
+          await reply(phone, conversaId, radioId, msgLGPD);
+          return;
+        }
+        const proxTent = tentativas + 1;
+        if (proxTent === 2) {
+          // Ultima pergunta antes de pular: fechada e mecanica, sem reformular a mesma coisa.
+          await reperguntar(
+            "peca de forma curta, direta e mecanica APENAS o primeiro nome do ouvinte, sem rodeios e sem mais nada",
+            "Me manda só o seu primeiro nome, sem mais nada 🙂",
+            { nome_tentativas: proxTent },
+          );
+        } else {
+          await reperguntar(
+            `voce ainda nao pegou o nome do ouvinte; se apresente rapidinho como Adriana da ${RADIO_LABEL} e peca o nome completo dele, de um jeito diferente`,
+            "Antes da gente começar, como você se chama? Pode mandar seu nome completo.",
+            { nome_tentativas: proxTent },
+          );
+        }
         return;
       }
-      const nome = titleCasePtBr(naoEhNome ? texto.trim() : base) || texto.trim();
+      const nome = titleCasePtBr(base) || base.trim();
       // Grava o nome e pede o consentimento LGPD ANTES de seguir pra data de nascimento.
       await db.from("ouvintes").update({ nome }).eq("id", ouvinteId);
       const pn = (nome.split(/\s+/)[0] || nome);
       const msgLGPD =
-        `Que legal que você está aqui com a gente, ${pn}! Podemos fazer um cadastro seu pra futuras promoções? E pode ficar tranquilo, seus dados estão protegidos de acordo com a LGPD 🙂`;
+        `Que legal que você está aqui com a gente${pn ? ", " + pn : ""}! Podemos fazer um cadastro seu pra futuras promoções? Seus dados ficam protegidos de acordo com a LGPD, a Lei Geral de Proteção de Dados 🙂`;
       const histLGPD = pushHist(ctx.historico, texto, msgLGPD);
       await db.from("conversas").update({
         etapa: "aguarda_consentimento",
@@ -2178,30 +2335,127 @@ Deno.serve(async (req: Request) => {
   }
 
   // ===== CONSENTIMENTO LGPD: pedido logo apos o nome, antes da data de nascimento =====
+  // v81: classificador de IA com CONTEXTO (aceite/recusa/correcao_de_nome/outro) e
+  // fallback determinístico FAIL-CLOSED. Consentimento SO em aceite explicito. Ambiguidade
+  // reformula ate 2x e entao encerra. Correcao de nome tem teto proprio de 2. Na
+  // recusa/esgotamento, LIMPEZA REAL (nome, mensagens, historico) ANTES da despedida.
   if (isTexto && etapa === "aguarda_consentimento") {
-    const chave = normalizarSemAcento(texto);
-    const recusou = NEGATIVAS.has(chave) ||
-      /\bnao\b|\bagora nao\b|\bnao quero\b|\bnao aceito\b/.test(chave);
-    if (recusou) {
+    const reformulacoes = typeof flags.consentimento_reformulacoes === "number"
+      ? flags.consentimento_reformulacoes as number
+      : 0;
+    const correcoesNome = typeof flags.correcao_nome_reformulacoes === "number"
+      ? flags.correcao_nome_reformulacoes as number
+      : 0;
+
+    // nome_suspeito: calculado UMA vez e reaproveitado no contexto do classificador.
+    const nomeGravado = ((ouvinte.nome as string) ?? "").trim();
+    const nomeSuspeito = nomeGravado.length === 0 ||
+      pareceIntencao(nomeGravado) ||
+      SAUDACOES_NAO_NOME.has(normalizarSemAcento(nomeGravado));
+
+    // Classificacao por IA (timeout curto). Fallback FAIL-CLOSED quando retorna null:
+    // so aceite/recusa por lista; NUNCA infere correcao; NUNCA concede sem aceite explicito.
+    const cls = await classificarConsentimento(texto, {
+      nomeGravado,
+      ultimaPergunta: ultimaFalaAdriana(ctx.historico),
+      nomeSuspeito,
+    });
+    let tipo: string;
+    let nomeCorrigido: string | null = null;
+    if (cls) {
+      tipo = cls.tipo;
+      nomeCorrigido = cls.nome_corrigido;
+    } else {
+      tipo = consentimentoAceite(texto)
+        ? "aceite"
+        : consentimentoRecusa(texto)
+        ? "recusa"
+        : "outro";
+    }
+    // Teto de correcoes de nome + MESMO filtro da C1 no nome_corrigido: a IA nao
+    // pode gravar lixo por esse caminho. Sem nome, teto estourado, ou nome que
+    // reprova no filtro (< 2 letras, saudacao, ou frase de intencao) -> vira "outro".
+    if (tipo === "correcao_de_nome") {
+      const soLetrasCorr = (nomeCorrigido ?? "").replace(/[^A-Za-zÀ-ÿ]/g, "");
+      const corrInvalido = !nomeCorrigido || correcoesNome >= 2 ||
+        soLetrasCorr.length < 2 ||
+        SAUDACOES_NAO_NOME.has(normalizarSemAcento(nomeCorrigido)) ||
+        pareceIntencao(nomeCorrigido);
+      if (corrInvalido) tipo = "outro";
+    }
+
+    // Correcao de nome: grava o nome novo e reapresenta o consentimento (conta no teto proprio).
+    if (tipo === "correcao_de_nome") {
+      const nomeNovo = titleCasePtBr(nomeCorrigido as string) || (nomeCorrigido as string);
+      await db.from("ouvintes").update({ nome: nomeNovo }).eq("id", ouvinteId);
+      const pnNovo = nomeNovo.split(/\s+/)[0] || nomeNovo;
       const msg =
-        "Sem problema! Só que sem seus dados eu não consigo seguir com o atendimento. Se mudar de ideia e quiser continuar, é só me chamar!";
+        `Perfeito, corrigido${pnNovo ? ", " + pnNovo : ""}! Podemos fazer um cadastro seu pra futuras promoções? Seus dados ficam protegidos de acordo com a LGPD, a Lei Geral de Proteção de Dados 🙂`;
       const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: "aguarda_consentimento",
+        contexto: {
+          ...ctx,
+          flags: { ...flags, correcao_nome_reformulacoes: correcoesNome + 1 },
+          historico: hist,
+        },
+      }).eq("id", conversaId);
       await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+
+    // Aceite: grava a prova (consentimento_em + texto) e segue pro nascimento.
+    if (tipo === "aceite") {
+      await db.from("ouvintes").update({
+        consentimento_em: new Date().toISOString(),
+        consentimento_texto: texto.trim(),
+      }).eq("id", ouvinteId);
+      const msg =
+        `${primeiroNome ? primeiroNome + ", v" : "V"}ocê pode me passar sua data de aniversário? Dia, mês e ano.`;
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: "cadastro",
+        contexto: { ...ctx, flags: { ...flags, consentimento: true }, historico: hist },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+
+    // Recusa OU esgotou as 2 reformulacoes: ENCERRA com limpeza real.
+    if (tipo === "recusa" || reformulacoes >= 2) {
+      // ORDEM OBRIGATORIA: limpar ANTES de enviar a despedida (a despedida sobrevive).
+      // 1. anula o nome no cadastro (mantem telefone e ddd, chave de reencontro).
+      await db.from("ouvintes").update({ nome: null }).eq("id", ouvinteId);
+      // 2. apaga as mensagens desta conversa (recebidas e enviadas ate aqui).
+      await db.from("mensagens").delete()
+        .eq("conversa_id", conversaId)
+        .eq("radio_id", radioId);
+      // 3. encerra, esvazia o historico e preserva o rastro do encerramento.
       await db.from("conversas").update({
         status: "encerrada",
         etapa: "encerrado_sem_consentimento",
         encerrada_em: new Date().toISOString(),
-        contexto: { ...ctx, flags: { ...flags, consentimento: false }, historico: hist },
+        contexto: { flags: { ...flags, consentimento: false }, historico: [] },
       }).eq("id", conversaId);
+      // 4. despedida por ultimo: unica mensagem sobrevivente, sem PII.
+      const msg =
+        "Sem problema, respeito totalmente a sua decisão! Apaguei aqui o que você me mandou e guardo só o registro de que você preferiu não seguir com o cadastro. É assim que a gente cumpre a LGPD, a Lei Geral de Proteção de Dados. Se mudar de ideia, é só me chamar por aqui que a gente continua 🙂";
+      await reply(phone, conversaId, radioId, msg);
       return new Response("ok", { status: 200 });
     }
-    // Qualquer confirmacao (ou resposta nao-negativa): segue pro nascimento.
-    const msg =
-      `${primeiroNome ? primeiroNome + ", v" : "V"}ocê pode me passar sua data de aniversário? Dia, mês e ano.`;
+
+    // "outro" com reformulacoes < 2: reformula, sem conceder consentimento.
+    const msg = reformulacoes === 0
+      ? `Só pra confirmar${primeiroNome ? ", " + primeiroNome : ""}: posso guardar seus dados com segurança pra te avisar das promoções? É só me dizer que sim 🙂`
+      : "Me confirma só com um sim: você autoriza a gente a guardar seus dados pro cadastro? Se preferir não, também tudo bem, é só dizer.";
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
-      etapa: "cadastro",
-      contexto: { ...ctx, flags: { ...flags, consentimento: true }, historico: hist },
+      etapa: "aguarda_consentimento",
+      contexto: {
+        ...ctx,
+        flags: { ...flags, consentimento_reformulacoes: reformulacoes + 1 },
+        historico: hist,
+      },
     }).eq("id", conversaId);
     await reply(phone, conversaId, radioId, msg);
     return new Response("ok", { status: 200 });
