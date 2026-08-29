@@ -578,6 +578,94 @@ Regras:
   }
 }
 
+// v82: classifica um PEDIDO do ouvinte (feito na abertura ou depois do cadastro
+// completo). Retorna tipo + conteudo (o que ele pede) + destinatario (nome de quem
+// recebe o abraco/beijo/alo, quando houver). Timeout curto; null => o chamador decide
+// o fallback (tratar como "outro" ou reperguntar).
+async function classificarPedido(
+  texto: string,
+): Promise<{ tipo: string; conteudo: string | null; destinatario: string | null } | null> {
+  if (!ANTHROPIC_API_KEY) return null;
+  const prompt = `
+Você classifica um PEDIDO que uma pessoa mandou no WhatsApp de uma rádio. Ela pode estar pedindo uma música, querendo participar de uma promoção, um prêmio, ou mandando um recado (abraço, beijo, alô) para alguém, pedir uma camiseta, ou algo diferente.
+
+Mensagem da pessoa: """${texto}"""
+
+Classifique em UMA categoria de "tipo":
+- "musica": pede uma música ou cita um cantor/banda que quer ouvir.
+- "promocao": quer participar de uma promoção, sorteio ou concurso.
+- "premio": pergunta sobre prêmio, quer saber se ganhou, quer resgatar um prêmio.
+- "abraco": manda um abraço para alguém.
+- "beijo": manda um beijo para alguém.
+- "alo": manda um alô, um oi, um salve, uma saudação para alguém.
+- "camiseta": pede uma camiseta, brinde ou produto da rádio.
+- "outro": qualquer outro pedido que não se encaixe acima.
+
+Regras:
+- "conteudo": um resumo curto do que a pessoa pediu, com as palavras dela (ex.: para música, a música/artista; para outro, o pedido). Se não der pra resumir, deixe null.
+- "destinatario": SÓ para abraco/beijo/alo, o NOME da pessoa que vai receber (ex.: "para a minha mãe" -> "minha mãe"; "manda um alô pro João" -> "João"). Nos demais tipos, deixe null.
+- Não invente. Se não tiver certeza do tipo, use "outro".
+`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2500);
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 120,
+        temperature: 0,
+        tools: [{
+          name: "classificar_pedido",
+          description: "Devolve o tipo do pedido do ouvinte, o conteudo e o destinatario.",
+          input_schema: {
+            type: "object",
+            properties: {
+              tipo: {
+                type: "string",
+                enum: ["musica", "promocao", "premio", "abraco", "beijo", "alo", "camiseta", "outro"],
+              },
+              conteudo: { type: ["string", "null"] },
+              destinatario: { type: ["string", "null"] },
+            },
+            required: ["tipo"],
+            additionalProperties: false,
+          },
+        }],
+        tool_choice: { type: "tool", name: "classificar_pedido" },
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      console.error(`classificarPedido falhou: status=${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const bloco = (data?.content ?? []).find(
+      (b: { type?: string }) => b?.type === "tool_use",
+    );
+    const inp = bloco?.input as
+      | { tipo?: string; conteudo?: string | null; destinatario?: string | null }
+      | undefined;
+    const tiposValidos = new Set(["musica", "promocao", "premio", "abraco", "beijo", "alo", "camiseta", "outro"]);
+    if (!inp || !inp.tipo || !tiposValidos.has(inp.tipo)) return null;
+    const conteudo = typeof inp.conteudo === "string" && inp.conteudo.trim() ? inp.conteudo.trim() : null;
+    const destinatario = typeof inp.destinatario === "string" && inp.destinatario.trim() ? inp.destinatario.trim() : null;
+    return { tipo: inp.tipo, conteudo, destinatario };
+  } catch (e) {
+    console.error(`classificarPedido excecao (timeout/erro): ${e}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Fallback DETERMINISTICO: faixa de CEP -> zona (capital), pela regiao postal
 // (2 primeiros digitos). So entra quando a IA nao responde, pra nunca deixar
 // tudo em "Outras" por queda da IA. Nao substitui a IA (a regiao postal erra em
@@ -763,7 +851,7 @@ function pareceCep(texto: string): boolean {
 async function gravarMusica(
   radioId: string,
   ouvinteId: string,
-  sentimento: "ama" | "rejeita",
+  sentimento: "ama" | "rejeita" | "sem_preferencia",
   artista: string | null,
   titulo: string | null,
   textoOriginal: string,
@@ -1171,6 +1259,7 @@ const INSTAGRAM_URL = "https://www.instagram.com/estudiowa_?igsh=NjljZDdlMmc3d2V
 // Campos cujo texto de pergunta segue o roteiro VERBATIM (sem parafrase da IA).
 const FALA_FIXA_CAMPOS = new Set([
   "data_nascimento",
+  "numero",
   "pedido_musica",
   "estilo_musical",
   "radio_troca",
@@ -1381,6 +1470,9 @@ function camposFaltantes(
   if (!o.data_nascimento && flags.data_pulada !== true) faltam.push("data_nascimento");
   if (!o.cidade) faltam.push("cidade");
   if (capital && !o.bairro) faltam.push("bairro");
+  // numero da casa: perguntado logo apos bairro/CEP, para TODAS as cidades. Entra na
+  // regua de cadastro completo (ver ouvinte_completo no SQL e ouvinteCompleto no serverData).
+  if (!o.numero && flags.numero_pulado !== true) faltam.push("numero");
   if (flags.musica_pedida !== true) faltam.push("pedido_musica");
   if (!o.estilo_musical && flags.pulou_estilo !== true) faltam.push("estilo_musical");
   if (flags.radio_troca_pedida !== true) faltam.push("radio_troca");
@@ -1411,11 +1503,27 @@ function proximaPerguntaFaltante(
   if (!o.data_nascimento) return { campo: "data_nascimento", texto: `${o.nome ? (o.nome as string).split(/\s+/)[0] + ", v" : "V"}ocê pode me passar sua data de aniversário? Dia, mês e ano.` };
   if (!o.cidade) return { campo: "cidade", texto: "Em qual cidade você mora?" };
   if (capital && !o.bairro) return { campo: "bairro", texto: "E em qual bairro?" };
+  if (!o.numero && flags.numero_pulado !== true) return { campo: "numero", texto: "E qual o número da sua casa? Pode ser só o número, sem complemento." };
   if (flags.musica_pedida !== true) return { campo: "pedido_musica", texto: "Que legal! Seu cadastro já está certinho! Você quer aproveitar e pedir uma música?" };
   if (!o.estilo_musical) return { campo: "estilo_musical", texto: "Aliás, qual estilo musical que você mais gosta?" };
   if (flags.radio_troca_pedida !== true) return { campo: "radio_troca", texto: "Além da Rádio Liverpool, qual outra rádio você gosta de ouvir?" };
   if (!o.programa_locutor) return { campo: "programa_locutor", texto: "O que você mais gosta aqui da Rádio Liverpool?" };
   return { campo: "concluido", texto: `Prontinho, é isso! Muito obrigada por participar. Continue ligado na ${RADIO_LABEL}!` };
+}
+
+// RÉGUA DE CADASTRO COMPLETO (v82). Espelha public.ouvinte_completo no SQL
+// (migration 20260804000005_painel_cadastro_completo.sql) e ouvinteCompleto em
+// lib/serverData.ts. Se mudar aqui, mude nos DOIS outros lugares.
+// completo = nome + data_nascimento + cidade + numero + consentimento_em, MAIS bairro
+// e zona quando a cidade for Sao Paulo capital (fora da capital nao coletamos bairro).
+// Nenhum pedido e atendido sem cadastro completo (regra central da v82).
+function cadastroEstaCompleto(o: Record<string, unknown>): boolean {
+  const base = !!o.nome && !!o.data_nascimento && !!o.cidade && !!o.numero &&
+    !!o.consentimento_em;
+  if (!base) return false;
+  const capital = normalizarSemAcento((o.cidade as string) ?? "") === "sao paulo";
+  if (capital) return !!o.bairro && !!o.zona;
+  return true;
 }
 
 function pushHist(
@@ -1546,6 +1654,8 @@ function intencaoProximoCampo(campo: string): string {
       return "pergunte em qual cidade ele mora";
     case "bairro":
       return "pergunte em qual bairro ele mora";
+    case "numero":
+      return "pergunte qual o número da casa dele, só o número, sem complemento";
     case "pedido_musica":
       return "pergunte se ele quer pedir uma música";
     case "estilo_musical":
@@ -1822,6 +1932,142 @@ Deno.serve(async (req: Request) => {
     await reply(phone, conversaId, radioId, msg);
   }
 
+  // ===== v82: PEDIDOS (musica, promocao, premio, abraco, beijo, alo, camiseta, outro) =====
+  // Envia uma mensagem de confirmacao e, na sequencia, a proxima pergunta do roteiro
+  // (ou a despedida, se o roteiro acabou). Espelha o comportamento de avancarCadastro,
+  // mas com um prefixo (a confirmacao do pedido) na frente.
+  async function seguirComMensagem(
+    prefixo: string,
+    ouvAtual: Record<string, unknown>,
+    flags2: Record<string, unknown>,
+  ) {
+    const prox = proximaPerguntaFaltante(ouvAtual, flags2);
+    const concluido = prox.campo === "concluido";
+    let msg = concluido
+      ? `${prefixo} Continue ligado na ${RADIO_LABEL}!`
+      : `${prefixo} ${prox.texto}`;
+    if (concluido && flags2.concluido !== true) {
+      flags2.concluido = true;
+      msg = `${msg} Segue a gente no Instagram: ${INSTAGRAM_URL}`;
+      await db.from("ouvintes").update({
+        participacoes: (ouvinte.participacoes ?? 0) + 1,
+      }).eq("id", ouvinteId);
+    }
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: concluido ? "concluido" : "cadastro",
+      contexto: { flags: flags2, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+  }
+
+  // Serve um pedido de MUSICA: com conteudo, busca a versao oficial e grava (via
+  // gravarVotosESeguir, que ja marca musica_pedida=true -> NAO pergunta musica de novo).
+  // Sem conteudo, pergunta qual musica (a pipeline normal de musica cuida da resposta).
+  async function servirPedidoMusica(
+    conteudo: string | null,
+    flagsBase: Record<string, unknown>,
+  ) {
+    if (!conteudo) {
+      const msg = "Boa! Qual música você quer ouvir? Pode mandar o nome e quem canta.";
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: "cadastro",
+        contexto: { flags: flagsBase, historico: hist },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return;
+    }
+    const oficial = await resolverMusicaOficial(conteudo, null);
+    if (oficial) {
+      await gravarVotosESeguir(oficial.titulo, oficial.artista ?? null, flagsBase, { titulo: conteudo, artista: null });
+    } else {
+      await reperguntarMusica(flagsBase);
+    }
+  }
+
+  function fraseConfirmacaoPedido(tipo: string, destinatario: string | null): string {
+    const alvo = destinatario ? ` para ${destinatario}` : "";
+    switch (tipo) {
+      case "abraco":
+        return `Pode deixar! Anotei seu abraço${alvo} aqui na ${RADIO_LABEL} 🙂`;
+      case "beijo":
+        return `Anotado! Seu beijo${alvo} já está com a gente aqui na ${RADIO_LABEL} 🙂`;
+      case "alo":
+        return `Show! Anotei seu alô${alvo} pra mandar aqui na ${RADIO_LABEL} 🙂`;
+      case "camiseta":
+        return "Anotei seu pedido de camiseta! Nossa equipe vê isso certinho pra você.";
+      case "premio":
+        return "Anotei aqui! Nossa equipe vê certinho o seu prêmio pra você.";
+      default:
+        return "Anotei seu pedido! Nossa equipe vê isso pra você 🙂";
+    }
+  }
+
+  // Dispatcher de pedido (assume cadastro completo). Musica -> pipeline de musica;
+  // promocao -> promocao_participacoes; demais tipos -> tabela pedidos + confirmacao.
+  async function servirPedido(
+    p: { tipo: string; conteudo: string | null; destinatario: string | null },
+    ouvAtual: Record<string, unknown>,
+    flagsBase: Record<string, unknown>,
+  ) {
+    if (p.tipo === "musica") {
+      await servirPedidoMusica(p.conteudo, { ...flagsBase });
+      return;
+    }
+    if (p.tipo === "promocao") {
+      const nome = (p.conteudo ?? "").replace(/^#/, "").trim() || "promoção";
+      const { error } = await db.from("promocao_participacoes").insert({
+        radio_id: radioId,
+        ouvinte_id: ouvinteId,
+        promocao_nome: nome,
+      });
+      if (error) {
+        console.error(`promocao_participacoes insert falhou: ${error.code} ${error.message}`);
+      }
+      await seguirComMensagem(`Anotei sua participação na promoção ${nome}! Boa sorte 🙂`, ouvAtual, { ...flagsBase });
+      return;
+    }
+    // abraco/beijo/alo/camiseta/premio/outro: grava na tabela pedidos (RLS ligado; o bot
+    // grava com service role). O insert do supabase-js nao lanca; em erro so logamos.
+    const { error } = await db.from("pedidos").insert({
+      radio_id: radioId,
+      ouvinte_id: ouvinteId,
+      conversa_id: conversaId,
+      tipo: p.tipo,
+      conteudo: p.conteudo,
+      destinatario: p.destinatario,
+    });
+    if (error) {
+      console.error(`pedidos insert falhou: ${error.code} ${error.message}`);
+    }
+    await seguirComMensagem(fraseConfirmacaoPedido(p.tipo, p.destinatario), ouvAtual, { ...flagsBase });
+  }
+
+  // Retomada apos o cadastro ficar completo: se o pedido parado ja tem conteudo suficiente,
+  // serve direto; senao, reabre o pedido e pede o detalhe (fluxo aguardando_pedido).
+  async function retomarPedido(
+    ouvAtual: Record<string, unknown>,
+    flagsBase: Record<string, unknown>,
+    pend: { tipo: string; conteudo: string | null; destinatario: string | null },
+  ) {
+    const temConteudoServivel =
+      pend.tipo === "promocao" || pend.tipo === "premio" ||
+      (pend.tipo === "musica" && !!pend.conteudo) ||
+      (["abraco", "beijo", "alo", "camiseta", "outro"].includes(pend.tipo) && !!pend.conteudo);
+    if (temConteudoServivel) {
+      await servirPedido(pend, ouvAtual, flagsBase);
+      return;
+    }
+    const msg = "Agora sim! E o seu pedido, me conta direitinho o que você queria?";
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "cadastro",
+      contexto: { flags: { ...flagsBase, aguardando_pedido: true }, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+  }
+
   // Trata a correcao do ouvinte quando a musica anotada estava errada.
   // Apaga o registro anterior, refaz a busca com a info corrigida e confirma o novo.
   async function handleCorrecaoMusica(ultima: Record<string, unknown>) {
@@ -1968,6 +2214,17 @@ Deno.serve(async (req: Request) => {
       await db.from("ouvintes").update(updObj).eq("id", ouvinteId);
     }
     const ouv2 = { ...ouvinte, ...updObj };
+    // v82: se o cadastro ACABOU de ficar completo neste turno e havia um pedido parado
+    // (pedido_pendente, guardado nas flags), retoma o pedido em vez de seguir o roteiro.
+    const pend = flags2.pedido_pendente as
+      | { tipo: string; conteudo: string | null; destinatario: string | null }
+      | undefined;
+    if (pend && !cadastroEstaCompleto(ouvinte) && cadastroEstaCompleto(ouv2)) {
+      const f2 = { ...flags2 };
+      delete f2.pedido_pendente;
+      await retomarPedido(ouv2, f2, pend);
+      return;
+    }
     // Primeiro nome ATUALIZADO (o nome pode ter acabado de ser gravado neste turno).
     const pn = ((ouv2.nome as string) ?? "").trim().split(/\s+/)[0] || primeiroNome;
     const prox = proximaPerguntaFaltante(ouv2, flags2);
@@ -2063,14 +2320,19 @@ Deno.serve(async (req: Request) => {
           return;
         }
         const proxTent = tentativas + 1;
-        // CORRECAO 1: pedido (musica/promocao/premio) em vez do nome -> reconhece o
-        // pedido, promete atender e pede o nome. NAO diz que ja anotou (nao guardamos
-        // o pedido na v81; o passo 6 pergunta sobre musica de qualquer forma).
+        // CORRECAO 1 (v81) + PEDIDO PENDENTE (v82): pedido no lugar do nome -> reconhece,
+        // promete atender e pede o nome. Agora tambem GUARDA o pedido (pedido_pendente nas
+        // flags) para retomar quando o cadastro ficar completo. Ainda NAO diz que ja anotou
+        // (o pedido so e efetivado apos o cadastro completo).
         if (pareceIntencao(texto)) {
           await reperguntar(
             "o ouvinte respondeu com um PEDIDO (uma musica, uma promocao ou um premio) em vez de dizer o nome. Reconheca o pedido com simpatia e prometa que vai atender ja ja. Explique que antes so precisa completar o cadastro rapidinho. Termine perguntando o primeiro nome dele. IMPORTANTE: NAO diga que ja anotou, ja registrou nem ja pegou o pedido, porque isso ainda NAO aconteceu; prometa apenas que vai chegar la, nunca que ja foi feito.",
             "Pode deixar que a gente vê isso pra você já já! Antes só preciso completar seu cadastro rapidinho. Qual é o seu nome?",
-            { nome_tentativas: proxTent },
+            {
+              nome_tentativas: proxTent,
+              pedido_pendente: flags.pedido_pendente ??
+                { tipo: "desconhecido", conteudo: null, destinatario: null },
+            },
           );
           return;
         }
@@ -2282,6 +2544,27 @@ Deno.serve(async (req: Request) => {
       return;
     }
 
+    if (campo === "numero") {
+      // numero da casa em TEXT (aceita "123A", "s/n", "45 fundos"). Sem complemento
+      // (apartamento/bloco): decisao de produto. Se vier vazio, repergunta uma vez e
+      // depois segue sem numero (nao trava o cadastro).
+      const bruto = texto.trim().slice(0, 40);
+      if (!bruto) {
+        if (flags.numero_tentativa === true) {
+          await avancarCadastro({}, { ...flags2, numero_pulado: true });
+        } else {
+          await reperguntar(
+            "voce so precisa do numero da casa do ouvinte; peca so o numero, sem complemento, de forma natural",
+            "Me manda só o número da sua casa, sem complemento 🙂",
+            { numero_tentativa: true },
+          );
+        }
+        return;
+      }
+      await avancarCadastro({ numero: bruto }, flags2);
+      return;
+    }
+
     if (campo === "estilo_musical") {
       if (NEGATIVAS.has(normalizarSemAcento(texto))) {
         await avancarCadastro({}, { ...flags2, pulou_estilo: true });
@@ -2318,31 +2601,69 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // ===== v82: aguardando o detalhe de um pedido (apos "me conta o que voce queria?") =====
+  // So chega aqui com cadastro completo (a flag so e setada apos completar). Classifica
+  // o pedido e serve. Se o ouvinte desistir, segue sem pedido.
+  if (isTexto && flags.aguardando_pedido === true) {
+    const f2 = { ...flags };
+    delete f2.aguardando_pedido;
+    const chaveDes = normalizarSemAcento(texto);
+    const DESISTE = new Set([
+      "nada", "nao", "so isso", "era so isso", "nada nao", "por enquanto nada",
+      "nenhum", "nenhuma", "nada mais", "so queria falar",
+    ]);
+    if (DESISTE.has(chaveDes)) {
+      await seguirComMensagem("Tranquilo! Qualquer coisa é só me chamar 🙂", { ...ouvinte }, f2);
+      return new Response("ok", { status: 200 });
+    }
+    const pc = await classificarPedido(texto);
+    const pedido = pc ?? { tipo: "outro", conteudo: texto.trim().slice(0, 200), destinatario: null };
+    await servirPedido(pedido, { ...ouvinte }, f2);
+    return new Response("ok", { status: 200 });
+  }
+
   // ===== PROMOCAO por hashtag: detecta "#nomedapromocao" em QUALQUER posicao =====
   // Ex.: "Quero participar da promocao #volvo" -> registra "volvo". O nome vai do
   // # ate o proximo espaco (ou o fim / outra #).
+  // v82: promocao so vale com cadastro completo. Completo -> registra na hora.
+  // Incompleto -> guarda como pedido_pendente (nas flags) e segue o cadastro; ao
+  // completar, a promocao e registrada automaticamente na retomada.
   const mHash = isTexto ? texto.match(/#([^\s#]+)/) : null;
   if (mHash) {
     const nomePromo = mHash[1].trim();
     if (nomePromo) {
-      // Grava a participacao na tabela promocao_participacoes (RLS ligado; o service role do bot
-      // grava normalmente). O insert do supabase-js nao lanca excecao: em erro so retorna { error },
-      // que apenas logamos, entao o fluxo do atendimento nunca quebra.
-      const { error: promoErr } = await db.from("promocao_participacoes").insert({
-        radio_id: radioId,
-        ouvinte_id: ouvinteId,
-        promocao_nome: nomePromo,
-      });
-      if (promoErr) {
-        console.error(`promocao_participacoes insert falhou: ${promoErr.code} ${promoErr.message}`);
+      if (cadastroEstaCompleto(ouvinte)) {
+        // Grava a participacao na promocao_participacoes (RLS ligado; o service role do bot
+        // grava normalmente). O insert do supabase-js nao lanca: em erro so logamos.
+        const { error: promoErr } = await db.from("promocao_participacoes").insert({
+          radio_id: radioId,
+          ouvinte_id: ouvinteId,
+          promocao_nome: nomePromo,
+        });
+        if (promoErr) {
+          console.error(`promocao_participacoes insert falhou: ${promoErr.code} ${promoErr.message}`);
+        }
+        const msg = `Anotei sua participação na promoção ${nomePromo}! Boa sorte 🙂`;
+        const hist = pushHist(ctx.historico, texto, msg);
+        await db.from("conversas").update({
+          contexto: { ...ctx, flags, historico: hist },
+        }).eq("id", conversaId);
+        await reply(phone, conversaId, radioId, msg);
+        return new Response("ok", { status: 200 });
       }
-      const msg = `Anotei sua participação na promoção ${nomePromo}! Boa sorte 🙂`;
-      const hist = pushHist(ctx.historico, texto, msg);
-      await db.from("conversas").update({
-        contexto: { ...ctx, flags, historico: hist },
-      }).eq("id", conversaId);
-      await reply(phone, conversaId, radioId, msg);
-      return new Response("ok", { status: 200 });
+      // Incompleto: guarda o pedido nas flags e NAO retorna (segue o fluxo de cadastro).
+      // A mutacao em flags se propaga porque todos os writes seguintes espalham flags.
+      flags.pedido_pendente = { tipo: "promocao", conteudo: nomePromo, destinatario: null };
+      // Feature 6: deixa CLARO que a participacao AINDA NAO valeu (antes caia no cadastro
+      // em silencio e a pessoa achava que ja tinha participado). Manda a mensagem de gate e
+      // segue pedindo o proximo campo. Ao concluir, a retomada grava a participacao e envia
+      // o "Anotei sua participacao na promocao ...".
+      await reply(
+        phone,
+        conversaId,
+        radioId,
+        `Recebi aqui o seu #${nomePromo}! Ele ainda não vale como participação, viu? Assim que a gente terminar seu cadastro eu registro na hora e você entra no sorteio 🙂`,
+      );
     }
   }
 
@@ -2658,7 +2979,8 @@ Deno.serve(async (req: Request) => {
   }
 
   // ===== Premio: fast-path deterministico =====
-  const cadastroCompleto = !!(ouvinte.nome && ouvinte.data_nascimento && ouvinte.cidade);
+  // v82: regua unica (nome+data+cidade+numero+consentimento, +bairro/zona na capital).
+  const cadastroCompleto = cadastroEstaCompleto(ouvinte);
   if (isTexto && ehPremio(texto)) {
     if (!ouvinte.nome) {
       await reply(phone, conversaId, radioId, PREMIO_NOVO);
@@ -2669,6 +2991,39 @@ Deno.serve(async (req: Request) => {
       await reply(phone, conversaId, radioId, escolher(PREMIO_CADASTRADO));
       return new Response("ok", { status: 200 });
     }
+    // v82: tem nome mas cadastro incompleto -> guarda o premio como pedido pendente e
+    // segue o cadastro; ao completar, o premio e retomado.
+    flags.pedido_pendente = flags.pedido_pendente ??
+      { tipo: "premio", conteudo: texto.trim().slice(0, 200), destinatario: null };
+  }
+
+  // ===== v82: OUVINTE QUE VOLTA - cadastro ja completo, atende o pedido direto =====
+  // Pula o cadastro e trata a mensagem como um pedido, cumprimentando pelo nome. Nao entra
+  // aqui quem esta numa janela de correcao de musica (essa janela trata a mensagem). Usa
+  // flags "de atendido" (roteiro ja cumprido) pra nao reabrir a coleta de estilo/radio/etc.
+  if (
+    isTexto && cadastroCompleto &&
+    flags.aguardando_correcao_musica !== true
+  ) {
+    const FLAGS_ATENDIDO: Record<string, unknown> = {
+      musica_pedida: true, pulou_estilo: true,
+      radio_troca_pedida: true, pulou_programa: true, concluido: true,
+    };
+    const pc = await classificarPedido(texto);
+    // Da pra servir direto? (tem conteudo, ou e promocao/premio). Serve cumprimentando.
+    if (pc && (pc.conteudo || pc.tipo === "promocao" || pc.tipo === "premio")) {
+      await servirPedido(pc, { ...ouvinte }, { ...FLAGS_ATENDIDO });
+      return new Response("ok", { status: 200 });
+    }
+    // Senao (so um "oi" ou pedido vago): cumprimenta pelo nome e pergunta o que ele quer.
+    const msg = `Opa${primeiroNome ? ", " + primeiroNome : ""}! Que bom te ver por aqui de novo 🙂 O que você queria pedir hoje?`;
+    const hist = pushHist(ctx.historico, texto, msg);
+    await db.from("conversas").update({
+      etapa: "cadastro",
+      contexto: { flags: { ...FLAGS_ATENDIDO, aguardando_pedido: true }, historico: hist },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msg);
+    return new Response("ok", { status: 200 });
   }
 
   // ===== Abertura: no primeiro contato, se apresenta e pede o nome (texto fixo do roteiro) =====
@@ -2697,7 +3052,7 @@ Deno.serve(async (req: Request) => {
   // ===== Cadastro deterministico: trata o campo ATUAL antes do cerebro (imune a 503/429, sem loop) =====
   const campoAtual = camposFaltantes(ouvinte, flags)[0];
   const CAMPOS_CADASTRO = new Set([
-    "nome", "data_nascimento", "cidade", "bairro",
+    "nome", "data_nascimento", "cidade", "bairro", "numero",
     "estilo_musical", "programa_locutor",
   ]);
   if (isTexto && CAMPOS_CADASTRO.has(campoAtual)) {
@@ -2868,14 +3223,24 @@ Deno.serve(async (req: Request) => {
   // ===== Resposta normal da Adriana =====
   // Se estava perguntando a musica e o ouvinte declinou, marca como pedido feito (nao repergunta).
   const chaveMsg = normalizarSemAcento(texto);
+  // v82: no passo "quer pedir uma musica?", se o ouvinte declina OU diz "qualquer uma/
+  // tanto faz/nao quero pedir", registramos a preferencia como "Sem preferencia" (com
+  // sentimento proprio, que NAO conta como musica amada no painel) e seguimos sem insistir.
+  const SEM_PREFERENCIA_MUSICA = new Set([
+    "qualquer uma", "qualquer", "qualquer musica", "tanto faz", "nao quero pedir",
+    "pode ser qualquer", "qualquer coisa", "o que tiver", "o que voce quiser",
+    "nao tenho preferencia", "sem preferencia", "indiferente",
+  ]);
   let declinouMusica = false;
   if (
     !dec.e_pedido_musica && !dec.qualquer_do_artista &&
-    flagsNovas.musica_pedida !== true && NEGATIVAS.has(chaveMsg) &&
+    flagsNovas.musica_pedida !== true &&
+    (NEGATIVAS.has(chaveMsg) || SEM_PREFERENCIA_MUSICA.has(chaveMsg)) &&
     camposFaltantes(ouvinteAtual, flagsNovas)[0] === "pedido_musica"
   ) {
     flagsNovas.musica_pedida = true;
     declinouMusica = true;
+    await gravarMusica(radioId, ouvinteId, "sem_preferencia", null, null, "Sem preferência");
   }
   const proxAtual = proximaPerguntaFaltante(ouvinteAtual, flagsNovas);
   // Se a fala do cerebro veio contaminada com o JSON de decisao, descarta e usa a pergunta deterministica.
