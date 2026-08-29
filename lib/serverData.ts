@@ -76,6 +76,8 @@ export interface PainelExtra {
   bairrosGeral: SerieItem[];
   radios: SerieItem[];
   promocoes: PromocaoRow[];
+  pedidosDiversos: SerieItem[];
+  funilAbandono: SerieItem[];
   kpis: KpisExtra;
   hotlink: HotlinkExtra;
   ouvintes: OuvinteRow[];
@@ -94,6 +96,8 @@ const vazio: PainelExtra = {
   bairrosGeral: [],
   radios: [],
   promocoes: [],
+  pedidosDiversos: [],
+  funilAbandono: [],
   kpis: { cadastrados: 0, novos: 0, total: 0 },
   hotlink: { acessos: 0, conversoes: 0, taxa: 0 },
   ouvintes: [],
@@ -158,6 +162,8 @@ interface OuvinteEmbed {
   estado: string | null;
   idade: number | null;
   data_nascimento: string | null;
+  numero: string | null;
+  consentimento_em: string | null;
   estilo_musical: string | null;
   faixa_etaria: number | null;
   primeiro_contato_em: string | null;
@@ -165,6 +171,64 @@ interface OuvinteEmbed {
   musicas: MusicaEmbed[] | null;
   radios_concorrentes: RadioEmbed[] | null;
 }
+
+// RÉGUA DE CADASTRO COMPLETO (v82). Espelha public.ouvinte_completo no SQL
+// (migration 20260804000005_painel_cadastro_completo.sql) e cadastroEstaCompleto no
+// bot (supabase/functions/whatsapp-webhook/index.ts). Se mudar aqui, mude nos DOIS
+// outros lugares. completo = nome + data_nascimento + cidade + numero + consentimento,
+// MAIS bairro e zona quando a cidade for Sao Paulo capital.
+function ouvinteCompleto(o: {
+  nome: string | null;
+  data_nascimento: string | null;
+  cidade: string | null;
+  numero: string | null;
+  consentimento_em: string | null;
+  bairro: string | null;
+  zona: string | null;
+}): boolean {
+  const base = !!o.nome && !!o.data_nascimento && !!o.cidade && !!o.numero &&
+    !!o.consentimento_em;
+  if (!base) return false;
+  const cidade = (o.cidade ?? "").trim().toLowerCase().normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  const capital = cidade === "sao paulo";
+  if (capital) return !!o.bairro && !!o.zona;
+  return true;
+}
+
+// Rotulo da etapa em que um cadastro INCOMPLETO parou (primeiro campo faltante),
+// para o card de funil de abandono. Mesma ordem do fluxo do bot.
+function etapaAbandono(o: {
+  nome: string | null;
+  consentimento_em: string | null;
+  data_nascimento: string | null;
+  cidade: string | null;
+  numero: string | null;
+  bairro: string | null;
+  zona: string | null;
+}): string {
+  if (!o.nome) return "Sem nome";
+  if (!o.consentimento_em) return "Sem consentimento";
+  if (!o.data_nascimento) return "Sem data de nascimento";
+  if (!o.cidade) return "Sem cidade";
+  const cidade = (o.cidade ?? "").trim().toLowerCase().normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (cidade === "sao paulo" && (!o.bairro || !o.zona)) return "Sem bairro";
+  if (!o.numero) return "Sem número";
+  return "Completo";
+}
+
+// Rotulos em pt-BR para os tipos de pedido diverso.
+const PEDIDO_TIPO_LABEL: Record<string, string> = {
+  abraco: "Abraço",
+  beijo: "Beijo",
+  alo: "Alô",
+  camiseta: "Camiseta",
+  premio: "Prêmio",
+  musica: "Música",
+  promocao: "Promoção",
+  outro: "Outro",
+};
 
 // Busca os dados expandidos (com nome) aplicando filtros de faixa e zona.
 // Tudo derivado de uma unica leitura de ouvintes + embeds.
@@ -199,7 +263,7 @@ export async function getPainelExtra(
     let q = sb
       .from("ouvintes")
       .select(
-        "id, nome, telefone, bairro, zona, cidade, estado, idade, data_nascimento, estilo_musical, faixa_etaria, primeiro_contato_em, participacoes, musicas(sentimento, artista, titulo, nome), radios_concorrentes(nome_radio, nome_canonico)",
+        "id, nome, telefone, bairro, zona, cidade, estado, idade, data_nascimento, numero, consentimento_em, estilo_musical, faixa_etaria, primeiro_contato_em, participacoes, musicas(sentimento, artista, titulo, nome), radios_concorrentes(nome_radio, nome_canonico)",
       )
       .order("primeiro_contato_em", { ascending: false })
       .limit(2000);
@@ -226,14 +290,15 @@ export async function getPainelExtra(
     if (deUtc) qPromo = qPromo.gte("criado_em", deUtc);
     if (ateUtc) qPromo = qPromo.lt("criado_em", ateUtc);
 
-    // Conversas concluidas (cadastro completo) para o KPI "ja cadastrados".
-    // conversas nao tem coluna de data util pra janela; a restricao de periodo vem
-    // da propria base (idsBase, filtrada por primeiro_contato_em) na interseccao abaixo.
-    const qConv = sb
-      .from("conversas")
-      .select("ouvinte_id")
-      .eq("etapa", "concluido")
-      .limit(20000);
+    // Pedidos diversos (v82): abraco/beijo/alo/camiseta/premio/outro registrados pelo bot
+    // apos cadastro completo. Card por tipo, respeitando radio_id + a mesma janela de periodo.
+    let qPedidos = sb
+      .from("pedidos")
+      .select("tipo")
+      .limit(50000);
+    if (radioId) qPedidos = qPedidos.eq("radio_id", radioId);
+    if (deUtc) qPedidos = qPedidos.gte("criado_em", deUtc);
+    if (ateUtc) qPedidos = qPedidos.lt("criado_em", ateUtc);
 
     // Hotlink: cliques na mesma janela (a view painel_hotlink nao filtra data).
     let qHot = sb
@@ -251,8 +316,8 @@ export async function getPainelExtra(
     let qConvOwner = sb.from("conversas").select("id, ouvinte_id").limit(50000);
     if (radioId) qConvOwner = qConvOwner.eq("radio_id", radioId);
 
-    const [{ data, error }, promoRes, msgRes, convOwnerRes, convRes, hotRes] =
-      await Promise.all([q, qPromo, qMsgConv, qConvOwner, qConv, qHot]);
+    const [{ data, error }, promoRes, msgRes, convOwnerRes, pedidosRes, hotRes] =
+      await Promise.all([q, qPromo, qMsgConv, qConvOwner, qPedidos, qHot]);
     if (error) throw error;
     const rows = (data ?? []) as unknown as OuvinteEmbed[];
 
@@ -306,6 +371,10 @@ export async function getPainelExtra(
     const faixaCount = new Map<number, number>();
 
     const ouvintes: OuvinteRow[] = rows.map((o) => {
+      // v82: metricas/rankings/zonas/faixas contam SO cadastros completos. As listas
+      // ama/rejeita/radios do PROPRIO ouvinte (usadas no ModalOuvinte) seguem sempre;
+      // os acumuladores globais (amaMus, zonasAll, faixaCount, etc.) so recebem se completo.
+      const completo = ouvinteCompleto(o);
       const ama: string[] = [];
       const rejeita: string[] = [];
       for (const m of o.musicas ?? []) {
@@ -316,23 +385,23 @@ export async function getPainelExtra(
         if (m.sentimento === "ama") {
           if (temTitulo) {
             ama.push(chave);
-            amaMus.push(chave);
+            if (completo) amaMus.push(chave);
           }
-          if (m.artista) amaArt.push(m.artista);
+          if (m.artista && completo) amaArt.push(m.artista);
         } else if (m.sentimento === "rejeita") {
           if (temTitulo) {
             rejeita.push(chave);
-            rejMus.push(chave);
+            if (completo) rejMus.push(chave);
           }
-          if (m.artista) rejArt.push(m.artista);
+          if (m.artista && completo) rejArt.push(m.artista);
         }
       }
       const radios = (o.radios_concorrentes ?? []).map(
         (r) => r.nome_canonico ?? r.nome_radio ?? "",
       ).filter(Boolean);
-      radiosAll.push(...radios);
+      if (completo) radiosAll.push(...radios);
 
-      if (o.zona) {
+      if (completo && o.zona) {
         zonasAll.push(o.zona);
         if (o.bairro) {
           const lista = bairrosPorZonaMap.get(o.zona) ?? [];
@@ -340,8 +409,8 @@ export async function getPainelExtra(
           bairrosPorZonaMap.set(o.zona, lista);
         }
       }
-      if (o.bairro) bairrosAll.push(o.bairro);
-      if (o.faixa_etaria != null) {
+      if (completo && o.bairro) bairrosAll.push(o.bairro);
+      if (completo && o.faixa_etaria != null) {
         faixaCount.set(o.faixa_etaria, (faixaCount.get(o.faixa_etaria) ?? 0) + 1);
       }
 
@@ -372,19 +441,46 @@ export async function getPainelExtra(
       bairrosPorZona[z] = ranking(lista);
     });
 
-    // KPIs no periodo: total/novos = ouvintes que entraram no intervalo (mesma base
-    // filtrada por primeiro_contato_em); ja cadastrados = os que concluiram cadastro
-    // dentro do intervalo (conversa etapa=concluido). Restringe aos ouvintes da base.
-    const idsBase = new Set(rows.map((o) => o.id));
-    const concluidos = new Set<string>();
-    for (const c of (convRes.data ?? []) as unknown as { ouvinte_id: string | null }[]) {
-      if (c.ouvinte_id && idsBase.has(c.ouvinte_id)) concluidos.add(c.ouvinte_id);
-    }
+    // KPIs no periodo (v82): total = BRUTO (todos que encostaram no bot na janela);
+    // cadastrados e novos = SO cadastros completos (regua ouvinteCompleto), coerente com
+    // as views painel_* do SQL. Base ja filtrada por primeiro_contato_em.
+    const completosCount = rows.filter((o) => ouvinteCompleto(o)).length;
     const kpis: KpisExtra = {
-      cadastrados: concluidos.size,
-      novos: rows.length,
+      cadastrados: completosCount,
+      novos: completosCount,
       total: rows.length,
     };
+
+    // Pedidos diversos por tipo (rotulo pt-BR). Ranking desc para o card.
+    const pedidoCount = new Map<string, number>();
+    for (const p of (pedidosRes.data ?? []) as { tipo: string | null }[]) {
+      const label = PEDIDO_TIPO_LABEL[(p.tipo ?? "").toLowerCase()] ??
+        PEDIDO_TIPO_LABEL.outro;
+      pedidoCount.set(label, (pedidoCount.get(label) ?? 0) + 1);
+    }
+    const pedidosDiversos: SerieItem[] = Array.from(pedidoCount.entries())
+      .map(([label, valor]) => ({ label, valor }))
+      .sort((a, b) => b.valor - a.valor);
+
+    // Funil de abandono: cadastros INCOMPLETOS agrupados pela etapa em que pararam.
+    const funilCount = new Map<string, number>();
+    for (const o of rows) {
+      if (ouvinteCompleto(o)) continue;
+      const etapa = etapaAbandono(o);
+      funilCount.set(etapa, (funilCount.get(etapa) ?? 0) + 1);
+    }
+    // Ordem fixa das etapas para o funil (do inicio ao fim do fluxo).
+    const ordemFunil = [
+      "Sem nome",
+      "Sem consentimento",
+      "Sem data de nascimento",
+      "Sem cidade",
+      "Sem bairro",
+      "Sem número",
+    ];
+    const funilAbandono: SerieItem[] = ordemFunil
+      .filter((e) => funilCount.has(e))
+      .map((e) => ({ label: e, valor: funilCount.get(e) ?? 0 }));
 
     // Hotlink no periodo: conta cliques e conversoes na janela.
     const cliques = (hotRes.data ?? []) as unknown as { convertido: boolean | null }[];
@@ -411,6 +507,8 @@ export async function getPainelExtra(
       bairrosGeral: ranking(bairrosAll),
       radios: ranking(radiosAll),
       promocoes,
+      pedidosDiversos,
+      funilAbandono,
       kpis,
       hotlink,
       ouvintes,

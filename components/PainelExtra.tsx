@@ -92,6 +92,8 @@ interface Extra {
   bairrosGeral: SerieItem[];
   radios: SerieItem[];
   promocoes: PromocaoRow[];
+  pedidosDiversos: SerieItem[];
+  funilAbandono: SerieItem[];
   kpis: { cadastrados: number; novos: number; total: number };
   hotlink: { acessos: number; conversoes: number; taxa: number };
   ouvintes: OuvinteRow[];
@@ -280,6 +282,16 @@ export default function PainelExtra({
             </Card>
             <Card titulo="Promoções">
               <PromocoesLista promocoes={data.promocoes} onOpen={setPromoAberta} />
+            </Card>
+          </div>
+
+          {/* Pedidos diversos + Funil de abandono (v82) */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Card titulo="Pedidos (abraço, beijo, alô, camiseta...)">
+              <RankingOuVazio serie={data.pedidosDiversos} mode={mode} />
+            </Card>
+            <Card titulo="Funil de abandono (cadastros incompletos)">
+              <RankingOuVazio serie={data.funilAbandono} mode="numero" />
             </Card>
           </div>
 
