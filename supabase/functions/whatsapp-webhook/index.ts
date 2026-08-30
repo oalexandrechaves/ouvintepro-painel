@@ -512,10 +512,12 @@ Classifique a resposta em UMA categoria:
 - "aceite": a pessoa concorda ou autoriza guardar os dados (ex.: "sim", "pode", "claro", "tudo bem", "autorizo", "pode sim", ou um emoji de positivo como 👍 👌 ✅ e equivalentes). Trate esses emojis como aceite, nunca como assunto solto.
 - "recusa": a pessoa não quer ou não autoriza (ex.: "não", "não quero", "agora não", "prefiro não", ou um emoji de negativo como 👎 e equivalentes).
 - "correcao_de_nome": a pessoa NÃO está respondendo ao consentimento; ela está informando ou corrigindo o próprio NOME. Ex.: o nome gravado é "Quero" e a pessoa manda "Wesley"; ou "não é isso, meu nome é Ana". Extraia o nome informado em nome_corrigido.
-- "outro": qualquer coisa que não seja claramente aceite, recusa ou correção de nome (uma dúvida, uma pergunta, um assunto solto).
+- "duvida_dados": a pessoa NÃO está respondendo ao consentimento; ela está perguntando sobre os DADOS dela: por quanto tempo ficam guardados, onde ficam, quem tem acesso, se são repassados ou vendidos para outras empresas, para que serão usados, ou como pedir a exclusão. Ex.: "quanto tempo meus dados ficam guardados com vocês?", "vocês repassam pra alguém?", "pra que vocês querem isso?".
+- "outro": qualquer coisa que não seja claramente aceite, recusa, correção de nome ou dúvida sobre os dados (um assunto solto, uma pergunta sobre outro tema).
 
 Regras:
 - Só use "aceite" quando a concordância for clara. Na dúvida entre "aceite" e "outro", escolha "outro".
+- Use "duvida_dados" só quando a pergunta for sobre os dados da própria pessoa ou sobre privacidade. Pergunta sobre outro assunto é "outro".
 - Use "correcao_de_nome" apenas quando a mensagem for claramente um nome de pessoa, não uma frase de intenção como "quero pedir música". Na dúvida entre "correcao_de_nome" e "outro", escolha "outro".
 - nome_corrigido: preencha SÓ quando tipo for "correcao_de_nome"; nos demais casos, deixe null.
 `;
@@ -542,7 +544,7 @@ Regras:
             properties: {
               tipo: {
                 type: "string",
-                enum: ["aceite", "recusa", "correcao_de_nome", "outro"],
+                enum: ["aceite", "recusa", "correcao_de_nome", "duvida_dados", "outro"],
               },
               nome_corrigido: {
                 type: ["string", "null"],
@@ -1301,6 +1303,28 @@ function consentimentoRecusa(texto: string): boolean {
   return /\bnao\b/.test(chave) &&
     /\bnao quero\b|\bnao aceito\b|\bnao autorizo\b|\bnao concordo\b|\bnao pode\b|\bnao obrigad/.test(chave) ||
     /^nao$|^nao,?\s*(obrigad|quero|aceito|pode|autorizo|concordo)/.test(chave);
+}
+
+// Duvida do ouvinte sobre os PROPRIOS DADOS na etapa de consentimento (prazo de guarda,
+// destino, uso, compartilhamento). Fallback deterministico de quando o classificador de IA
+// esta fora do ar. NUNCA concede consentimento: so muda a resposta antes de repetir a pergunta.
+function perguntaSobreDados(texto: string): boolean {
+  const n = normalizarSemAcento(texto);
+  // "quanto tempo" sozinho nao basta: "quanto tempo demora pra tocar minha musica" nao e
+  // duvida sobre dados. Exige um termo de cadastro/guarda na mesma mensagem.
+  if (
+    /\b(quanto|quantos|quantas)\b.*\b(tempo|dias|meses|anos|semanas)\b/.test(n) &&
+    /\b(dados|cadastro|informac\w*|guard\w*|armazen\w*|salvo\w*|fica\w*)\b/.test(n)
+  ) return true;
+  if (/\bprazo\b/.test(n)) return true;
+  if (/\b(guardad\w*|armazenad\w*|salvos|ficam|fica)\b.*\bdados\b/.test(n)) return true;
+  if (/\bdados\b.*\b(guardad\w*|armazenad\w*|salvos|ficam|fica|seguros|sigilo|privacidade)\b/.test(n)) return true;
+  if (/\b(repassa|repassam|vende|vendem|compartilha|compartilham)\b/.test(n)) return true;
+  if (/\bterceiros\b|\boutras empresas\b|\bquem tem acesso\b/.test(n)) return true;
+  if (/\b(pra que|para que|por que|pq)\b.*\b(dados|cadastro|informac\w*)\b/.test(n)) return true;
+  if (/\bo que voces? (fazem|faz|vao fazer)\b/.test(n)) return true;
+  if (/\blgpd\b|\bprivacidade\b/.test(n)) return true;
+  return false;
 }
 
 // CORRECAO 1: frases de INTENCAO (pedido de musica etc.) NAO sao nome. Evita capturar
@@ -2679,6 +2703,10 @@ Deno.serve(async (req: Request) => {
     const correcoesNome = typeof flags.correcao_nome_reformulacoes === "number"
       ? flags.correcao_nome_reformulacoes as number
       : 0;
+    // Duvida sobre os dados tem teto PROPRIO e nao consome as reformulacoes.
+    const duvidasDados = typeof flags.duvida_dados_respostas === "number"
+      ? flags.duvida_dados_respostas as number
+      : 0;
 
     // nome_suspeito: calculado UMA vez e reaproveitado no contexto do classificador.
     const nomeGravado = ((ouvinte.nome as string) ?? "").trim();
@@ -2703,8 +2731,12 @@ Deno.serve(async (req: Request) => {
         ? "aceite"
         : consentimentoRecusa(texto)
         ? "recusa"
+        : perguntaSobreDados(texto)
+        ? "duvida_dados"
         : "outro";
     }
+    // Teto proprio da duvida sobre dados: estourou, volta a ser ambiguidade comum.
+    if (tipo === "duvida_dados" && duvidasDados >= 2) tipo = "outro";
     // Teto de correcoes de nome + MESMO filtro da C1 no nome_corrigido: a IA nao
     // pode gravar lixo por esse caminho. Sem nome, teto estourado, ou nome que
     // reprova no filtro (< 2 letras, saudacao, ou frase de intencao) -> vira "outro".
@@ -2749,6 +2781,25 @@ Deno.serve(async (req: Request) => {
       await db.from("conversas").update({
         etapa: "cadastro",
         contexto: { ...ctx, flags: { ...flags, consentimento: true }, historico: hist },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+
+    // Duvida sobre os dados (prazo, destino, uso): responde ANTES de voltar ao
+    // consentimento. NAO conta como reformulacao e NAO concede consentimento.
+    if (tipo === "duvida_dados") {
+      const msg = duvidasDados === 0
+        ? "Ótima pergunta! Seus dados ficam guardados enquanto você estiver cadastrado com a gente, e você pode pedir pra eu apagar tudo quando quiser, é só me avisar por aqui. A gente não repassa nada pra terceiros, tudo conforme a LGPD, a Lei Geral de Proteção de Dados 🙂 Posso seguir com o seu cadastro?"
+        : "Um prazo exato em dias eu não tenho aqui comigo, mas vou passar a sua sugestão pro responsável pela rádio, combinado? O que eu garanto é que seus dados ficam em sigilo, não são repassados pra ninguém de fora, e você pode pedir a exclusão a qualquer momento, é só me falar. Posso seguir com o seu cadastro?";
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: "aguarda_consentimento",
+        contexto: {
+          ...ctx,
+          flags: { ...flags, duvida_dados_respostas: duvidasDados + 1 },
+          historico: hist,
+        },
       }).eq("id", conversaId);
       await reply(phone, conversaId, radioId, msg);
       return new Response("ok", { status: 200 });
