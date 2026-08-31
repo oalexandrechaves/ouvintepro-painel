@@ -530,7 +530,8 @@ Classifique a resposta em UMA categoria:
 - "recusa": a pessoa não quer ou não autoriza (ex.: "não", "não quero", "agora não", "prefiro não", ou um emoji de negativo como 👎 e equivalentes).
 - "correcao_de_nome": a pessoa NÃO está respondendo ao consentimento; ela está informando ou corrigindo o próprio NOME. Ex.: o nome gravado é "Quero" e a pessoa manda "Wesley"; ou "não é isso, meu nome é Ana". Extraia o nome informado em nome_corrigido.
 - "duvida_dados": a pessoa NÃO está respondendo ao consentimento; ela está perguntando sobre os DADOS dela: por quanto tempo ficam guardados, onde ficam, quem tem acesso, se são repassados ou vendidos para outras empresas, para que serão usados, ou como pedir a exclusão. Ex.: "quanto tempo meus dados ficam guardados com vocês?", "vocês repassam pra alguém?", "pra que vocês querem isso?".
-- "outro": qualquer coisa que não seja claramente aceite, recusa, correção de nome ou dúvida sobre os dados (um assunto solto, uma pergunta sobre outro tema).
+- "pedido": a pessoa NÃO está respondendo ao consentimento; ela está PEDINDO alguma coisa à rádio para ir ao ar: mandar um beijo, um abraço, um alô, um recado, uma dedicatória, tocar uma música. Ex.: "quero mandar um beijo", "manda um alô pra minha mãe", "queria pedir uma música". Vale mesmo que ela não diga para quem nem qual música: pedido incompleto continua sendo pedido. Quem faz um pedido está querendo PARTICIPAR, é o oposto de recusar.
+- "outro": qualquer coisa que não seja claramente aceite, recusa, correção de nome, dúvida sobre os dados ou pedido (um assunto solto, uma pergunta sobre outro tema).
 
 Regras:
 - Só use "aceite" quando a concordância for clara E for dirigida ao pedido de consentimento. Na dúvida entre "aceite" e "outro", escolha "outro". Deixar de conceder só faz a Adriana perguntar de novo; conceder errado registra uma autorização que a pessoa não deu.
@@ -569,7 +570,14 @@ Regras:
               },
               tipo: {
                 type: "string",
-                enum: ["aceite", "recusa", "correcao_de_nome", "duvida_dados", "outro"],
+                enum: [
+                  "aceite",
+                  "recusa",
+                  "correcao_de_nome",
+                  "duvida_dados",
+                  "pedido",
+                  "outro",
+                ],
               },
               nome_corrigido: {
                 type: ["string", "null"],
@@ -601,6 +609,7 @@ Regras:
       "recusa",
       "correcao_de_nome",
       "duvida_dados",
+      "pedido",
       "outro",
     ]);
     if (!inp || !inp.tipo || !tiposValidos.has(inp.tipo)) return null;
@@ -3087,6 +3096,10 @@ Deno.serve(async (req: Request) => {
     const duvidasDados = typeof flags.duvida_dados_respostas === "number"
       ? flags.duvida_dados_respostas as number
       : 0;
+    // Idem para pedido feito durante o consentimento.
+    const pedidosConsent = typeof flags.pedido_no_consentimento === "number"
+      ? flags.pedido_no_consentimento as number
+      : 0;
 
     // nome_suspeito: calculado UMA vez e reaproveitado no contexto do classificador.
     const nomeGravado = ((ouvinte.nome as string) ?? "").trim();
@@ -3121,6 +3134,15 @@ Deno.serve(async (req: Request) => {
     }
     // Teto proprio da duvida sobre dados: estourou, volta a ser ambiguidade comum.
     if (tipo === "duvida_dados" && duvidasDados >= 2) tipo = "outro";
+    // "pedido" DE PROPOSITO nao tem teto que o rebaixe para "outro". Rebaixar traria de
+    // volta o pior bug: quem so queria mandar um beijo acabava encerrado como se tivesse
+    // recusado. Quem faz pedido quer participar. O volume de mensagens quem limita e o
+    // teto geral de mensagens (passo 7), nao o portao de consentimento.
+    //
+    // IA fora do ar: nao sabemos o que a pessoa disse, e nao saber NAO e a mesma coisa
+    // que ambiguidade. Sem entender a mensagem nao da para afirmar que ela hesitou, entao
+    // esta rodada nao consome tentativa e nao pode caminhar para o encerramento.
+    const iaIndisponivel = !cls;
     // Teto de correcoes de nome + MESMO filtro da C1 no nome_corrigido: a IA nao
     // pode gravar lixo por esse caminho. Sem nome, teto estourado, ou nome que
     // reprova no filtro (< 2 letras, saudacao, ou frase de intencao) -> vira "outro".
@@ -3170,6 +3192,33 @@ Deno.serve(async (req: Request) => {
       return new Response("ok", { status: 200 });
     }
 
+    // PEDIDO durante o consentimento. Quem pede quer PARTICIPAR: e o oposto de recusar.
+    // Reconhece o pedido, promete atender e explica POR QUE o sim precisa vir antes.
+    // NAO consome reformulacao e NUNCA encerra: expulsar quem nao recusou e o pior
+    // desfecho possivel, pior do que ignorar.
+    if (tipo === "pedido") {
+      const gerada = await falaAdriana(
+        `o ouvinte acabou de fazer um pedido pra rádio ("${texto.trim()}") e ainda nao autorizou o cadastro. Reconheca o pedido dele com entusiasmo, prometa que voce ja vai anotar, e explique em UMA frase curta que voce so precisa do "sim" dele pra guardar os dados antes de registrar o pedido. Termine perguntando se pode seguir com o cadastro. Nao repita a explicacao da LGPD inteira de novo, seja leve`,
+        primeiroNome,
+        true,
+      );
+      const msg = gerada ??
+        `Que legal que você quer mandar um recado! Já anoto pra você, só preciso que me confirme antes se posso guardar seus dados, tá bom? Posso seguir com o seu cadastro?`;
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: "aguarda_consentimento",
+        contexto: {
+          ...ctx,
+          // Contador PROPRIO, so para nao ficar em laco infinito. Ao estourar, ela para
+          // de reconhecer o pedido a cada vez, mas continua SEM encerrar a conversa.
+          flags: { ...flags, pedido_no_consentimento: pedidosConsent + 1 },
+          historico: hist,
+        },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+
     // Duvida sobre os dados (prazo, destino, uso): responde ANTES de voltar ao
     // consentimento. NAO conta como reformulacao e NAO concede consentimento.
     if (tipo === "duvida_dados") {
@@ -3190,7 +3239,10 @@ Deno.serve(async (req: Request) => {
     }
 
     // Recusa OU esgotou as 2 reformulacoes: ENCERRA com limpeza real.
-    if (tipo === "recusa" || reformulacoes >= 2) {
+    // O esgotamento so vale quando a IA classificou de fato: se ela estava fora, nao
+    // houve leitura, e ninguem pode ser encerrado como se tivesse recusado sem que o
+    // sistema tenha entendido uma unica mensagem dele.
+    if (tipo === "recusa" || (reformulacoes >= 2 && !iaIndisponivel)) {
       // ORDEM OBRIGATORIA: limpar ANTES de enviar a despedida (a despedida sobrevive).
       // 1. anula o nome no cadastro (mantem telefone e ddd, chave de reencontro).
       await db.from("ouvintes").update({ nome: null }).eq("id", ouvinteId);
@@ -3221,7 +3273,12 @@ Deno.serve(async (req: Request) => {
       etapa: "aguarda_consentimento",
       contexto: {
         ...ctx,
-        flags: { ...flags, consentimento_reformulacoes: reformulacoes + 1 },
+        // So conta tentativa quando houve leitura de verdade. Sem IA, reperguntamos
+        // sem avancar o contador, para nunca caminhar para o encerramento as cegas.
+        flags: {
+          ...flags,
+          consentimento_reformulacoes: iaIndisponivel ? reformulacoes : reformulacoes + 1,
+        },
         historico: hist,
       },
     }).eq("id", conversaId);
