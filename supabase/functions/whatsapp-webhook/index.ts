@@ -1821,13 +1821,24 @@ const FERRAMENTA_LEITURA = {
         type: ["string", "null"],
         description: "Pergunta curta que resolveria a duvida. Preencha so quando precisa_confirmar for true.",
       },
+      // Este enum e o MESMO vocabulario que a tabela pedidos e o servirPedido usam.
+      // Enquanto ele foi diferente ("recado"), o pedido lido corretamente nao era
+      // reconhecido na hora de servir e evaporava. Um vocabulario so.
       pedido_tipo: {
         type: ["string", "null"],
-        enum: ["musica", "recado", "dedicatoria", "aviso", "outro", null],
-        description: "Tipo do pedido feito A RADIO. null quando nao ha pedido.",
+        enum: [
+          "musica", "abraco", "beijo", "alo", "promocao", "premio", "camiseta",
+          "outro", null,
+        ],
+        description:
+          "Tipo do pedido feito A RADIO. null quando nao ha pedido. abraco, beijo e alo sao RECADOS que a radio manda no ar PARA OUTRA PESSOA (a Adriana nunca e a destinataria); escolha o gesto que ele pediu. promocao e querer participar de sorteio; premio e sobre premio ja ganho; camiseta e brinde da radio.",
       },
       pedido_conteudo: { type: ["string", "null"], description: "O que a radio deve colocar no ar." },
-      pedido_destinatario: { type: ["string", "null"], description: "Para quem e o recado, quando ele disser." },
+      pedido_destinatario: {
+        type: ["string", "null"],
+        description:
+          "Para quem e o recado, com as palavras dele (\"minha mae\", \"Joao\", \"a Flavia\"). null quando ele ainda nao disse. NUNCA preencha com a Adriana nem com a radio: o recado nunca e para elas.",
+      },
       musica_titulo: { type: ["string", "null"] },
       musica_artista: { type: ["string", "null"] },
     },
@@ -1984,6 +1995,10 @@ ${entrada.naoAproveitado.length ? `Você NÃO conseguiu aproveitar isto e ainda 
 O QUE VOCÊ AINDA PRECISA
 ${objetivo}
 
+PEDIDO É PARA O AR, VOCÊ NUNCA É A DESTINATÁRIA
+Beijo, abraço, alô, salve e dedicatória são RECADOS que ele quer que a rádio mande para OUTRA PESSOA, no ar, na programação. Ele não está mandando carinho para você. Você é quem leva o recado até a programação, nunca quem recebe. Então nunca responda como se o carinho fosse seu, nunca agradeça por ele, e nunca use "que lindo", "que romântico", "que fofo" ou parecido como quem foi presenteada.
+Se você ainda não sabe para quem é o recado, isso é uma informação que falta e que você vai precisar depois. Reconheça o recado como recado, deixe claro que vai levar para a programação, e siga com o que você precisa agora.
+
 COMO A SUA RESPOSTA SE ESCREVE
 Uma mensagem só, curta, de conversa, que faz DUAS coisas na MESMA fala:
 1. Responde de verdade o que ele acabou de dizer. Se ele pediu, reconheça o pedido. Se corrigiu, aceite a correção na hora e mostre que entendeu. Se perguntou, responda. Se elogiou ou brincou, retribua. Se desabafou, acolha em poucas palavras.
@@ -1996,7 +2011,7 @@ PROIBIDO, sem exceção:
 - Repetir uma pergunta com as mesmas palavras que você já usou antes. Olhe a conversa acima e diga de outro jeito.
 - Chamar a pessoa por um nome que ela já corrigiu, ou insistir num dado que ela já desmentiu.
 - Recitar dados dele. Você NUNCA repete sobrenome, data de nascimento, cidade, bairro, número, estilo musical, rádio ou programa. O único dado que você pode falar é o primeiro nome dele, e só para chamá-lo. Não diga "já tenho aqui sua cidade" nem nada parecido.
-- Dizer que já anotou, já registrou ou já colocou no ar um pedido que ainda não foi feito. Você pode prometer que vai anotar, nunca afirmar que anotou.
+- Dizer que já anotou, já registrou, já mandou ou já colocou no ar um pedido que ainda não foi atendido. "Beijo mandado", "recado enviado", "já está no ar" são mentiras: nada disso aconteceu ainda. Você promete que vai levar para a programação, nunca afirma que já levou.
 - Perguntar duas coisas de uma vez. Uma coisa por vez.
 - Emoji em excesso: no máximo um, e só se couber.
 - Diminutivo no cadastro ou nos dados. Nada de "cadastrinho", "dadinhos", "coisinha", "perguntinha". O cadastro é coisa séria e o diminutivo tira a seriedade dele justamente na hora em que você pede autorização para guardar dado pessoal.
@@ -3906,9 +3921,18 @@ async function processarWebhook(
     const temPedido = (l.intencoes ?? []).includes("pedido_para_radio");
     if (temPedido && !flags2.pedido_pendente) {
       flags2.pedido_pendente = {
-        tipo: l.pedido_tipo === "musica" ? "musica" : (l.pedido_tipo ?? "outro"),
+        tipo: l.pedido_tipo ?? "outro",
         conteudo: l.pedido_conteudo ?? l.musica_titulo ?? null,
         destinatario: l.pedido_destinatario ?? null,
+      };
+    } else if (temPedido && flags2.pedido_pendente) {
+      // O pedido ja estava parado e ele acrescentou o que faltava (tipico: disse pra
+      // quem era so agora). Completa os buracos sem sobrescrever o que ja se sabia.
+      const p = flags2.pedido_pendente as Record<string, unknown>;
+      flags2.pedido_pendente = {
+        tipo: p.tipo ?? l.pedido_tipo ?? "outro",
+        conteudo: p.conteudo ?? l.pedido_conteudo ?? l.musica_titulo ?? null,
+        destinatario: p.destinatario ?? l.pedido_destinatario ?? null,
       };
     }
     return { upd, flags2, registrado, naoAproveitado };
