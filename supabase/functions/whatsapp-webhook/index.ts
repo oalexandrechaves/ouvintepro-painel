@@ -1559,6 +1559,71 @@ function pushHist(
   return [...anterior, { de: "ouvinte", texto: ouvinteTexto }, { de: "adriana", texto: adriaTexto }].slice(-8);
 }
 
+type Turno = { de: string; texto: string };
+
+// PASSO 1 do refactor de entendimento: historico REAL da conversa, lido da tabela
+// mensagens. O ctx.historico nao serve como contexto de IA porque o pushHist faz
+// slice(-8), ou seja guarda so 4 trocas e corta o comeco de uma conversa picada.
+// Aqui lemos por OUVINTE, atravessando as conversas que a janela de 5 min fechou,
+// para que uma retomada horas depois chegue na IA com tudo que ja foi dito.
+// Exclui a mensagem atual (excluirId), que vai separada no prompt.
+// Orcamento duplo: numero de turnos e total de caracteres. Estourou, corta pelo
+// COMECO, porque o fim da conversa e o que explica a mensagem de agora.
+// Falha de leitura devolve [] e o chamador cai no ctx.historico de sempre.
+async function carregarHistorico(
+  ouvinteId: string,
+  radioId: string,
+  excluirId: string | null,
+  opcoes?: { turnos?: number; horas?: number; maxChars?: number },
+): Promise<Turno[]> {
+  const turnos = opcoes?.turnos ?? 60;
+  const horas = opcoes?.horas ?? 48;
+  const maxChars = opcoes?.maxChars ?? 8000;
+  const desde = new Date(Date.now() - horas * 3600 * 1000).toISOString();
+  const { data: convs, error: errConv } = await db
+    .from("conversas")
+    .select("id")
+    .eq("ouvinte_id", ouvinteId)
+    .eq("radio_id", radioId)
+    .order("ultima_atividade_em", { ascending: false })
+    .limit(10);
+  if (errConv) {
+    console.error(`carregarHistorico conversas falhou: ${errConv.code} ${errConv.message}`);
+    return [];
+  }
+  const ids = (convs ?? []).map((c) => c.id as string);
+  if (!ids.length) return [];
+  let q = db
+    .from("mensagens")
+    .select("id, direcao, conteudo, criado_em")
+    .eq("radio_id", radioId)
+    .in("conversa_id", ids)
+    .not("conteudo", "is", null)
+    .gte("criado_em", desde)
+    .order("criado_em", { ascending: false })
+    .limit(turnos);
+  if (excluirId) q = q.neq("id", excluirId);
+  const { data, error } = await q;
+  if (error) {
+    console.error(`carregarHistorico mensagens falhou: ${error.code} ${error.message}`);
+    return [];
+  }
+  const linhas = (data ?? []) as { direcao?: string; conteudo?: string | null }[];
+  const out: Turno[] = [];
+  let total = 0;
+  // linhas vem do mais novo pro mais velho; percorremos nessa ordem e damos unshift,
+  // assim o corte por orcamento descarta naturalmente o comeco da conversa.
+  for (const l of linhas) {
+    const t = (l.conteudo ?? "").trim();
+    if (!t) continue;
+    const corte = t.length > 600 ? `${t.slice(0, 600)}...` : t;
+    if (total + corte.length > maxChars) break;
+    total += corte.length;
+    out.unshift({ de: l.direcao === "enviada" ? "adriana" : "ouvinte", texto: corte });
+  }
+  return out;
+}
+
 // Ultima fala da Adriana no historico (para dar contexto ao classificador de consentimento).
 function ultimaFalaAdriana(hist: unknown): string {
   const arr = Array.isArray(hist) ? hist as { de: string; texto: string }[] : [];
@@ -1848,14 +1913,17 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  await db.from("mensagens").insert({
+  const { data: msgRecebida } = await db.from("mensagens").insert({
     conversa_id: conversaId,
     radio_id: radioId,
     direcao: "recebida",
     tipo: isAudio ? "audio" : isTexto ? "texto" : "outro",
     conteudo: texto || null,
     audio_url: audioUrl ?? null,
-  });
+  }).select("id").single();
+  // Id da mensagem ATUAL. O carregarHistorico exclui ela do historico, porque o texto
+  // dela ja vai separado nos prompts como "nova mensagem do ouvinte".
+  const msgAtualId = (msgRecebida?.id as string | undefined) ?? null;
 
   if (isAudio && audioFalhou) {
     await reply(
@@ -1878,8 +1946,20 @@ Deno.serve(async (req: Request) => {
   const ctx = (conversa.contexto as Record<string, unknown> | null) ?? {};
   const flags = (ctx.flags as Record<string, unknown> | null) ?? {};
   // Ja houve mensagem antes nesta conversa? Se sim, a Adriana nao cumprimenta de novo.
+  // ATENCAO: continua vindo do ctx.historico DESTA conversa, de proposito. O historico
+  // do banco atravessa conversas antigas e faria a abertura nunca acontecer.
   const jaSaudou = Array.isArray(ctx.historico) &&
     (ctx.historico as unknown[]).length > 0;
+
+  // Historico do banco, carregado sob demanda e memoizado: no maximo uma leitura por
+  // requisicao, e nenhuma nos caminhos que respondem sem consultar a IA.
+  let histBancoCache: Turno[] | null = null;
+  const histBanco = async (): Promise<Turno[]> => {
+    if (!histBancoCache) {
+      histBancoCache = await carregarHistorico(ouvinteId, radioId, msgAtualId);
+    }
+    return histBancoCache;
+  };
 
   // Nao achou a musica na busca: a Adriana pede o nome de novo, sem inventar nada.
   async function reperguntarMusica(flagsBase: Record<string, unknown>) {
@@ -2716,9 +2796,14 @@ Deno.serve(async (req: Request) => {
 
     // Classificacao por IA (timeout curto). Fallback FAIL-CLOSED quando retorna null:
     // so aceite/recusa por lista; NUNCA infere correcao; NUNCA concede sem aceite explicito.
+    // Ultima pergunta: preferimos o historico do banco, que nao tem o corte de 8 trocas
+    // do ctx.historico. Se a leitura falhar, cai no ctx.historico de sempre.
+    const histConsent = await histBanco();
+    const ultimaPergunta = ultimaFalaAdriana(histConsent) ||
+      ultimaFalaAdriana(ctx.historico);
     const cls = await classificarConsentimento(texto, {
       nomeGravado,
-      ultimaPergunta: ultimaFalaAdriana(ctx.historico),
+      ultimaPergunta,
       nomeSuspeito,
     });
     let tipo: string;
@@ -3119,8 +3204,13 @@ Deno.serve(async (req: Request) => {
 
   // ===== Cerebro conversacional: a Adriana conduz =====
   const coletado = montarColetado(ouvinte, flags);
+  // Historico do banco (conversa inteira, sem o corte de 8 trocas). Se a leitura
+  // falhar e vier vazia, usa o ctx.historico, que e o comportamento antigo.
+  const histCerebro = await histBanco();
   const dec = await cerebroAdriana(
-    (ctx.historico as { de: string; texto: string }[]) ?? [],
+    histCerebro.length
+      ? histCerebro
+      : ((ctx.historico as { de: string; texto: string }[]) ?? []),
     coletado,
     texto,
   );
