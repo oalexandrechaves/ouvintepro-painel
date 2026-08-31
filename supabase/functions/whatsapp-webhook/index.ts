@@ -1742,6 +1742,9 @@ O que separa um pedido de uma conversa social é a INTENÇÃO de que aquilo vá 
 
 PEDIDO INCOMPLETO CONTINUA SENDO PEDIDO. Falta de destinatário, de título de música ou de qualquer outro detalhe NUNCA rebaixa um pedido para conversa social. O que faltou você deixa null no campo correspondente, e o sistema pergunta o resto depois. Rebaixar a intenção por causa do que falta apaga a informação e faz o ouvinte ser ignorado, que é o pior resultado possível.
 
+CONSENTIMENTO É BARREIRA, NÃO É ETAPA DO ROTEIRO
+Enquanto a pessoa não tiver autorizado expressamente a guarda dos dados dela, o sistema NÃO grava campo nenhum de cadastro, por mais correta que seja a sua leitura. Continue lendo e preenchendo normalmente o que ela disser, porque ler não é gravar e a informação pode ser reaproveitada depois do aceite. Só não conte com nada disso como coletado, e nunca sugira seguir para o próximo dado antes da autorização.
+
 CORREÇÃO PODE VIR A QUALQUER MOMENTO, SOBRE QUALQUER CAMPO
 Um valor já gravado NÃO é definitivo. A pessoa corrige o que quiser, quando quiser, do jeito dela, e quase nunca avisa que está corrigindo. Compare sempre o que ela disse com o bloco JÁ GRAVADO NO CADASTRO. Se a mensagem deixa claro qual é o valor certo de um campo, você preenche esse campo com o valor certo, mesmo que já exista valor gravado, mesmo que a Adriana esteja perguntando outra coisa, e lista "correcao" nas intenções.
 
@@ -1955,10 +1958,13 @@ async function responderAdriana(entrada: {
       `${h.de === "ouvinte" ? "Ouvinte" : "Você"}: ${h.texto}`
     ).join("\n")
     : "(esta é a primeira mensagem dele)";
+  const pedeConsentimento = entrada.campoFalta === "consentimento";
   const precisa = SENTIDO_CAMPO[entrada.campoFalta] ?? "";
-  const objetivo = entrada.campoFalta === "concluido" || !precisa
+  const objetivo = pedeConsentimento
+    ? `Você ainda NÃO tem a autorização dele para guardar os dados dele, e sem ela você não pode registrar nada. É isso, e só isso, que falta nesta mensagem: pedir essa autorização. Diga com todas as letras que é para fazer o cadastro dele para as promoções, que os dados ficam protegidos de acordo com a LGPD, a Lei Geral de Proteção de Dados, e termine com uma pergunta que ele responda com sim ou não. NÃO pergunte nenhum outro dado agora, nem data, nem CEP, nem cidade, nem número. Este é o momento mais sério da conversa: seja simpática, mas trate a autorização com seriedade, nunca como formalidade boba ou detalhe pequeno.`
+    : entrada.campoFalta === "concluido" || !precisa
     ? "O cadastro está completo. Você não precisa perguntar mais nada: agradeça e deixe a conversa aberta."
-    : `Falta você descobrir: ${precisa}.`;
+    : `Falta você descobrir: ${precisa}. Peça exatamente isso, inteiro, sem encurtar. Se está escrito que precisa de dia, mês e ano, peça os três, nunca só parte.`;
 
   const prompt = `Você é a Adriana, atendente da rádio ${RADIO_LABEL} no WhatsApp. Brasileira, simpática, animada, jeito de rádio. Português do Brasil com acentos corretos. NUNCA use travessão.
 
@@ -1971,7 +1977,7 @@ A MENSAGEM QUE ELE ACABOU DE MANDAR
 O QUE VOCÊ ENTENDEU DESSA MENSAGEM
 ${l.o_que_ele_disse}
 Leitura interna: ${l.raciocinio}
-${l.precisa_confirmar && l.confirmacao_sugerida ? `Você ficou em dúvida e precisa confirmar isto antes de seguir: ${l.confirmacao_sugerida}` : ""}
+${l.precisa_confirmar && l.confirmacao_sugerida && !pedeConsentimento ? `Você ficou em dúvida e precisa confirmar isto antes de seguir: ${l.confirmacao_sugerida}` : ""}
 ${entrada.registrado.length ? `Você acabou de anotar no cadastro: ${entrada.registrado.join(", ")}.` : ""}
 ${entrada.naoAproveitado.length ? `Você NÃO conseguiu aproveitar isto e ainda precisa: ${entrada.naoAproveitado.join(", ")}.` : ""}
 
@@ -1993,6 +1999,9 @@ PROIBIDO, sem exceção:
 - Dizer que já anotou, já registrou ou já colocou no ar um pedido que ainda não foi feito. Você pode prometer que vai anotar, nunca afirmar que anotou.
 - Perguntar duas coisas de uma vez. Uma coisa por vez.
 - Emoji em excesso: no máximo um, e só se couber.
+- Diminutivo no cadastro ou nos dados. Nada de "cadastrinho", "dadinhos", "coisinha", "perguntinha". O cadastro é coisa séria e o diminutivo tira a seriedade dele justamente na hora em que você pede autorização para guardar dado pessoal.
+- Exagero. Nada de "demais", "muito muito", superlativo empilhado nem duas exclamações na mesma frase. Você é simpática e animada sem ser exagerada: no máximo um adjetivo entusiasmado por mensagem.
+- Encurtar o que você precisa descobrir para a pergunta ficar mais curta.
 
 ${entrada.primeiroNome ? `O primeiro nome dele é "${entrada.primeiroNome}". Use com moderação, não em toda frase.` : "Você ainda não sabe o nome dele. Não invente nem use placeholder."}
 ${entrada.jaSaudou ? "Vocês já estão conversando: não se apresente de novo e não cumprimente como se fosse o primeiro contato." : `Este é o primeiro contato: se apresente rapidinho como Adriana da ${RADIO_LABEL} antes de emendar.`}
@@ -3798,7 +3807,16 @@ async function processarWebhook(
     const registrado: string[] = [];
     const naoAproveitado: string[] = [];
     const campos = (l.campos ?? {}) as Record<string, string>;
-    const ler = (k: string) => (campos[k] ?? "").toString().trim();
+    // PORTAO LGPD, BARREIRA DURA. Sem consentimento gravado, NENHUM campo de cadastro
+    // e persistido, por mais que o interpretador tenha lido corretamente. O modelo
+    // conduz a conversa; ele NAO decide pular o consentimento. A unica excecao e o
+    // nome, que ja era gravado antes do aceite no fluxo original: e ele que permite
+    // pedir a autorizacao chamando a pessoa pelo nome, e sem ele o portao nao abre.
+    const semConsentimento = !ouvinte.consentimento_em;
+    const ler = (k: string) => {
+      if (semConsentimento && k !== "nome") return "";
+      return (campos[k] ?? "").toString().trim();
+    };
 
     // nome: mesmo filtro do caminho antigo. A diferenca e que agora ele pode
     // SOBRESCREVER um nome ja gravado, que e o que faz a correcao funcionar.
@@ -3951,6 +3969,11 @@ async function processarWebhook(
       if (campoFalta === "cidade" && flags2.cep_desistiu === true) {
         campoFalta = "cidade_manual";
       }
+      // O consentimento vem antes de tudo, menos do nome, e vence ate a duvida da
+      // leitura. Enquanto ele nao existe, o unico assunto pendente e ele.
+      const faltaConsentimento = !ouvNovo.consentimento_em &&
+        (!!ouvNovo.nome || flags2.nome_pulado === true);
+      if (faltaConsentimento) campoFalta = "consentimento";
       const pnNovo = ((ouvNovo.nome as string) ?? "").trim().split(/\s+/)[0] || "";
 
       const fala = await responderAdriana({
@@ -3978,7 +4001,11 @@ async function processarWebhook(
         }
         const hist = pushHist(ctx.historico, texto, msg);
         await db.from("conversas").update({
-          etapa: vaiPedirCep
+          // Pedir o aceite joga a proxima mensagem no portao de consentimento, que e
+          // codigo deterministico e endurecido. O nucleo nao julga o "sim".
+          etapa: faltaConsentimento
+            ? "aguarda_consentimento"
+            : vaiPedirCep
             ? "aguarda_cep"
             : concluiu
             ? "concluido"
@@ -4042,6 +4069,30 @@ async function processarWebhook(
       return new Response("ok", { status: 200 });
     }
     flags.aguardando_correcao_musica = false;
+  }
+
+  // ===== Rede de seguranca do portao LGPD =====
+  // O portao sempre foi ESTRUTURAL: capturar o nome mandava a etapa pra
+  // aguarda_consentimento e nada avancava sem o aceite. Quem chegar aqui com nome e
+  // sem consentimento saiu daquele trilho (interprete indisponivel, estado antigo) e
+  // coletaria dado pessoal sem autorizacao. Volta pro portao antes de perguntar nada.
+  if (
+    isTexto && !ouvinte.consentimento_em &&
+    (!!ouvinte.nome || flags.nome_pulado === true)
+  ) {
+    const pnLgpd = ((ouvinte.nome as string) ?? "").trim().split(/\s+/)[0] || "";
+    const msgLgpd = await falaAdriana(
+      `voce ainda NAO tem autorizacao dele pra guardar os dados. Peca essa autorizacao agora: diga que e pra fazer o cadastro dele pras promocoes, que os dados ficam protegidos de acordo com a LGPD, a Lei Geral de Protecao de Dados, e termine com uma pergunta de sim ou nao. NAO pergunte nenhum outro dado. Nada de diminutivo e nada de exagero`,
+      pnLgpd,
+      true,
+    ) ??
+      `Antes de seguir${pnLgpd ? ", " + pnLgpd : ""}: posso fazer seu cadastro pra te avisar das promoções? Seus dados ficam protegidos de acordo com a LGPD, a Lei Geral de Proteção de Dados. Posso? 🙂`;
+    await db.from("conversas").update({
+      etapa: "aguarda_consentimento",
+      contexto: { ...ctx, flags, historico: pushHist(ctx.historico, texto, msgLgpd) },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msgLgpd);
+    return new Response("ok", { status: 200 });
   }
 
   // ===== Cadastro deterministico: trata o campo ATUAL antes do cerebro (imune a 503/429, sem loop) =====
