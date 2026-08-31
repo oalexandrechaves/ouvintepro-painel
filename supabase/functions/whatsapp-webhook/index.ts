@@ -490,39 +490,59 @@ Bairro informado: """${bairro}"""${cepLinha}
   }
 }
 
-// CORRECAO 3 (v81): classifica a resposta na etapa de consentimento com CONTEXTO
-// (nome gravado, ultima pergunta da Adriana, nome_suspeito). Retorna a intencao e, se
-// for correcao de nome, o nome informado. Timeout CURTO (2.5s): o chamador cai no
-// fallback determinístico FAIL-CLOSED quando isto retorna null (IA fora, timeout, erro).
+// Classifica a resposta na etapa de consentimento LENDO A CONVERSA INTEIRA, na ordem.
+// O consentimento e um portao juridico: a MESMA frase pode ser aceite num contexto e
+// resposta a outra pergunta em outro ("Tudo bem" respondendo ao "tudo bem?" da saudacao
+// nao e autorizacao). Por isso aqui nao existe lista de palavras: quem decide e o modelo,
+// com o historico ordenado, porque so a ordem revela a que pergunta a pessoa respondeu.
+// Timeout de 8s: o chamador cai no fallback deterministico FAIL-CLOSED quando isto
+// retorna null (IA fora, timeout, erro), e esse fallback e sempre MAIS restritivo.
 async function classificarConsentimento(
   texto: string,
-  contexto: { nomeGravado: string; ultimaPergunta: string; nomeSuspeito: boolean },
-): Promise<{ tipo: string; nome_corrigido: string | null } | null> {
+  contexto: { nomeGravado: string; nomeSuspeito: boolean; historico: Turno[] },
+): Promise<{ tipo: string; nome_corrigido: string | null; raciocinio?: string } | null> {
   if (!ANTHROPIC_API_KEY) return null;
+  const hist = contexto.historico.length
+    ? contexto.historico.map((h) => `${h.de === "ouvinte" ? "Ouvinte" : "Adriana"}: ${h.texto}`).join("\n")
+    : "(inicio da conversa)";
   const prompt = `
-Você classifica a resposta de uma pessoa no WhatsApp de uma rádio. A atendente Adriana acabou de pedir o CONSENTIMENTO da pessoa para guardar os dados dela num cadastro de promoções, citando a LGPD, a Lei Geral de Proteção de Dados.
+Você classifica a resposta de uma pessoa no WhatsApp de uma rádio. A atendente Adriana pediu o CONSENTIMENTO da pessoa para guardar os dados dela num cadastro de promoções, citando a LGPD, a Lei Geral de Proteção de Dados.
 
-Contexto:
-- Nome hoje gravado no cadastro: "${contexto.nomeGravado || "(vazio)"}"
+CONVERSA ATÉ AQUI, NA ORDEM
+${hist}
+
+NOVA MENSAGEM DA PESSOA
+"""${texto}"""
+
+Contexto do cadastro:
+- Nome hoje gravado: "${contexto.nomeGravado || "(vazio)"}"
 - Esse nome gravado parece suspeito, como se tivesse sido capturado errado (por exemplo, um pedido de música virou nome)? ${contexto.nomeSuspeito ? "SIM" : "não"}
-- Última coisa que a Adriana disse: "${contexto.ultimaPergunta || "(pediu o consentimento para guardar os dados)"}"
-- Resposta da pessoa agora: """${texto}"""
+
+A QUE PERGUNTA ELA ESTÁ RESPONDENDO (leia isto antes de classificar)
+As mensagens do WhatsApp chegam fora de ordem. A pessoa digita devagar, manda em partes, e muitas vezes responde a uma pergunta que ficou para trás enquanto a Adriana já mandou outra. Antes de classificar, decida a QUAL pergunta esta mensagem responde, olhando a ordem acima.
+
+Isso é decisivo aqui. A Adriana costuma se apresentar dizendo "tudo bem?". Se a pessoa responde "tudo bem", "tudo ótimo", "e você", "de boa" ou parecido, ela está COMPLETANDO A SAUDAÇÃO, não autorizando nada, mesmo que o pedido de consentimento tenha entrado no meio. Isso é "outro", nunca "aceite". O mesmo vale para qualquer resposta que só faça sentido como réplica a uma pergunta anterior.
+
+Consentimento só existe quando a pessoa responde AO PEDIDO DE CONSENTIMENTO. Se você não consegue afirmar que ela entendeu que estava autorizando o uso dos dados, não é aceite.
 
 Classifique a resposta em UMA categoria:
-- "aceite": a pessoa concorda ou autoriza guardar os dados (ex.: "sim", "pode", "claro", "tudo bem", "autorizo", "pode sim", ou um emoji de positivo como 👍 👌 ✅ e equivalentes). Trate esses emojis como aceite, nunca como assunto solto.
+- "aceite": respondendo ao pedido de consentimento, a pessoa concorda ou autoriza guardar os dados (ex.: "sim", "pode", "claro", "autorizo", "pode sim", ou um emoji de positivo como 👍 👌 ✅ e equivalentes). Trate esses emojis como aceite, nunca como assunto solto.
 - "recusa": a pessoa não quer ou não autoriza (ex.: "não", "não quero", "agora não", "prefiro não", ou um emoji de negativo como 👎 e equivalentes).
 - "correcao_de_nome": a pessoa NÃO está respondendo ao consentimento; ela está informando ou corrigindo o próprio NOME. Ex.: o nome gravado é "Quero" e a pessoa manda "Wesley"; ou "não é isso, meu nome é Ana". Extraia o nome informado em nome_corrigido.
 - "duvida_dados": a pessoa NÃO está respondendo ao consentimento; ela está perguntando sobre os DADOS dela: por quanto tempo ficam guardados, onde ficam, quem tem acesso, se são repassados ou vendidos para outras empresas, para que serão usados, ou como pedir a exclusão. Ex.: "quanto tempo meus dados ficam guardados com vocês?", "vocês repassam pra alguém?", "pra que vocês querem isso?".
 - "outro": qualquer coisa que não seja claramente aceite, recusa, correção de nome ou dúvida sobre os dados (um assunto solto, uma pergunta sobre outro tema).
 
 Regras:
-- Só use "aceite" quando a concordância for clara. Na dúvida entre "aceite" e "outro", escolha "outro".
+- Só use "aceite" quando a concordância for clara E for dirigida ao pedido de consentimento. Na dúvida entre "aceite" e "outro", escolha "outro". Deixar de conceder só faz a Adriana perguntar de novo; conceder errado registra uma autorização que a pessoa não deu.
+- Em raciocinio, diga em uma frase a qual pergunta você concluiu que a mensagem responde, e por quê.
 - Use "duvida_dados" só quando a pergunta for sobre os dados da própria pessoa ou sobre privacidade. Pergunta sobre outro assunto é "outro".
 - Use "correcao_de_nome" apenas quando a mensagem for claramente um nome de pessoa, não uma frase de intenção como "quero pedir música". Na dúvida entre "correcao_de_nome" e "outro", escolha "outro".
 - nome_corrigido: preencha SÓ quando tipo for "correcao_de_nome"; nos demais casos, deixe null.
 `;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 2500);
+  // 8s, nao 2.5s: com 2.5s o portao juridico caia no fallback de lista com frequencia,
+  // e o fallback nao enxerga a ordem das mensagens. Vale esperar mais para decidir certo.
+  const timer = setTimeout(() => ctrl.abort(), 8000);
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -533,8 +553,9 @@ Regras:
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: CLAUDE_MODEL,
-        max_tokens: 80,
+        // Portao juridico: usa o modelo forte, o mesmo do interpretador.
+        model: MODELO_INTERPRETE,
+        max_tokens: 300,
         temperature: 0,
         tools: [{
           name: "classificar_consentimento",
@@ -542,6 +563,10 @@ Regras:
           input_schema: {
             type: "object",
             properties: {
+              raciocinio: {
+                type: "string",
+                description: "A qual pergunta esta mensagem responde, e por que.",
+              },
               tipo: {
                 type: "string",
                 enum: ["aceite", "recusa", "correcao_de_nome", "duvida_dados", "outro"],
@@ -551,7 +576,7 @@ Regras:
                 description: "Nome informado quando tipo=correcao_de_nome; senao null.",
               },
             },
-            required: ["tipo"],
+            required: ["raciocinio", "tipo"],
             additionalProperties: false,
           },
         }],
@@ -567,11 +592,25 @@ Regras:
     const bloco = (data?.content ?? []).find(
       (b: { type?: string }) => b?.type === "tool_use",
     );
-    const inp = bloco?.input as { tipo?: string; nome_corrigido?: string | null } | undefined;
-    const tiposValidos = new Set(["aceite", "recusa", "correcao_de_nome", "outro"]);
+    const inp = bloco?.input as
+      { tipo?: string; nome_corrigido?: string | null; raciocinio?: string } | undefined;
+    // "duvida_dados" faltava aqui: a IA classificava certo, o conjunto rejeitava, a funcao
+    // devolvia null e o fluxo caia no fallback de regex. A categoria existia so no papel.
+    const tiposValidos = new Set([
+      "aceite",
+      "recusa",
+      "correcao_de_nome",
+      "duvida_dados",
+      "outro",
+    ]);
     if (!inp || !inp.tipo || !tiposValidos.has(inp.tipo)) return null;
     const nome = typeof inp.nome_corrigido === "string" ? inp.nome_corrigido.trim() : null;
-    return { tipo: inp.tipo, nome_corrigido: nome && nome.length > 0 ? nome : null };
+    console.log(`consentimento ia: tipo=${inp.tipo} motivo=${inp.raciocinio ?? ""}`);
+    return {
+      tipo: inp.tipo,
+      nome_corrigido: nome && nome.length > 0 ? nome : null,
+      raciocinio: inp.raciocinio,
+    };
   } catch (e) {
     console.error(`classificarConsentimento excecao (timeout/erro): ${e}`);
     return null;
@@ -1285,17 +1324,24 @@ const NEGATIVAS = new Set([
 
 // ===== CONSENTIMENTO LGPD: classificacao EXPLICITA (v81) =====
 // So concede consentimento em aceite explicito. Ambiguidade NAO concede.
+// Fallback deterministico, usado SO quando a IA cai. Ele nao enxerga a ordem das
+// mensagens, entao nao tem como saber a que pergunta a pessoa respondeu. Por isso so
+// pode conter frases que sejam autorizacao em QUALQUER contexto.
+// Foram removidas daqui as respostas que tambem servem de replica a uma saudacao
+// ("tudo bem", "beleza", "ta", "ta bom", "ok", "okay"): foi exatamente assim que um
+// "Tudo bem" respondendo ao "tudo bem?" da apresentacao virou consentimento gravado.
+// Regra: este fallback nunca pode ser mais permissivo que o modelo. Na duvida, nao concede.
 const CONSENT_ACEITE = new Set([
   "sim", "s", "aceito", "aceito sim", "sim aceito", "sim quero", "pode",
-  "pode sim", "pode fazer", "podemos", "quero", "quero sim", "claro",
-  "com certeza", "concordo", "autorizo", "tudo bem", "ta bom", "ta", "beleza",
-  "ok", "okay", "pode ser", "positivo", "bora", "vamos", "de acordo",
+  "pode sim", "pode fazer", "podemos", "podemos sim", "quero", "quero sim",
+  "claro", "com certeza", "concordo", "autorizo", "pode ser", "positivo",
+  "de acordo",
 ]);
 function consentimentoAceite(texto: string): boolean {
   const chave = normalizarSemAcento(texto);
   if (chave.startsWith("nao")) return false;
   if (CONSENT_ACEITE.has(chave)) return true;
-  return /\b(aceito|autorizo|concordo|pode fazer|pode sim|quero sim|tudo bem)\b/.test(chave);
+  return /\b(aceito|autorizo|concordo|pode fazer|pode sim|quero sim)\b/.test(chave);
 }
 function consentimentoRecusa(texto: string): boolean {
   const chave = normalizarSemAcento(texto);
@@ -1828,15 +1874,6 @@ ${mensagem}`;
   } catch (e) {
     return { leitura: null, latenciaMs: Date.now() - t0, erro: String(e) };
   }
-}
-
-// Ultima fala da Adriana no historico (para dar contexto ao classificador de consentimento).
-function ultimaFalaAdriana(hist: unknown): string {
-  const arr = Array.isArray(hist) ? hist as { de: string; texto: string }[] : [];
-  for (let i = arr.length - 1; i >= 0; i--) {
-    if (arr[i]?.de === "adriana") return arr[i].texto ?? "";
-  }
-  return "";
 }
 
 async function cerebroAdriana(
@@ -3057,17 +3094,16 @@ Deno.serve(async (req: Request) => {
       pareceIntencao(nomeGravado) ||
       SAUDACOES_NAO_NOME.has(normalizarSemAcento(nomeGravado));
 
-    // Classificacao por IA (timeout curto). Fallback FAIL-CLOSED quando retorna null:
-    // so aceite/recusa por lista; NUNCA infere correcao; NUNCA concede sem aceite explicito.
-    // Ultima pergunta: preferimos o historico do banco, que nao tem o corte de 8 trocas
-    // do ctx.historico. Se a leitura falhar, cai no ctx.historico de sempre.
+    // Classificacao por IA com a CONVERSA INTEIRA na ordem: e a ordem que revela a que
+    // pergunta a pessoa respondeu. Fallback FAIL-CLOSED quando retorna null: so aceite
+    // por lista curta, NUNCA infere correcao, NUNCA concede sem autorizacao explicita.
     const histConsent = await histBanco();
-    const ultimaPergunta = ultimaFalaAdriana(histConsent) ||
-      ultimaFalaAdriana(ctx.historico);
     const cls = await classificarConsentimento(texto, {
       nomeGravado,
-      ultimaPergunta,
       nomeSuspeito,
+      historico: histConsent.length
+        ? histConsent
+        : ((ctx.historico as Turno[] | undefined) ?? []),
     });
     let tipo: string;
     let nomeCorrigido: string | null = null;
