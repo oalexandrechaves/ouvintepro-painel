@@ -1624,6 +1624,202 @@ async function carregarHistorico(
   return out;
 }
 
+// ===========================================================================
+// PASSO 2 do refactor de entendimento: INTERPRETADOR EM MODO SOMBRA.
+//
+// Roda em paralelo com a logica atual, so grava o que leu na tabela
+// interpretacoes e NAO influencia nenhuma resposta ao ouvinte. Serve para
+// comparar, mensagem a mensagem, o que a leitura nova entendeu contra o que a
+// producao de hoje respondeu, ANTES de ligar qualquer coisa.
+//
+// TEMPORARIO: a tabela interpretacoes e este registro saem quando o passo 4
+// entrar em producao. A funcao interpretarMensagem fica e vira a decisora.
+// ===========================================================================
+
+// Modelo do interpretador. Fica separado do CLAUDE_MODEL de proposito: quem
+// INTERPRETA precisa de raciocinio, quem FALA precisa de latencia baixa.
+const MODELO_INTERPRETE = "claude-sonnet-4-6";
+
+// Prefixo estatico do interpretador. Nao muda entre requisicoes, e por isso vai
+// no system com cache_control: a partir da segunda chamada o provedor cobra
+// leitura de cache em vez de input cheio. NUNCA coloque dado do ouvinte aqui.
+const SYSTEM_INTERPRETE = `Você é o interpretador de mensagens da Adriana, a atendente da rádio ${RADIO_LABEL} no WhatsApp.
+
+Você NÃO fala com o ouvinte. Você não escreve respostas. Sua única função é LER a mensagem que o ouvinte acabou de mandar, no contexto de tudo que já foi conversado, e devolver uma leitura estruturada. Quem responde é outra etapa do sistema.
+
+A MISSÃO DA CONVERSA
+A rádio quer cadastrar o ouvinte para que ele possa participar das promoções, e quer conhecer o gosto musical dele. O cadastro tem campos que precisam ser preenchidos, e a Adriana pergunta um de cada vez, na ordem. O objetivo de cada mensagem sua é responder: o que essa mensagem faz avançar, e o que ela pede.
+
+O QUE VOCÊ PRECISA ENTENDER
+O ouvinte é uma pessoa real escrevendo no celular, muitas vezes com o rádio ligado, às vezes por áudio transcrito. Ele erra a grafia, escreve sem acento, abrevia, responde pela metade, responde duas coisas de uma vez, responde uma coisa que a Adriana perguntou três mensagens atrás, muda de assunto, faz uma pergunta no meio, brinca, elogia, reclama. Nada disso é erro dele. É conversa normal, e você tem que entender assim como uma pessoa entenderia.
+
+Você lê pelo SENTIDO, não pela forma. Duas grafias diferentes da mesma coisa são a mesma coisa. Uma resposta indireta que deixa a informação clara vale como resposta. Uma resposta que só parece responder, mas não traz a informação, não vale.
+
+A REGRA MAIS IMPORTANTE: VOCÊ PODE DIZER QUE NÃO É
+Se a Adriana perguntou o nome e a mensagem não contém o nome do ouvinte, diga que o campo não foi respondido. Não force. Não extraia um valor só porque havia uma palavra no lugar onde o valor deveria estar. Uma pergunta, um elogio, uma dúvida, uma reclamação, o nome da própria Adriana, o nome de um artista, uma frase solta: nada disso é o nome do ouvinte. O mesmo vale para todos os outros campos. Preencher errado é muito pior do que não preencher, porque o dado errado entra no cadastro e ninguém percebe.
+
+Na dúvida real entre duas leituras plausíveis, não escolha no palpite: marque precisa_confirmar e escreva a pergunta curta que resolveria a dúvida.
+
+OS CAMPOS DO CADASTRO
+nome: como a pessoa se chama. Nome próprio dela, não de outra pessoa.
+data_nascimento: dia, mês e ano de nascimento. Pode vir por extenso, só com o ano, como idade, ou como uma referência ao aniversário.
+cidade: a cidade onde ela mora.
+bairro: o bairro onde ela mora. Só é perguntado quando a cidade é São Paulo capital.
+numero: o número da casa ou do prédio dela.
+estilo_musical: o gênero ou estilo de música que ela mais gosta.
+programa_locutor: o programa ou o locutor da rádio de que ela mais gosta.
+radio_troca: outra rádio que ela costuma ouvir.
+
+PEDIDOS SÃO PARA A RÁDIO, NÃO PARA A ADRIANA
+Quando o ouvinte pede alguma coisa, ele está pedindo à RÁDIO, para ir ao ar: tocar uma música, mandar um recado ou um abraço para alguém, fazer uma dedicatória, dar um aviso. A Adriana anota e encaminha, ela não é a destinatária. Se ele manda um abraço para a esposa, o abraço é para a esposa, não para a Adriana. Registre quem é o destinatário quando ele disser.
+
+Um elogio à Adriana, uma saudação, uma piada ou um comentário solto NÃO são pedido. Não têm destinatário e não vão ao ar. Isso é conversa social, e é assim que você deve classificar.
+
+O QUE DEVOLVER
+Preencha os campos da ferramenta. Em campos, coloque APENAS os campos que esta mensagem permitiu preencher, com o valor lido, e nada mais: se a mensagem não preencheu nenhum, devolva um objeto vazio. Use exatamente os nomes de campo da lista acima. Em raciocinio, uma ou duas frases dizendo por que você leu assim, principalmente quando você decidiu que algo NÃO era um valor.`;
+
+type Leitura = {
+  raciocinio: string;
+  intencao: string;
+  campo_atual_respondido: boolean;
+  campos: Record<string, string>;
+  precisa_confirmar: boolean;
+  confirmacao_sugerida?: string | null;
+  pedido_tipo?: string | null;
+  pedido_conteudo?: string | null;
+  pedido_destinatario?: string | null;
+  musica_titulo?: string | null;
+  musica_artista?: string | null;
+};
+
+const FERRAMENTA_LEITURA = {
+  name: "registrar_leitura",
+  description: "Registra a leitura estruturada da mensagem do ouvinte.",
+  input_schema: {
+    type: "object",
+    properties: {
+      raciocinio: {
+        type: "string",
+        description: "Uma ou duas frases explicando a leitura, em especial quando voce decidiu que algo NAO era um valor de campo.",
+      },
+      intencao: {
+        type: "string",
+        enum: [
+          "responde_cadastro",
+          "pedido_para_radio",
+          "pergunta_ao_atendimento",
+          "conversa_social",
+          "correcao",
+          "recusa_ou_pular",
+          "encerrar",
+          "ininteligivel",
+        ],
+        description: "O que a mensagem faz. Se faz mais de uma coisa, escolha a principal.",
+      },
+      campo_atual_respondido: {
+        type: "boolean",
+        description: "A mensagem traz de fato o valor do campo que a Adriana acabou de perguntar?",
+      },
+      campos: {
+        type: "object",
+        description: "Somente os campos que ESTA mensagem permitiu preencher. Vazio se nenhum.",
+        additionalProperties: { type: "string" },
+      },
+      precisa_confirmar: {
+        type: "boolean",
+        description: "true quando ha duas leituras plausiveis e chutar seria arriscado.",
+      },
+      confirmacao_sugerida: {
+        type: ["string", "null"],
+        description: "Pergunta curta que resolveria a duvida. Preencha so quando precisa_confirmar for true.",
+      },
+      pedido_tipo: {
+        type: ["string", "null"],
+        enum: ["musica", "recado", "dedicatoria", "aviso", "outro", null],
+        description: "Tipo do pedido feito A RADIO. null quando nao ha pedido.",
+      },
+      pedido_conteudo: { type: ["string", "null"], description: "O que a radio deve colocar no ar." },
+      pedido_destinatario: { type: ["string", "null"], description: "Para quem e o recado, quando ele disser." },
+      musica_titulo: { type: ["string", "null"] },
+      musica_artista: { type: ["string", "null"] },
+    },
+    required: ["raciocinio", "intencao", "campo_atual_respondido", "campos", "precisa_confirmar"],
+    additionalProperties: false,
+  },
+};
+
+// Le a mensagem com contexto completo. Devolve tambem latencia e erro, porque no
+// modo sombra o que interessa medir e justamente o custo e a taxa de falha.
+async function interpretarMensagem(
+  historico: Turno[],
+  estado: {
+    etapa: string;
+    campo_atual: string;
+    campos_faltantes: string[];
+    dados_atuais: Record<string, unknown>;
+  },
+  mensagem: string,
+): Promise<{ leitura: Leitura | null; latenciaMs: number; erro: string | null }> {
+  const t0 = Date.now();
+  if (!ANTHROPIC_API_KEY) return { leitura: null, latenciaMs: 0, erro: "sem ANTHROPIC_API_KEY" };
+  const hist = historico.length
+    ? historico.map((h) => `${h.de === "ouvinte" ? "Ouvinte" : "Adriana"}: ${h.texto}`).join("\n")
+    : "(inicio da conversa)";
+  // Aqui SIM vao os valores ja gravados. Quem interpreta precisa deles para saber
+  // o que ja foi dito e detectar correcao. Quem FALA com o ouvinte continua cego,
+  // porque a privacidade real esta em nao recitar dado, nao em nao enxergar.
+  const dados = Object.entries(estado.dados_atuais)
+    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .map(([k, v]) => `${k}: ${String(v)}`)
+    .join("\n") || "(nada gravado ainda)";
+  const conteudo = `CONVERSA ATE AQUI
+${hist}
+
+JA GRAVADO NO CADASTRO (informacao interna, nunca repetida ao ouvinte)
+${dados}
+
+ESTADO
+etapa: ${estado.etapa}
+campo que a Adriana acabou de perguntar: ${estado.campo_atual || "(nenhum)"}
+campos que ainda faltam: ${estado.campos_faltantes.join(", ") || "(nenhum)"}
+
+NOVA MENSAGEM DO OUVINTE
+${mensagem}`;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: MODELO_INTERPRETE,
+        max_tokens: 800,
+        temperature: 0,
+        // cache_control no ultimo bloco estatico: cobre tools + system inteiros.
+        system: [{ type: "text", text: SYSTEM_INTERPRETE, cache_control: { type: "ephemeral" } }],
+        tools: [FERRAMENTA_LEITURA],
+        tool_choice: { type: "tool", name: "registrar_leitura" },
+        messages: [{ role: "user", content: conteudo }],
+      }),
+    });
+    if (!res.ok) {
+      return { leitura: null, latenciaMs: Date.now() - t0, erro: `http ${res.status}` };
+    }
+    const data = await res.json();
+    const bloco = (data?.content ?? []).find((b: { type?: string }) => b?.type === "tool_use");
+    if (!bloco?.input) return { leitura: null, latenciaMs: Date.now() - t0, erro: "sem tool_use" };
+    const u = data?.usage ?? {};
+    console.log(
+      `interprete cache: criado=${u.cache_creation_input_tokens ?? 0} lido=${u.cache_read_input_tokens ?? 0} input=${u.input_tokens ?? 0} output=${u.output_tokens ?? 0}`,
+    );
+    return { leitura: bloco.input as Leitura, latenciaMs: Date.now() - t0, erro: null };
+  } catch (e) {
+    return { leitura: null, latenciaMs: Date.now() - t0, erro: String(e) };
+  }
+}
+
 // Ultima fala da Adriana no historico (para dar contexto ao classificador de consentimento).
 function ultimaFalaAdriana(hist: unknown): string {
   const arr = Array.isArray(hist) ? hist as { de: string; texto: string }[] : [];
@@ -1960,6 +2156,56 @@ Deno.serve(async (req: Request) => {
     }
     return histBancoCache;
   };
+
+  // ===== MODO SOMBRA (passo 2, TEMPORARIO) =====
+  // Interpreta a mensagem em paralelo e grava o resultado em interpretacoes.
+  // Nao altera nenhuma resposta: roda em segundo plano, e qualquer falha aqui e
+  // engolida de proposito. REMOVER este bloco junto com a tabela no passo 4.
+  if (isTexto && texto) {
+    const sombra = (async () => {
+      const t = await interpretarMensagem(
+        await histBanco(),
+        {
+          etapa,
+          campo_atual: camposFaltantes(ouvinte, flags)[0] ?? "",
+          campos_faltantes: camposFaltantes(ouvinte, flags),
+          dados_atuais: {
+            nome: ouvinte.nome,
+            data_nascimento: ouvinte.data_nascimento,
+            cidade: ouvinte.cidade,
+            bairro: ouvinte.bairro,
+            numero: ouvinte.numero,
+            estilo_musical: ouvinte.estilo_musical,
+            programa_locutor: ouvinte.programa_locutor,
+          },
+        },
+        texto,
+      );
+      await db.from("interpretacoes").insert({
+        radio_id: radioId,
+        ouvinte_id: ouvinteId,
+        conversa_id: conversaId,
+        mensagem_id: msgAtualId,
+        etapa,
+        texto,
+        leitura: t.leitura,
+        // O que a producao de hoje usa para decidir. A fala que ela de fato enviou
+        // sai da tabela mensagens, na linha "enviada" logo apos esta mensagem.
+        decisao_atual: {
+          campo_atual: camposFaltantes(ouvinte, flags)[0] ?? null,
+          campos_faltantes: camposFaltantes(ouvinte, flags),
+          cadastro_completo: cadastroEstaCompleto(ouvinte),
+        },
+        modelo: MODELO_INTERPRETE,
+        latencia_ms: t.latenciaMs,
+        erro: t.erro,
+      });
+    })().catch((e) => console.error(`sombra falhou: ${e}`));
+    const rt = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
+    // waitUntil mantem o isolate vivo depois do Response, para a sombra nao
+    // atrasar a resposta ao ouvinte nem ser morta no meio.
+    if (rt?.waitUntil) rt.waitUntil(sombra);
+  }
 
   // Nao achou a musica na busca: a Adriana pede o nome de novo, sem inventar nada.
   async function reperguntarMusica(flagsBase: Record<string, unknown>) {
