@@ -2099,7 +2099,8 @@ ${objetivo}
 
 PEDIDO É PARA O AR, VOCÊ NUNCA É A DESTINATÁRIA
 Beijo, abraço, alô, salve e dedicatória são RECADOS que ele quer que a rádio mande para OUTRA PESSOA, no ar, na programação. Ele não está mandando carinho para você. Você é quem leva o recado até a programação, nunca quem recebe. Então nunca responda como se o carinho fosse seu, nunca agradeça por ele, e nunca use "que lindo", "que romântico", "que fofo" ou parecido como quem foi presenteada.
-Se você ainda não sabe para quem é o recado, isso é uma informação que falta e que você vai precisar depois. Reconheça o recado como recado, deixe claro que vai levar para a programação, e siga com o que você precisa agora.
+Se você ainda não sabe para quem é o recado, isso é uma informação que falta e que você vai precisar depois. Reconheça o recado como recado e siga com o que você precisa agora.
+A PROMESSA DE LEVAR SÓ EXISTE SE ESTIVER NOS FATOS. Dizer "vou levar para a programação" é afirmar que o recado foi registrado. Você só afirma isso quando o registro aparece no bloco de fatos acima, porque é ele que diz o que aconteceu de verdade. Se não estiver lá, nada foi guardado ainda: acolha o que ele disse, siga com o que você precisa, e não prometa nem diga que anotou.
 
 COMO A SUA RESPOSTA SE ESCREVE
 Uma mensagem só, curta, de conversa, que faz DUAS coisas na MESMA fala:
@@ -3677,7 +3678,34 @@ async function processarWebhook(
     const tituloNovo = (l.musica_titulo ?? "").trim();
     const artistaNovo = (l.musica_artista ?? "").trim();
     const querQualquer = l.musica_qualquer_do_artista === true;
-    if (temConsentimento && (tituloNovo || artistaNovo || (querQualquer && musPend))) {
+
+    // INVARIANTE 1: UM TEXTO, UM DESTINO.
+    // O que ja foi consumido como resposta de um campo nao pode ser consumido de
+    // novo como outra coisa no mesmo turno. Foi exatamente isso que aconteceu com
+    // o "Jazz": a resposta do estilo musical foi para a busca do catalogo, achou
+    // uma faixa qualquer com "Jazz" no nome e gravou no cadastro dele, e o estilo
+    // continuou vazio, entao ela perguntou de novo. Nao e uma lista de palavras:
+    // e a regra de que um mesmo texto tem UM papel por vez.
+    const consumidos = new Set(
+      [nomeLido, dataLida, cidadeLida, bairroLido, numeroLido, estilo, programa, radioLida]
+        .map((v) => normalizarSemAcento(v ?? ""))
+        .filter((v) => v.length > 0),
+    );
+    const vazouDeOutroCampo =
+      (!!tituloNovo && consumidos.has(normalizarSemAcento(tituloNovo))) ||
+      (!!artistaNovo && consumidos.has(normalizarSemAcento(artistaNovo)));
+
+    // INVARIANTE 2: SO SE BUSCA MUSICA QUANDO O TURNO E SOBRE PEDIR MUSICA.
+    // Ou ele esta pedindo algo a radio agora, ou existe uma pergunta de musica em
+    // aberto (o que falta e o titulo, o cantor, ou ela acabou de perguntar se ele
+    // quer pedir). Fora disso o catalogo nem e consultado, entao nao ha como uma
+    // resposta de cadastro virar musica gravada.
+    const turnoDeMusica = intencoes.has("pedido_para_radio") || !!musPend ||
+      campoAtualPre === "pedido_musica";
+    if (
+      temConsentimento && turnoDeMusica && !vazouDeOutroCampo &&
+      (tituloNovo || artistaNovo || (querQualquer && musPend))
+    ) {
       const titulo = (tituloNovo || musPend?.titulo || "").trim();
       const artista = (artistaNovo || musPend?.artista || "").trim();
       if (querQualquer && artista && !titulo) {
@@ -3730,6 +3758,32 @@ async function processarWebhook(
     const pAtual = (flags2.pedido_pendente ?? null) as
       | { tipo: string; conteudo: string | null; destinatario: string | null }
       | null;
+
+    // INVARIANTE 3: SO E PEDIDO O QUE FOI PEDIDO.
+    // Antes bastava o campo pedido_tipo vir preenchido para virar linha na tabela
+    // pedidos, e "Você é linda" virou "Anotei seu pedido! Nossa equipe vê isso pra
+    // você". Elogio, brincadeira e carinho sao CONVERSA: ela responde e segue, nao
+    // abre protocolo. Tres condicoes, todas sobre o papel da mensagem:
+    // 1. a intencao de pedir a radio tem que estar presente de verdade;
+    // 2. "outro" e o balde do que nao se soube classificar, e balde vazio nao vira
+    //    pedido: sem conteudo, nao ha nada para levar para a programacao;
+    // 3. o conteudo nao pode ser um texto ja consumido por um campo do cadastro.
+    //
+    // NAO existe condicao sobre a ORDEM das intencoes. Ja existiu, e saiu daqui:
+    // exigir que a intencao principal nao fosse conversa_social parecia prudente e
+    // era pior que o bug que corrigia. O log de 03:10:59 mostra "Quero pedir uma
+    // música" chegando como ["conversa_social","responde_cadastro",
+    // "pedido_para_radio"], com o pedido em terceiro. Quem chega dando bom dia e
+    // pedindo um abraco para a mae no mesmo texto teria o recado descartado em
+    // silencio, e a Adriana prometeria levar assim mesmo. Trocar um falso positivo
+    // visivel por um falso negativo invisivel e um mau negocio: ranking e
+    // julgamento mole do interpretador e nao serve de portao duro.
+    const conteudoPedido = (l.pedido_conteudo ?? "").trim();
+    const ehPedidoDeVerdade = !!l.pedido_tipo && l.pedido_tipo !== "musica" &&
+      intencoes.has("pedido_para_radio") &&
+      !(l.pedido_tipo === "outro" && !conteudoPedido) &&
+      !(!!conteudoPedido && consumidos.has(normalizarSemAcento(conteudoPedido)));
+
     if (hashtagPromo) {
       // Hashtag e sintaxe, nao linguagem: quem escreve #promo esta participando.
       flags2.pedido_pendente = {
@@ -3737,7 +3791,7 @@ async function processarWebhook(
         conteudo: hashtagPromo,
         destinatario: null,
       };
-    } else if (l.pedido_tipo && l.pedido_tipo !== "musica") {
+    } else if (ehPedidoDeVerdade && l.pedido_tipo) {
       flags2.pedido_pendente = {
         tipo: pAtual?.tipo ?? l.pedido_tipo,
         conteudo: pAtual?.conteudo ?? l.pedido_conteudo ?? null,
@@ -3787,6 +3841,40 @@ async function processarWebhook(
     const alvo = p.destinatario ? ` para ${p.destinatario}` : "";
     return `O pedido dele (${p.tipo}${alvo}) acabou de ser registrado e você vai levar para a programação. Quem coloca no ar é a programação, então prometa que vai levar, nunca diga que já foi ao ar.`;
   }
+
+  // INSTRUMENTACAO DA QUEDA PARA A REDE.
+  // Cair para a rede era invisivel: sobrava uma linha no console, que expira, e nada
+  // no banco. Foi exatamente esse ponto cego que impediu de perceber, olhando os
+  // dados, que a rede estava atendendo a maioria dos turnos, e que uma queda do
+  // interpretador era indistinguivel de uma chamada que nunca aconteceu. Agora toda
+  // queda deixa registro na MESMA tabela que audita as decisoes, com `erro`
+  // preenchido, entao a proporcao nucleo x rede passa a ser uma consulta, e nao uma
+  // deducao. E aditivo: nao decide nada e nao muda o fluxo, so registra.
+  const registrarQueda = async (
+    motivo: string,
+    leitura: Leitura | null,
+    latenciaMs: number,
+  ) => {
+    const { error } = await db.from("interpretacoes").insert({
+      radio_id: radioId,
+      ouvinte_id: ouvinteId,
+      conversa_id: conversaId,
+      mensagem_id: msgIdsAtuais[msgIdsAtuais.length - 1] ?? null,
+      etapa,
+      texto: ofensivo ? "(ofensiva, nao registrada)" : texto,
+      leitura,
+      decisao_atual: {
+        campo_atual: campoAtualPre || null,
+        caiu_na_rede: true,
+      },
+      modelo: MODELO_INTERPRETE,
+      latencia_ms: latenciaMs,
+      erro: motivo,
+    });
+    if (error) {
+      console.error(`registrarQueda falhou: ${error.code} ${error.message}`);
+    }
+  };
 
   if (isTexto && texto) {
     // Ofensa e droga: a DETECCAO e deterministica e o texto NAO vai para modelo
@@ -4004,8 +4092,10 @@ async function processarWebhook(
       ouvinte = ouvNovo;
       primeiroNome = pnNovo || primeiroNome;
       console.error("nucleo: leitura ok mas geracao de fala falhou, caindo na rede");
+      await registrarQueda("geracao de fala falhou", l, lida.latenciaMs);
     } else {
       console.error(`nucleo: sem leitura (${lida.erro}), caindo na rede`);
+      await registrarQueda(`sem leitura: ${lida.erro ?? "desconhecido"}`, null, lida.latenciaMs);
     }
   }
 
