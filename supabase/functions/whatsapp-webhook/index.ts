@@ -1629,6 +1629,50 @@ function textoConsentimento(primeiroNome: string): string {
 const TEXTO_DESPEDIDA_RECUSA =
   "Sem problema, respeito totalmente a sua decisão! Apaguei aqui o que você me mandou e guardo só o registro de que você preferiu não seguir com o cadastro. É assim que a gente cumpre a LGPD, a Lei Geral de Proteção de Dados. Se mudar de ideia, é só me chamar por aqui que a gente continua 🙂";
 
+// O QUE VAI PARA A COLUNA DE PROVA DO ACEITE.
+// `ouvintes.consentimento_texto` prova UMA coisa: que o titular disse sim. Desde
+// que a rajada passou a ser costurada numa mensagem so, ela vinha recebendo a
+// conversa inteira. Em 31/08 gravou "Pode sim! \n\nQuero mandar um beijo pra
+// Juliana": o nome de uma terceira pessoa, que nao e titular deste cadastro, nao
+// consentiu com nada e nem sabe que existe, dentro do registro de aceite de outra.
+// Dado de terceiro na coluna de prova e falha de minimizacao (LGPD, art. 6, III),
+// e numa eventual eliminacao dos dados do titular esse dado vaza junto ou fica
+// orfao.
+// O modelo PROPOE o trecho, este codigo CONFERE que ele e copia literal: substring
+// exata e nao vazia do que chegou. Trecho parafraseado nao e prova, e anotacao.
+// O contexto completo continua recuperavel: `mensagens` guarda a conversa inteira
+// e `consentimento_em` da o carimbo de tempo.
+function trechoDoAceite(textoBruto: string, proposto?: string | null): string {
+  const inteiro = textoBruto.trim();
+  const t = (proposto ?? "").trim();
+  if (t && inteiro.includes(t)) return t;
+  // FALLBACK FAIL-OPEN DO LADO DA MINIMIZACAO, DE PROPOSITO E COM O CUSTO ACEITO.
+  // Quando o modelo nao devolve trecho, ou devolve um que nao existe no texto,
+  // grava-se a mensagem inteira. Isso significa que NESTE caminho dado de terceiro
+  // PODE VOLTAR para a coluna de prova, exatamente como no caso da Juliana. E
+  // escolha consciente: falhar para o lado da prova a mais preserva a validade
+  // juridica do aceite, e prova de consentimento faltando e pior do que prova de
+  // consentimento com excesso. O excesso e corrigivel depois; a falta, nao.
+  return inteiro;
+}
+
+// REGRA DE PAPEL DA ADRIANA, TEXTO UNICO PARA TODO PROMPT QUE ESCREVE FALA.
+// Ela LEVA o recado ate a programacao; nunca e a destinataria dele. Isto morava so
+// dentro do prompt principal. Quando o pedido de consentimento ganhou um prompt
+// proprio, esse segundo ponto de entrada nasceu sem a regra e sem os fatos, e no
+// teste de 31/08 a acolhida respondeu "Beijo mandado com carinho para voce": ela
+// virou a destinataria de um recado que era para a Juliana. O gerador nao ignorou
+// o fato, o fato nunca chegou nele.
+// Regra que vale para TODA fala mora num lugar so. Todo prompt que escreve fala
+// interpola esta constante, byte a byte. Um ponto de entrada novo ou usa isto, ou
+// fica visivelmente sem isto na hora da revisao.
+const REGRA_PAPEL_RECADO =
+  `PEDIDO É PARA O AR, VOCÊ NUNCA É A DESTINATÁRIA
+Beijo, abraço, alô, salve e dedicatória são RECADOS que ele quer que a rádio mande para OUTRA PESSOA, no ar, na programação. Ele não está mandando carinho para você. Você é quem leva o recado até a programação, nunca quem recebe. Então nunca responda como se o carinho fosse seu, nunca agradeça por ele, e nunca use "que lindo", "que romântico", "que fofo" ou parecido como quem foi presenteada.
+Se você ainda não sabe para quem é o recado, isso é uma informação que falta e que você vai precisar depois. Reconheça o recado como recado e siga com o que você precisa agora. Você só pergunta para quem é o recado quando o sistema colocar isso como o que falta descobrir, e isso só acontece depois que o cadastro dele estiver completo. Enquanto isso não vier, não pergunte para quem é, nem uma vez.
+A PROMESSA DE LEVAR SÓ EXISTE SE ESTIVER NOS FATOS. Dizer "vou levar para a programação" é afirmar que o recado foi registrado. Você só afirma isso quando o registro aparece no bloco de fatos acima, porque é ele que diz o que aconteceu de verdade. Se não estiver lá, nada foi guardado ainda: acolha o que ele disse, siga com o que você precisa, e não prometa nem diga que anotou.
+NUNCA diga que já anotou, já registrou, já mandou ou já colocou no ar um pedido que ainda não foi atendido. "Beijo mandado", "recado enviado", "já está no ar" são mentiras: nada disso aconteceu ainda. Você promete que vai levar para a programação, nunca afirma que já levou.`;
+
 function pushHist(
   hist: unknown,
   ouvinteTexto: string,
@@ -1803,6 +1847,7 @@ type Leitura = {
   campos: Record<string, string>;
   precisa_confirmar: boolean;
   confirmacao_sugerida?: string | null;
+  consentimento_trecho?: string | null;
   pedido_tipo?: string | null;
   pedido_conteudo?: string | null;
   pedido_destinatario?: string | null;
@@ -1868,6 +1913,21 @@ const FERRAMENTA_LEITURA = {
       confirmacao_sugerida: {
         type: ["string", "null"],
         description: "Pergunta curta que resolveria a duvida. Preencha so quando precisa_confirmar for true.",
+      },
+      // PROVA DOCUMENTAL, NAO PARAFRASE. A coluna ouvintes.consentimento_texto
+      // existe para provar o aceite LGPD do titular, e so isso. Com a rajada
+      // costurada numa mensagem so, ela passou a receber a conversa inteira: no
+      // teste de 31/08 gravou "Pode sim! \n\nQuero mandar um beijo pra Juliana",
+      // ou seja, o nome de uma terceira pessoa, que nao e titular e nao consentiu
+      // com nada, dentro do registro de aceite de outra. Isso e problema de
+      // minimizacao (art. 6, III), independente do beijo.
+      // Este campo e COPIA LITERAL, e o codigo confere que e substring exata do
+      // texto recebido antes de gravar. Trecho parafraseado nao e prova, e
+      // anotacao, por isso a checagem e do lado do codigo e nao da confianca.
+      consentimento_trecho: {
+        type: ["string", "null"],
+        description:
+          "So quando intencoes incluir consente_dados. COPIE LITERALMENTE, caractere por caractere, o pedaco da mensagem em que ele autoriza o cadastro (\"Pode sim!\", \"claro, pode\"). NAO reescreva, NAO corrija, NAO resuma, NAO junte pedacos separados: tem que ser um trecho continuo que exista igual no texto recebido. Nao inclua o resto da mensagem, so o aceite. null quando nao houver aceite.",
       },
       // Este enum e o MESMO vocabulario que a tabela pedidos e o servirPedido usam.
       // Enquanto ele foi diferente ("recado"), o pedido lido corretamente nao era
@@ -2115,6 +2175,8 @@ A MENSAGEM QUE ELE ACABOU DE MANDAR
 
 O QUE VOCÊ ENTENDEU DESSA MENSAGEM
 ${l.o_que_ele_disse}
+${(entrada.fatos ?? []).length ? `\nO QUE JÁ ACONTECEU DE VERDADE AGORA (é fato, pode afirmar sem medo, e o que não estiver aqui você NÃO afirma)\n${(entrada.fatos ?? []).map((f) => `- ${f}`).join("\n")}\n` : ""}
+${REGRA_PAPEL_RECADO}
 
 SUA ÚNICA TAREFA
 Escrever UMA FRASE CURTA que responda o que ele acabou de dizer. Uma frase só, no máximo vinte palavras. Não é uma mensagem, é uma frase.
@@ -2170,13 +2232,10 @@ ${entrada.aviso ? `ANTES DE MAIS NADA\n${entrada.aviso}\n` : ""}
 O QUE VOCÊ AINDA PRECISA
 ${objetivo}
 
-PEDIDO É PARA O AR, VOCÊ NUNCA É A DESTINATÁRIA
-Beijo, abraço, alô, salve e dedicatória são RECADOS que ele quer que a rádio mande para OUTRA PESSOA, no ar, na programação. Ele não está mandando carinho para você. Você é quem leva o recado até a programação, nunca quem recebe. Então nunca responda como se o carinho fosse seu, nunca agradeça por ele, e nunca use "que lindo", "que romântico", "que fofo" ou parecido como quem foi presenteada.
-Se você ainda não sabe para quem é o recado, isso é uma informação que falta e que você vai precisar depois. Reconheça o recado como recado e siga com o que você precisa agora. Você só pergunta para quem é o recado quando o sistema colocar isso como o que falta descobrir, e isso só acontece depois que o cadastro dele estiver completo. Enquanto isso não vier, não pergunte para quem é, nem uma vez.
+${REGRA_PAPEL_RECADO}
 
 O CADASTRO É SEMPRE DO OUVINTE, NUNCA DE OUTRA PESSOA
 Todo dado que você pede é da pessoa com quem você está falando. Se ela citou alguém, e ela cita o tempo todo (a mãe, a namorada, o amigo, o destinatário do recado), essa pessoa NÃO tem cadastro aqui e você nunca pergunta nada sobre ela: nem data de nascimento, nem cidade, nem bairro, nem número, nem estilo musical, nada. Quando ler "a data de aniversário dela" ou "em que cidade ela mora", "ela" é sempre a ouvinte, jamais a pessoa citada.
-A PROMESSA DE LEVAR SÓ EXISTE SE ESTIVER NOS FATOS. Dizer "vou levar para a programação" é afirmar que o recado foi registrado. Você só afirma isso quando o registro aparece no bloco de fatos acima, porque é ele que diz o que aconteceu de verdade. Se não estiver lá, nada foi guardado ainda: acolha o que ele disse, siga com o que você precisa, e não prometa nem diga que anotou.
 
 COMO A SUA RESPOSTA SE ESCREVE
 Uma mensagem só, curta, de conversa, que faz DUAS coisas na MESMA fala:
@@ -2190,7 +2249,6 @@ PROIBIDO, sem exceção:
 - Repetir uma pergunta com as mesmas palavras que você já usou antes. Olhe a conversa acima e diga de outro jeito.
 - Chamar a pessoa por um nome que ela já corrigiu, ou insistir num dado que ela já desmentiu.
 - Recitar dados dele. Você NUNCA repete sobrenome, data de nascimento, cidade, bairro, número, estilo musical, rádio ou programa. O único dado que você pode falar é o primeiro nome dele, e só para chamá-lo. Não diga "já tenho aqui sua cidade" nem nada parecido.
-- Dizer que já anotou, já registrou, já mandou ou já colocou no ar um pedido que ainda não foi atendido. "Beijo mandado", "recado enviado", "já está no ar" são mentiras: nada disso aconteceu ainda. Você promete que vai levar para a programação, nunca afirma que já levou.
 - Perguntar duas coisas de uma vez. Uma coisa por vez.
 - Emoji em excesso: no máximo um, e só se couber.
 - Diminutivo no cadastro ou nos dados. Nada de "cadastrinho", "dadinhos", "coisinha", "perguntinha". O cadastro é coisa séria e o diminutivo tira a seriedade dele justamente na hora em que você pede autorização para guardar dado pessoal.
@@ -3556,7 +3614,7 @@ async function processarWebhook(
     let temConsentimento = !!ouvinte.consentimento_em;
     if (pedindoAutorizacao && intencoes.has("consente_dados")) {
       upd.consentimento_em = new Date().toISOString();
-      upd.consentimento_texto = texto.trim();
+      upd.consentimento_texto = trechoDoAceite(texto, l.consentimento_trecho);
       flags2.consentimento = true;
       temConsentimento = true;
       fatos.push(
@@ -3890,22 +3948,15 @@ async function processarWebhook(
       };
     }
 
-    // GUARDAR TAMBEM E UM FATO. O pedido ficava so nas flags e nao aparecia em
-    // lugar nenhum para quem gera a fala, entao ela nao tinha base para dizer "seu
-    // pedido ficou guardado" e largava o cadastro para tratar do pedido na hora.
-    // So entra quando o pedido PASSOU A EXISTIR neste turno (`!pAtual`), senao o
-    // fato se repetiria a cada mensagem e ela ficaria avisando sempre a mesma coisa.
-    //
-    // O fato NAO promete futuro. Ele vive em flags2, nao na tabela `pedidos`, e
-    // some se a pessoa abandonar a conversa: dizer "vou atender quando o cadastro
-    // fechar" seria assumir um compromisso que o sistema nao garante. Diz o que
-    // aconteceu, que e ter ficado guardado, e para por ai.
-    if (!pAtual && flags2.pedido_pendente) {
-      const g = flags2.pedido_pendente as { tipo: string };
-      fatos.push(
-        `O pedido dele (${g.tipo}) ficou guardado nesta conversa. Isso é tudo o que aconteceu: nada foi registrado, nada foi para a programação e nada foi ao ar. Você pode dizer que guardou o pedido e pedir que ele aguarde, mas não diga quando vai acontecer nem prometa prazo.`,
-      );
-    }
+    // O FATO DO PEDIDO GUARDADO NAO NASCE MAIS AQUI. Ele nascia neste ponto, com a
+    // condicao `!pAtual`, ou seja, so no turno em que o pedido passava a existir.
+    // Nos turnos seguintes o bloco de fatos ficava mudo sobre o pedido, e a regra
+    // do prompt e NEGATIVA ("so afirma o que estiver nos fatos"): sem lembrete
+    // positivo o gerador preenchia o silencio com o historico. Teste de 31/08,
+    // 14:57:45, campo data_nascimento, pelo prompt principal: "Beijo para a Juliana
+    // anotado aqui", com o pedido registrado so as 15:00:36.
+    // Agora ele vive no nucleo, no ramo oposto ao do registrarPedido, e por
+    // construcao os dois fatos nunca coexistem. Ver a chamada de registrarPedido.
 
     return {
       upd, flags2, ctxExtra, registrado, naoAproveitado, fatos,
@@ -4089,6 +4140,21 @@ async function processarWebhook(
       if (pend && !faltaDestinatario && cadastroEstaCompleto(ouvNovo)) {
         delete flags2.pedido_pendente;
         fatos.push(await registrarPedido(pend));
+      } else if (pend) {
+        // GUARDAR TAMBEM E UM FATO, E EM TODO TURNO EM QUE O PEDIDO ESTIVER PARADO.
+        // Este `else` e o que garante a exclusao mutua: ou o pedido foi registrado
+        // agora e vale o fato do registrarPedido, ou ele continua parado e vale
+        // este. Os dois nunca podem sair juntos, porque dizem coisas opostas sobre
+        // o mesmo pedido, e foi o silencio deste lado que produziu "Beijo para a
+        // Juliana anotado aqui" antes de existir linha em `pedidos`.
+        //
+        // O fato NAO promete futuro. O pedido vive em flags2, nao na tabela
+        // `pedidos`, e some se a pessoa abandonar a conversa: dizer "vou atender
+        // quando o cadastro fechar" seria assumir um compromisso que o sistema nao
+        // garante. Diz o que aconteceu, que e ter ficado guardado, e para por ai.
+        fatos.push(
+          `O pedido dele (${pend.tipo}) está guardado nesta conversa e continua guardado. Isso é tudo o que aconteceu: nada foi registrado, nada foi para a programação e nada foi ao ar. Você pode dizer que guardou o pedido e pedir que ele aguarde, mas não diga quando vai acontecer nem prometa prazo.`,
+        );
       }
 
       // ORDEM DO ROTEIRO: continua sendo camposFaltantes, exatamente a mesma.
@@ -4212,13 +4278,28 @@ async function processarWebhook(
           ? "concluido"
           : "cadastro";
         const hist = pushHist(ctx.historico, ofensivo ? "" : texto, msg);
+        // LIMPEZA DA RECUSA: LISTA DO QUE FICA, NAO DO QUE SAI.
+        // O historico ja era zerado aqui, mas as flags iam inteiras, e flags2
+        // carrega pedido_pendente, que carrega pedido_destinatario. Resultado: quem
+        // mandava um beijo para a Juliana e logo depois recusava o cadastro deixava
+        // o nome da Juliana sobreviver a limpeza LGPD, dentro do contexto de uma
+        // conversa encerrada. Dado de terceiro persistido depois de uma recusa.
+        // Lista NEGATIVA envelheceria mal, porque toda flag nova entraria por
+        // padrao. Aqui so passa o que esta nomeado, e como o encerramento so precisa
+        // de contadores e booleanos, nenhum texto livre atravessa por construcao.
+        const flagsRecusa = {
+          consentimento: false,
+          nome_pulado: flags2.nome_pulado === true,
+          consentimento_reformulacoes: flags2.consentimento_reformulacoes ?? 0,
+          duvida_dados_respostas: flags2.duvida_dados_respostas ?? 0,
+        };
         await db.from("conversas").update({
           etapa: etapaNova,
           ...(encerrouPorRecusa
             ? { status: "encerrada", encerrada_em: new Date().toISOString() }
             : {}),
           contexto: encerrouPorRecusa
-            ? { flags: { ...flags2 }, historico: [] }
+            ? { flags: flagsRecusa, historico: [] }
             : {
               ...ctx,
               ...ctxExtra,
@@ -4462,6 +4543,9 @@ async function processarWebhook(
 
     // Aceite: grava a prova (consentimento_em + texto) e segue pro nascimento.
     if (tipo === "aceite") {
+      // Aqui continua o texto inteiro, e nao o trechoDoAceite: nesta rede nao ha
+      // interpretador para propor o trecho, e ela tambem nao costura rajada, entao
+      // `texto` e uma mensagem so e nao a conversa inteira.
       await db.from("ouvintes").update({
         consentimento_em: new Date().toISOString(),
         consentimento_texto: texto.trim(),
