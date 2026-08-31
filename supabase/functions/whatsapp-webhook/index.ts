@@ -1946,6 +1946,11 @@ const SENTIDO_CAMPO: Record<string, string> = {
   cidade_manual: "em que cidade ela mora",
   bairro: "em que bairro ela mora",
   numero: "o número da casa ou do prédio dela",
+  // Pseudo-campo: nao esta em camposFaltantes nem no cadastro. Existe porque recado sem
+  // destinatario e recado que nao pode ir ao ar, entao falta um dado igual falta um CEP,
+  // e e perguntado pelo mesmo caminho de qualquer outro, sem estado novo.
+  destinatario_pedido:
+    "para quem é o recado que ela pediu. Diga que vai anotar o recado pra mandar no ar, pergunte pra quem é o recado, e convide ela a ficar ligada na rádio pra ouvir quando for",
   pedido_musica: "se ela quer pedir alguma música pra tocar",
   estilo_musical: "qual estilo de música ela mais gosta",
   radio_troca: "que outra rádio ela costuma ouvir",
@@ -3925,9 +3930,11 @@ async function processarWebhook(
         conteudo: l.pedido_conteudo ?? l.musica_titulo ?? null,
         destinatario: l.pedido_destinatario ?? null,
       };
-    } else if (temPedido && flags2.pedido_pendente) {
-      // O pedido ja estava parado e ele acrescentou o que faltava (tipico: disse pra
-      // quem era so agora). Completa os buracos sem sobrescrever o que ja se sabia.
+    } else if (flags2.pedido_pendente) {
+      // O pedido ja estava parado e ele acrescentou o que faltava. Nao exige que a
+      // mensagem seja classificada como pedido de novo: quem responde "pra minha mae"
+      // esta completando o recado, nao fazendo um pedido novo. Completa os buracos sem
+      // sobrescrever o que ja se sabia.
       const p = flags2.pedido_pendente as Record<string, unknown>;
       flags2.pedido_pendente = {
         tipo: p.tipo ?? l.pedido_tipo ?? "outro",
@@ -3978,7 +3985,17 @@ async function processarWebhook(
       const pend = flags2.pedido_pendente as
         | { tipo: string; conteudo: string | null; destinatario: string | null }
         | undefined;
-      if (pend && !cadastroEstaCompleto(ouvinte) && cadastroEstaCompleto(ouvNovo)) {
+      // Recado sem destinatario nao pode ir ao ar: "pra quem e" ainda falta. Os tipos
+      // sao os do proprio vocabulario do sistema, nao jeitos de a pessoa falar.
+      const RECADOS_COM_DESTINO = new Set(["abraco", "beijo", "alo"]);
+      const faltaDestinatario = !!pend && RECADOS_COM_DESTINO.has(pend.tipo) &&
+        !pend.destinatario;
+
+      // Serve assim que NADA mais falta: nem no cadastro, nem no proprio pedido. Nao
+      // basta olhar a transicao "o cadastro fechou agora", porque o recado tambem fica
+      // parado esperando o destinatario, e nesse caso o cadastro ja estava completo
+      // antes. Servir apaga pedido_pendente, entao nao ha risco de servir duas vezes.
+      if (pend && !faltaDestinatario && cadastroEstaCompleto(ouvNovo)) {
         const f2 = { ...flags2 };
         delete f2.pedido_pendente;
         await retomarPedido(ouvNovo, f2, pend);
@@ -3993,6 +4010,9 @@ async function processarWebhook(
       if (campoFalta === "cidade" && flags2.cep_desistiu === true) {
         campoFalta = "cidade_manual";
       }
+      // "Pra quem e o recado" e perguntado na hora, e nao no fim: quem acabou de pedir
+      // um beijo esta falando disso AGORA. Perde so para o consentimento.
+      if (faltaDestinatario) campoFalta = "destinatario_pedido";
       // O consentimento vem antes de tudo, menos do nome, e vence ate a duvida da
       // leitura. Enquanto ele nao existe, o unico assunto pendente e ele.
       const faltaConsentimento = !ouvNovo.consentimento_em &&
