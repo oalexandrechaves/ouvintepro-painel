@@ -3085,7 +3085,14 @@ Deno.serve(async (req: Request) => {
   // fallback determinístico FAIL-CLOSED. Consentimento SO em aceite explicito. Ambiguidade
   // reformula ate 2x e entao encerra. Correcao de nome tem teto proprio de 2. Na
   // recusa/esgotamento, LIMPEZA REAL (nome, mensagens, historico) ANTES da despedida.
-  if (isTexto && etapa === "aguarda_consentimento") {
+  // A pessoa que ficou em consentimento_pausado e voltou POR CONTA PROPRIA entra aqui
+  // pela mesma porta. Voltar sozinha e o oposto de desistir, entao o contador de
+  // tentativas zera: ela nao pode ser dispensada de novo pela primeira mensagem da volta.
+  const retomandoPausa = etapa === "consentimento_pausado";
+  if (isTexto && (etapa === "aguarda_consentimento" || retomandoPausa)) {
+    // Zera na PROPRIA flags (e nao so na leitura) porque os ramos de pedido, duvida e
+    // correcao de nome espalham ...flags e levariam o contador velho adiante.
+    if (retomandoPausa) flags.consentimento_reformulacoes = 0;
     const reformulacoes = typeof flags.consentimento_reformulacoes === "number"
       ? flags.consentimento_reformulacoes as number
       : 0;
@@ -3238,11 +3245,28 @@ Deno.serve(async (req: Request) => {
       return new Response("ok", { status: 200 });
     }
 
-    // Recusa OU esgotou as 2 reformulacoes: ENCERRA com limpeza real.
-    // O esgotamento so vale quando a IA classificou de fato: se ela estava fora, nao
-    // houve leitura, e ninguem pode ser encerrado como se tivesse recusado sem que o
-    // sistema tenha entendido uma unica mensagem dele.
-    if (tipo === "recusa" || (reformulacoes >= 2 && !iaIndisponivel)) {
+    // Esgotou as 2 tentativas SEM recusa explicita: para de insistir e pronto.
+    // NAO apaga nada e NAO afirma que a pessoa recusou, porque ela nao recusou: ela so
+    // nao respondeu. Recusa e uma coisa, nao ter conseguido responder e outra, e gravar
+    // a segunda como se fosse a primeira registra uma afirmacao falsa em nome do ouvinte.
+    // O consentimento continua NAO concedido: sem sim, sem cadastro.
+    // O esgotamento so vale quando houve classificacao de verdade: com a IA fora nao
+    // houve leitura nenhuma, e ninguem pode ser dispensado sem o sistema ter entendido
+    // uma unica mensagem dele.
+    if (reformulacoes >= 2 && !iaIndisponivel) {
+      const msg =
+        "Tudo bem, não vou mais ficar insistindo, tá? 🙂 Se você quiser fazer o cadastro pra participar das promoções, é só me chamar por aqui a qualquer momento que a gente faz rapidinho. Fico à disposição!";
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: "consentimento_pausado",
+        contexto: { ...ctx, historico: hist },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+
+    // Recusa EXPLICITA: ENCERRA com limpeza real. So aqui a afirmacao e verdadeira.
+    if (tipo === "recusa") {
       // ORDEM OBRIGATORIA: limpar ANTES de enviar a despedida (a despedida sobrevive).
       // 1. anula o nome no cadastro (mantem telefone e ddd, chave de reencontro).
       await db.from("ouvintes").update({ nome: null }).eq("id", ouvinteId);
@@ -3265,9 +3289,21 @@ Deno.serve(async (req: Request) => {
     }
 
     // "outro" com reformulacoes < 2: reformula, sem conceder consentimento.
-    const msg = reformulacoes === 0
-      ? `Só pra confirmar${primeiroNome ? ", " + primeiroNome : ""}: posso guardar seus dados com segurança pra te avisar das promoções? É só me dizer que sim 🙂`
-      : "Me confirma só com um sim: você autoriza a gente a guardar seus dados pro cadastro? Se preferir não, também tudo bem, é só dizer.";
+    // Na VOLTA depois da pausa a Adriana nao pode recomecar do zero: ela ja sabe o nome e
+    // ja conversou com essa pessoa. Reapresentar-se seria apagar a conversa que existiu.
+    const gerada = retomandoPausa
+      ? await falaAdriana(
+        `o ouvinte tinha parado no meio do cadastro, voce disse que ficava a disposicao, e agora ele voltou por conta propria dizendo "${texto.trim()}". Voces JA se conhecem: NAO se apresente, NAO diga quem voce e, NAO pergunte o nome dele de novo. Reconheca em uma frase o que ele acabou de dizer, mostre que voce lembra que voces tinham comecado o cadastro, e pergunte se ele quer seguir com o cadastro agora. Curto e natural`,
+        primeiroNome,
+        true,
+      )
+      : null;
+    const msg = gerada ??
+      (retomandoPausa
+        ? `Que bom te ver por aqui de novo${primeiroNome ? ", " + primeiroNome : ""}! A gente tinha parado no seu cadastro. Quer seguir de onde paramos? É rapidinho 🙂`
+        : reformulacoes === 0
+        ? `Só pra confirmar${primeiroNome ? ", " + primeiroNome : ""}: posso guardar seus dados com segurança pra te avisar das promoções? É só me dizer que sim 🙂`
+        : "Me confirma só com um sim: você autoriza a gente a guardar seus dados pro cadastro? Se preferir não, também tudo bem, é só dizer.");
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
       etapa: "aguarda_consentimento",
