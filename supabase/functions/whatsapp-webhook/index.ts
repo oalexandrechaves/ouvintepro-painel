@@ -1578,7 +1578,7 @@ function proximaPerguntaFaltante(
   flags: Record<string, unknown>,
 ): { campo: string; texto: string } {
   const capital = normalizarSemAcento((o.cidade as string) ?? "") === "sao paulo";
-  if (!o.nome && flags.nome_pulado !== true) return { campo: "nome", texto: "Pra te deixar ligado nas promoções, qual é o seu nome completo?" };
+  if (!o.nome && flags.nome_pulado !== true) return { campo: "nome", texto: "Qual é o seu nome e sobrenome?" };
   if (!o.data_nascimento) return { campo: "data_nascimento", texto: `${o.nome ? (o.nome as string).split(/\s+/)[0] + ", v" : "V"}ocê pode me passar sua data de aniversário? Dia, mês e ano.` };
   if (!o.cidade) return { campo: "cidade", texto: "Em qual cidade você mora?" };
   if (capital && !o.bairro) return { campo: "bairro", texto: "E em qual bairro?" };
@@ -1586,7 +1586,7 @@ function proximaPerguntaFaltante(
   if (flags.musica_pedida !== true) return { campo: "pedido_musica", texto: "Que legal! Seu cadastro já está certinho! Você quer aproveitar e pedir uma música?" };
   if (!o.estilo_musical) return { campo: "estilo_musical", texto: "Aliás, qual estilo musical que você mais gosta?" };
   if (flags.radio_troca_pedida !== true) return { campo: "radio_troca", texto: "Além da Rádio Liverpool, qual outra rádio você gosta de ouvir?" };
-  if (!o.programa_locutor) return { campo: "programa_locutor", texto: "O que você mais gosta aqui da Rádio Liverpool?" };
+  if (!o.programa_locutor) return { campo: "programa_locutor", texto: "O que você mais gosta aqui na Rádio Liverpool?" };
   return { campo: "concluido", texto: `Prontinho, é isso! Muito obrigada por participar. Continue ligado na ${RADIO_LABEL}!` };
 }
 
@@ -1800,7 +1800,7 @@ cidade: a cidade onde ela mora.
 bairro: o bairro onde ela mora. Só é perguntado quando a cidade é São Paulo capital.
 numero: o número da casa ou do prédio dela.
 estilo_musical: o gênero ou estilo de música que ela mais gosta.
-programa_locutor: o programa ou o locutor da rádio de que ela mais gosta.
+programa_locutor: o que ela mais gosta na rádio. A pergunta é aberta e a resposta também: pode ser um programa, um locutor, as músicas, os prêmios, as promoções, o jeito de falar, o horário que ela ouve, qualquer coisa. Aceite o que vier, do jeito que vier. Não é um campo de nome de locutor.
 radio_troca: outra rádio que ela costuma ouvir.
 
 PEDIDOS SÃO PARA A RÁDIO, NÃO PARA A ADRIANA
@@ -2072,9 +2072,13 @@ ${mensagem}`;
 // Significado de cada campo, para a Adriana saber O QUE precisa descobrir sem
 // receber a pergunta pronta. E descricao de dominio, nao roteiro de fala.
 const SENTIDO_CAMPO: Record<string, string> = {
-  nome: "como a pessoa se chama",
+  nome: "o nome e o sobrenome dela",
   data_nascimento: "a data de aniversário dela, com dia, mês e ano",
-  cidade: "o CEP da casa dela, que é como você descobre a cidade e o bairro",
+  // A justificativa saiu daqui de proposito. Dizer "que e como voce descobre a
+  // cidade e o bairro" fazia a Adriana explicar para que serve o dado, e o
+  // prompt proibe justificar a pergunta. O que ela precisa saber e o que falta,
+  // nao o motivo. O motivo e problema do codigo, nao da fala.
+  cidade: "o CEP da casa dela",
   // Quando ela ja recusou dar o CEP, o que falta e a cidade mesmo, em texto livre.
   cidade_manual: "em que cidade ela mora",
   bairro: "em que bairro ela mora",
@@ -2254,6 +2258,9 @@ PROIBIDO, sem exceção:
 - Diminutivo no cadastro ou nos dados. Nada de "cadastrinho", "dadinhos", "coisinha", "perguntinha". O cadastro é coisa séria e o diminutivo tira a seriedade dele justamente na hora em que você pede autorização para guardar dado pessoal.
 - Exagero. Nada de "demais", "muito muito", superlativo empilhado nem duas exclamações na mesma frase. Você é simpática e animada sem ser exagerada: no máximo um adjetivo entusiasmado por mensagem.
 - Encurtar o que você precisa descobrir para a pergunta ficar mais curta.
+- Dizer que está acabando: "só falta", "só mais isso", "agora só preciso de um dado", "por último", "para finalizar", "última coisa". Você não sabe quanto falta e quase sempre falta mais, então essa promessa vira mentira na mensagem seguinte. Pergunte o que precisa sem dizer quanto falta.
+- Justificar a pergunta explicando para que serve o dado. Nada de "para as promoções", "para os sorteios", "para eu descobrir sua cidade", "para completar seu cadastro", "para você concorrer". O dado não é moeda de troca e a explicação soa a formulário. Se em algum momento couber justificar, a única razão que existe é que aquilo é importante para a rádio.
+- Usar "na" antes de bairro ou cidade. É sempre "em": "em Alphaville", "em Cerqueira César", "em Barra Funda", "em Santana de Parnaíba". Nunca "na Alphaville" nem "na Barra Funda".
 
 ${entrada.primeiroNome ? `O primeiro nome dele é "${entrada.primeiroNome}". Use com moderação, não em toda frase.` : "Você ainda não sabe o nome dele. Não invente nem use placeholder."}
 ${entrada.jaSaudou ? "Vocês já estão conversando: não se apresente de novo e não cumprimente como se fosse o primeiro contato." : `Este é o primeiro contato: se apresente rapidinho como Adriana da ${RADIO_LABEL} antes de emendar.`}
@@ -2375,7 +2382,10 @@ function ehNegativaRadio(texto: string): boolean {
 function intencaoProximoCampo(campo: string): string {
   switch (campo) {
     case "nome":
-      return "peça o nome completo dele pra cadastrar nas promoções";
+      // Sem "pra cadastrar nas promocoes": justificar a pergunta com promocao
+      // esta proibido no prompt do gerador, e um objetivo que manda justificar
+      // vence a proibicao, porque e instrucao especifica contra regra geral.
+      return "peça o nome e o sobrenome dele";
     case "data_nascimento":
       return "pergunte a data de nascimento dele, no formato dia, mês e ano";
     case "cidade":
@@ -2391,7 +2401,7 @@ function intencaoProximoCampo(campo: string): string {
     case "radio_troca":
       return "pergunte pra qual rádio ele troca quando não gosta da música que está tocando";
     case "programa_locutor":
-      return `pergunte se ele tem um programa ou locutor preferido aqui na ${RADIO_LABEL}`;
+      return `pergunte o que ele mais gosta aqui na ${RADIO_LABEL}, sem sugerir resposta`;
     default:
       return "puxe papo de forma simpática";
   }
@@ -3286,8 +3296,8 @@ async function processarWebhook(
           );
         } else {
           await reperguntar(
-            `voce ainda nao pegou o nome do ouvinte; se apresente rapidinho como Adriana da ${RADIO_LABEL} e peca o nome completo dele, de um jeito diferente`,
-            "Antes da gente começar, como você se chama? Pode mandar seu nome completo.",
+            `voce ainda nao pegou o nome do ouvinte; se apresente rapidinho como Adriana da ${RADIO_LABEL} e peca o nome e o sobrenome dele, de um jeito diferente`,
+            "Antes da gente começar, como você se chama? Pode mandar seu nome e sobrenome.",
             { nome_tentativas: proxTent },
           );
         }
@@ -3518,7 +3528,12 @@ async function processarWebhook(
       if (NEGATIVAS.has(normalizarSemAcento(texto))) {
         await avancarCadastro({}, { ...flags2, pulou_programa: true });
       } else {
-        await avancarCadastro({ programa_locutor: titleCasePtBr(texto) }, flags2);
+        // Sem titleCasePtBr: a pergunta virou aberta e a resposta pode ser uma
+        // frase ("os premios", "as musicas da manha"). Title case transforma
+        // frase em titulo ("Os Premios") e estraga o unico dado que existe aqui.
+        // Nome proprio de locutor continua chegando como a pessoa escreveu, que
+        // e o que o nucleo ja faz. Nenhuma tela do painel le esta coluna.
+        await avancarCadastro({ programa_locutor: texto.trim().slice(0, 200) }, flags2);
       }
       return;
     }
@@ -3625,18 +3640,42 @@ async function processarWebhook(
       (!temConsentimento && k !== "nome") ? "" : (campos[k] ?? "").toString().trim();
 
     // nome: pode SOBRESCREVER um nome ja gravado, que e o que faz a correcao funcionar.
+    //
+    // MAS SO EM DOIS CONTEXTOS, e o portao e sobre ESTADO, nao sobre momento.
+    // Ficha em branco aceita nome vindo de qualquer lugar, que e o que faz a
+    // absorcao fora de ordem funcionar. Ja TROCAR um nome que existe so acontece
+    // quando o campo na mesa e o proprio nome, ou quando a leitura diz que ele esta
+    // corrigindo. Fora disso, nome nao entra e vira "nao aproveitado".
+    // O buraco era real: `campos.nome` era gravado viesse de que pergunta viesse.
+    // Em 31/08 a Adriana perguntou qual programa ou locutor ele mais gosta, nao
+    // aceitou "dos premios" e insistiu; a resposta seguinte foi um nome de pessoa.
+    // Nome de gente respondendo pergunta que nao e de nome trocaria o cadastro do
+    // ouvinte pelo nome do locutor, sem ninguem pedir.
+    // A regra "nunca sobrescrever depois do consentimento" foi considerada e
+    // DESCARTADA: o consentimento e pedido no segundo passo, entao ela mataria a
+    // correcao de nome no cadastro inteiro, e o prompt proibe chamar a pessoa por
+    // um nome que ela ja corrigiu.
     const nomeLido = ler("nome");
     if (nomeLido) {
       const soLetras = nomeLido.replace(/[^A-Za-zÀ-ÿ]/g, "");
       const valido = soLetras.length >= 2 && !pareceIntencao(nomeLido) &&
         !SAUDACOES_NAO_NOME.has(normalizarSemAcento(nomeLido));
       const nome = titleCasePtBr(nomeLido) || nomeLido;
-      if (valido && nome !== ouvinte.nome) {
+      const podeTrocar = !ouvinte.nome || campoAtualPre === "nome" ||
+        intencoes.has("correcao");
+      if (valido && podeTrocar && nome !== ouvinte.nome) {
         upd.nome = nome;
         delete flags2.nome_tentativas;
         registrado.push("o nome dele");
       } else if (!valido) {
         naoAproveitado.push("o nome");
+      } else if (!podeTrocar && nome !== ouvinte.nome) {
+        // Descarte SILENCIOSO no prompt, e de proposito. `naoAproveitado` e lido
+        // pelo gerador como "voce ainda precisa disto", entao mandar "o nome" para
+        // la faria a Adriana perguntar o nome de novo para quem ja tem nome
+        // gravado, que e pior do que o descarte. Fica visivel no log, que e onde
+        // este descarte precisa aparecer.
+        console.log(`nome descartado (campo na mesa: ${campoAtualPre || "nenhum"})`);
       }
     }
 
@@ -3721,7 +3760,7 @@ async function processarWebhook(
     const programa = ler("programa_locutor");
     if (programa && programa.length >= 2) {
       upd.programa_locutor = programa.slice(0, 200);
-      registrado.push("o programa favorito");
+      registrado.push("o que ele mais gosta na rádio");
     }
 
     // Radio concorrente: e um dado de PESQUISA, vai para tabela propria. A leitura
@@ -3776,11 +3815,23 @@ async function processarWebhook(
         uf: cepEncontrado.uf,
       };
       campoForcado = "confirma_endereco";
+      // CONFIRMA O BAIRRO, NAO O ENDERECO INTEIRO. Recitar "Alphaville, Santana
+      // de Parnaiba, Sao Paulo" e leitura de ficha, nao conversa, e o proprio
+      // prompt ja proibe recitar dado dele. O bairro sozinho basta para ele
+      // dizer sim ou nao; cidade e UF continuam sendo gravadas igual, so deixam
+      // de ser ditas. Quando o CEP nao traz bairro (CEP de cidade inteira), o
+      // que sobra para confirmar e a propria cidade.
+      //
+      // O FATO ACOMPANHA O OBJETIVO, e nao adianta so encurtar o objetivo: o
+      // fato entra no MESMO prompt como coisa que ela pode afirmar. Se ele
+      // continuasse com o endereco inteiro, o gerador leria de la o que a gente
+      // acabou de tirar daqui.
+      const localCep = cepEncontrado.bairro || cepEncontrado.localidade;
       objetivoTexto =
-        `confirmar com ele se o endereço que você encontrou pelo CEP está certo: ${cepEncontrado.bairro ? cepEncontrado.bairro + ", " : ""}${cepEncontrado.localidade} ${cepEncontrado.uf}. Pergunte se é isso mesmo, de um jeito que ele responda sim ou não`;
+        `confirmar com ele se ele mora em ${localCep}, que foi o que você encontrou pelo CEP. Fale só esse lugar e nada além dele. Diga "em ${localCep}", nunca "na ${localCep}". Pergunte se é isso mesmo, de um jeito que ele responda sim ou não`;
       confirmacaoPendente = `se o endereço encontrado pelo CEP está certo`;
       fatos.push(
-        `Você consultou o CEP que ele mandou e encontrou ${cepEncontrado.bairro ? cepEncontrado.bairro + ", " : ""}${cepEncontrado.localidade} ${cepEncontrado.uf}.`,
+        `Você consultou o CEP que ele mandou e encontrou ${localCep}.`,
       );
     } else {
       const endPend = ctx.endereco_pendente as
@@ -4709,9 +4760,10 @@ async function processarWebhook(
       const bairroCep = (end.bairro || "").trim();
       const flags2 = { ...flags };
       delete flags2.cep_tentativa;
-      const msg = bairroCep
-        ? `Achei aqui que você mora na ${bairroCep}, é isso mesmo?`
-        : `Achei aqui que você mora em ${cidadeCep}, é isso mesmo?`;
+      // "em", nunca "na": "na Barra Funda" e "na Alphaville" estao errados. Os
+      // dois ramos viraram a mesma frase, entao sobrou so a escolha do lugar,
+      // que continua sendo o bairro quando existe e a cidade quando nao existe.
+      const msg = `Achei aqui que você mora em ${bairroCep || cidadeCep}, é isso mesmo?`;
       const hist = pushHist(ctx.historico, texto, msg);
       await db.from("conversas").update({
         etapa: "aguarda_confirma_endereco",
@@ -5080,7 +5132,9 @@ async function processarWebhook(
 
   const programaCampo = val(campos.programa_locutor);
   if (programaCampo && !NEGATIVAS.has(normalizarSemAcento(programaCampo))) {
-    upd.programa_locutor = titleCasePtBr(programaCampo);
+    // Sem titleCasePtBr, pelo mesmo motivo do outro ponto de gravacao: resposta
+    // aberta se grava como veio.
+    upd.programa_locutor = programaCampo.slice(0, 200);
   }
 
   if (Object.keys(upd).length) {
