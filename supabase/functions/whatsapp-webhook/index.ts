@@ -1653,6 +1653,9 @@ A rádio quer cadastrar o ouvinte para que ele possa participar das promoções,
 O QUE VOCÊ PRECISA ENTENDER
 O ouvinte é uma pessoa real escrevendo no celular, muitas vezes com o rádio ligado, às vezes por áudio transcrito. Ele erra a grafia, escreve sem acento, abrevia, responde pela metade, responde duas coisas de uma vez, responde uma coisa que a Adriana perguntou três mensagens atrás, muda de assunto, faz uma pergunta no meio, brinca, elogia, reclama. Nada disso é erro dele. É conversa normal, e você tem que entender assim como uma pessoa entenderia.
 
+O QUE ELE DISSE NÃO DEPENDE DO QUE FOI PERGUNTADO
+Você recebe a etapa e o campo que a Adriana acabou de perguntar. Isso serve para você preencher campo_atual_respondido, e só. NÃO é pista sobre o que o ouvinte quis dizer. Ele pode falar de qualquer assunto a qualquer momento, e o fato de ele não ter respondido o que foi perguntado não torna a mensagem dele menos significativa nem mais "social". Leia a mensagem pelo que ela é, como se você não soubesse o que tinha sido perguntado. Se ela deixa de responder a pergunta pendente E faz outra coisa, as duas coisas são verdade ao mesmo tempo, e você registra as duas.
+
 Você lê pelo SENTIDO, não pela forma. Duas grafias diferentes da mesma coisa são a mesma coisa. Uma resposta indireta que deixa a informação clara vale como resposta. Uma resposta que só parece responder, mas não traz a informação, não vale.
 
 A REGRA MAIS IMPORTANTE: VOCÊ PODE DIZER QUE NÃO É
@@ -1673,14 +1676,16 @@ radio_troca: outra rádio que ela costuma ouvir.
 PEDIDOS SÃO PARA A RÁDIO, NÃO PARA A ADRIANA
 Quando o ouvinte pede alguma coisa, ele está pedindo à RÁDIO, para ir ao ar: tocar uma música, mandar um recado ou um abraço para alguém, fazer uma dedicatória, dar um aviso. A Adriana anota e encaminha, ela não é a destinatária. Se ele manda um abraço para a esposa, o abraço é para a esposa, não para a Adriana. Registre quem é o destinatário quando ele disser.
 
-Um elogio à Adriana, uma saudação, uma piada ou um comentário solto NÃO são pedido. Não têm destinatário e não vão ao ar. Isso é conversa social, e é assim que você deve classificar.
+O que separa um pedido de uma conversa social é a INTENÇÃO de que aquilo vá ao ar, não a completude do que ele escreveu. Um elogio à Adriana, uma saudação ou uma piada não são pedido, porque ele não está pedindo que aquilo seja lido no ar. Já "quero mandar um beijo", "manda um alô", "queria pedir uma música" são pedidos desde a primeira palavra, mesmo que ele não diga para quem, não diga qual música e não diga mais nada.
+
+PEDIDO INCOMPLETO CONTINUA SENDO PEDIDO. Falta de destinatário, de título de música ou de qualquer outro detalhe NUNCA rebaixa um pedido para conversa social. O que faltou você deixa null no campo correspondente, e o sistema pergunta o resto depois. Rebaixar a intenção por causa do que falta apaga a informação e faz o ouvinte ser ignorado, que é o pior resultado possível.
 
 O QUE DEVOLVER
 Preencha os campos da ferramenta. Em campos, coloque APENAS os campos que esta mensagem permitiu preencher, com o valor lido, e nada mais: se a mensagem não preencheu nenhum, devolva um objeto vazio. Use exatamente os nomes de campo da lista acima. Em raciocinio, uma ou duas frases dizendo por que você leu assim, principalmente quando você decidiu que algo NÃO era um valor.`;
 
 type Leitura = {
   raciocinio: string;
-  intencao: string;
+  intencoes: string[];
   campo_atual_respondido: boolean;
   campos: Record<string, string>;
   precisa_confirmar: boolean;
@@ -1702,19 +1707,24 @@ const FERRAMENTA_LEITURA = {
         type: "string",
         description: "Uma ou duas frases explicando a leitura, em especial quando voce decidiu que algo NAO era um valor de campo.",
       },
-      intencao: {
-        type: "string",
-        enum: [
-          "responde_cadastro",
-          "pedido_para_radio",
-          "pergunta_ao_atendimento",
-          "conversa_social",
-          "correcao",
-          "recusa_ou_pular",
-          "encerrar",
-          "ininteligivel",
-        ],
-        description: "O que a mensagem faz. Se faz mais de uma coisa, escolha a principal.",
+      intencoes: {
+        type: "array",
+        items: {
+          type: "string",
+          enum: [
+            "responde_cadastro",
+            "pedido_para_radio",
+            "pergunta_ao_atendimento",
+            "conversa_social",
+            "correcao",
+            "recusa_ou_pular",
+            "encerrar",
+            "ininteligivel",
+          ],
+        },
+        minItems: 1,
+        description:
+          "TUDO que a mensagem faz, da mais importante para a menos. Uma mensagem pode fazer varias coisas ao mesmo tempo: nunca escolha uma so para descartar as outras. Se ele faz um pedido e ao mesmo tempo deixa de responder o que foi perguntado, liste as duas.",
       },
       campo_atual_respondido: {
         type: "boolean",
@@ -1743,7 +1753,7 @@ const FERRAMENTA_LEITURA = {
       musica_titulo: { type: ["string", "null"] },
       musica_artista: { type: ["string", "null"] },
     },
-    required: ["raciocinio", "intencao", "campo_atual_respondido", "campos", "precisa_confirmar"],
+    required: ["raciocinio", "intencoes", "campo_atual_respondido", "campos", "precisa_confirmar"],
     additionalProperties: false,
   },
 };
