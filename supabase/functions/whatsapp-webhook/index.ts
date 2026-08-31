@@ -2204,7 +2204,14 @@ Deno.serve(async (req: Request) => {
     const rt = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
     // waitUntil mantem o isolate vivo depois do Response, para a sombra nao
     // atrasar a resposta ao ouvinte nem ser morta no meio.
-    if (rt?.waitUntil) rt.waitUntil(sombra);
+    if (rt?.waitUntil) {
+      rt.waitUntil(sombra);
+    } else {
+      // Sem waitUntil o isolate pode morrer no meio e a sombra perder linhas.
+      // Nao mudamos para await, que atrasaria a resposta ao ouvinte; deixamos o
+      // aviso no log para nao dar tabela vazia sem explicacao.
+      console.error("sombra: EdgeRuntime.waitUntil indisponivel, gravacao pode se perder");
+    }
   }
 
   // Nao achou a musica na busca: a Adriana pede o nome de novo, sem inventar nada.
