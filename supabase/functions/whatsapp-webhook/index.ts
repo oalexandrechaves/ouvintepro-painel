@@ -1596,6 +1596,15 @@ function proximaPerguntaFaltante(
 // completo = nome + data_nascimento + cidade + numero + consentimento_em, MAIS bairro
 // e zona quando a cidade for Sao Paulo capital (fora da capital nao coletamos bairro).
 // Nenhum pedido e atendido sem cadastro completo (regra central da v82).
+//
+// ATENCAO, ELA NAO E SO METRICA: esta funcao e PORTAO DE FLUXO do bot. Quem mudar
+// a definicao pensando no numero do painel muda o comportamento da Adriana no mesmo
+// ato, e sem nenhum aviso. Hoje ela decide, no caminho vivo: se o pedido guardado
+// vira linha na tabela `pedidos`, se a Adriana pergunta para quem e o recado, se a
+// retomada dispara e se quem volta e tratado como cadastro pronto. Antes de mexer,
+// procurar as chamadas e ler cada uma. A alternativa (uma quarta regua, so do bot)
+// foi descartada de proposito: quatro definicoes de "completo" divergindo em
+// silencio e um problema pior do que o acoplamento.
 function cadastroEstaCompleto(o: Record<string, unknown>): boolean {
   const base = !!o.nome && !!o.data_nascimento && !!o.cidade && !!o.numero &&
     !!o.consentimento_em;
@@ -1612,6 +1621,13 @@ function textoConsentimento(primeiroNome: string): string {
   const pn = primeiroNome.trim();
   return `${pn ? pn + ", p" : "P"}osso fazer seu cadastro pras promoções? Seus dados ficam protegidos pela LGPD, a Lei Geral de Proteção de Dados. Pode ser?`;
 }
+
+// TEXTO UNICO DA DESPEDIDA POR RECUSA. Mesmo motivo do consentimento: afirma o que
+// a rádio fez com os dados dele, entao e compromisso legal e vai literal. Estava
+// escrito inline num unico ponto da rede; virou constante para o nucleo mandar
+// exatamente o mesmo texto. Sem PII: e a unica mensagem que sobrevive a limpeza.
+const TEXTO_DESPEDIDA_RECUSA =
+  "Sem problema, respeito totalmente a sua decisão! Apaguei aqui o que você me mandou e guardo só o registro de que você preferiu não seguir com o cadastro. É assim que a gente cumpre a LGPD, a Lei Geral de Proteção de Dados. Se mudar de ideia, é só me chamar por aqui que a gente continua 🙂";
 
 function pushHist(
   hist: unknown,
@@ -2027,15 +2043,15 @@ const SENTIDO_CAMPO: Record<string, string> = {
 // Objetivos que nao sao "descobrir um dado", e por isso nao cabem no SENTIDO_CAMPO.
 // Sao momentos da conversa com uma exigencia propria, e continuam sendo FALADOS pelo
 // mesmo gerador: o que muda e o que ele precisa cumprir, nunca a frase.
+// As chaves `consentimento` e `despedida_recusa` NAO estao aqui de proposito: elas
+// sao texto juridico e nao passam por gerador nenhum. Ver a interceptacao no topo
+// de responderAdriana. Se alguem reintroduzir uma delas neste mapa, o texto volta a
+// ser reescrito a cada conversa, que foi exatamente a regressao do passo 4.
 const SENTIDO_MOMENTO: Record<string, string> = {
-  consentimento:
-    `Você ainda NÃO tem a autorização dele para guardar os dados dele, e sem ela você não pode registrar nada. É isso, e só isso, que falta nesta mensagem: pedir essa autorização. Diga com todas as letras que é para fazer o cadastro dele para as promoções, que os dados ficam protegidos pela LGPD, a Lei Geral de Proteção de Dados, e termine com uma pergunta fechada, que ele responda com sim ou não. NÃO pergunte nenhum outro dado agora, nem data, nem CEP, nem cidade, nem número. Este é o momento mais sério da conversa: seja simpática, mas trate a autorização com seriedade, nunca como formalidade boba ou detalhe pequeno. Sem emoji no fim.`,
   consentimento_duvida:
-    `Ele quer entender o que acontece com os dados dele antes de autorizar, e ele tem todo o direito. Responda a dúvida dele de verdade, com o que é fato: os dados ficam guardados enquanto ele estiver cadastrado, ele pode pedir a exclusão a qualquer momento falando com você por aqui, e nada é repassado para fora da rádio. Se ele perguntar um prazo exato em dias, diga com honestidade que esse número você não tem, e que vai levar a pergunta para o responsável pela rádio. Depois de responder, volte a pedir a autorização com uma pergunta fechada. Não invente política que você não conhece.`,
+    `Ele quer entender o que acontece com os dados dele antes de autorizar, e ele tem todo o direito. Responda a dúvida dele de verdade, com o que é fato: os dados ficam guardados enquanto ele estiver cadastrado, ele pode pedir a exclusão a qualquer momento falando com você por aqui, e nada é repassado para fora da rádio. Se ele perguntar um prazo exato em dias, diga com honestidade que esse número você não tem, e que vai levar a pergunta para o responsável pela rádio. Não invente política que você não conhece. NÃO repita o pedido de autorização e NÃO termine com pergunta: logo depois da sua resposta vai ser enviado, automaticamente, o texto fixo que pede a autorização de novo. Responda a dúvida, e só.`,
   consentimento_pausa:
     `Ele já foi convidado a autorizar o cadastro mais de uma vez e não disse nem sim nem não. Pare de insistir. Não afirme que ele recusou, porque ele não recusou: ele só não respondeu. Diga que você não vai mais insistir, que a porta continua aberta e que é só chamar quando ele quiser fazer o cadastro. Não peça mais nada nesta mensagem.`,
-  despedida_recusa:
-    `Ele recusou o cadastro, e isso já foi cumprido: as mensagens dele foram apagadas agora e ficou guardado apenas o registro de que ele preferiu não seguir. Respeite a decisão sem tentar convencer, sem oferecer vantagem e sem pedir motivo. Diga que você apagou o que ele mandou, que é assim que a LGPD é cumprida, e que se ele mudar de ideia é só chamar. Não peça mais nada nesta mensagem.`,
   ofensa:
     `A mensagem que ele mandou tem ofensa ou palavrão, e você NÃO recebeu o texto dela de propósito. Não repita, não cite e não comente o que ele escreveu, porque você não leu. Deixe claro, sem sermão e sem ficar ofendida, que a esse tipo de mensagem você não responde, e emende no que você precisa saber.`,
   drogas:
@@ -2067,15 +2083,72 @@ async function responderAdriana(entrada: {
       `${h.de === "ouvinte" ? "Ouvinte" : "Você"}: ${h.texto}`
     ).join("\n")
     : "(esta é a primeira mensagem dele)";
+
+  // ===========================================================================
+  // TEXTO JURIDICO NAO SE GERA.
+  // O passo 4 transformou o pedido de consentimento em INSTRUCAO de prompt, e a
+  // partir dali cada pessoa recebeu uma redacao diferente da mesma autorizacao.
+  // No teste de 31/08 sairam duas versoes em 14 segundos, de 261 e 268 chars,
+  // contra os 129 do texto aprovado. Pedir autorizacao para guardar dado pessoal
+  // e encerrar por recusa sao os dois momentos em que a rádio assume compromisso
+  // legal, e compromisso legal se envia LITERAL, byte a byte, sempre igual.
+  //
+  // So que mandar o literal sozinho ignoraria o que a pessoa acabou de dizer, e
+  // ser ignorado e o pior resultado possivel. Entao a mensagem tem duas partes,
+  // nesta ordem, que nao se inverte: acolhida gerada primeiro, literal por
+  // ultimo. A ORDEM E A TRAVA. A pergunta fechada precisa ser a ultima coisa que
+  // ele le, senao o "sim" dele fica ambiguo e nao serve de prova de consentimento.
+  // ===========================================================================
+  if (entrada.campoFalta === "despedida_recusa") {
+    // Sem acolhida: quem acabou de recusar nao quer puxar assunto.
+    return TEXTO_DESPEDIDA_RECUSA;
+  }
+  if (entrada.campoFalta === "consentimento") {
+    const acolhida = await claudeTexto(
+      `Você é a Adriana, atendente da rádio ${RADIO_LABEL} no WhatsApp. Brasileira, simpática, jeito de rádio. Português do Brasil com acentos corretos. NUNCA use travessão.
+
+A CONVERSA ATÉ AQUI
+${hist}
+
+A MENSAGEM QUE ELE ACABOU DE MANDAR
+"""${entrada.mensagem}"""
+
+O QUE VOCÊ ENTENDEU DESSA MENSAGEM
+${l.o_que_ele_disse}
+
+SUA ÚNICA TAREFA
+Escrever UMA FRASE CURTA que responda o que ele acabou de dizer. Uma frase só, no máximo vinte palavras. Não é uma mensagem, é uma frase.
+Logo depois da sua frase vai ser enviado, automaticamente, um texto fixo pedindo a autorização de cadastro. Você não escreve esse texto e não fala do assunto dele.
+
+PROIBIDO, sem exceção:
+- Falar de cadastro, dados, autorização, LGPD, privacidade, promoções ou de guardar informação. Isso é do texto que vem depois da sua frase, e repetir estraga.
+- Terminar com pergunta. Quem faz a pergunta é o texto que vem depois, e duas perguntas seguidas deixam o "sim" dele sem dono.
+- Pedir qualquer dado.
+- Prometer que já anotou, já mandou ou já colocou no ar o que ele pediu. Nada disso aconteceu.
+- Mais de uma frase. Mais de um emoji. Diminutivo. Exagero.
+${entrada.primeiroNome ? `\nO primeiro nome dele é "${entrada.primeiroNome}", pode usar.` : ""}
+
+Responda APENAS com a frase. Sem aspas, sem explicação.`,
+      0.7,
+    );
+    const literal = textoConsentimento(entrada.primeiroNome);
+    const frase = acolhida ? limparVazamentoJSON(acolhida).trim() : "";
+    return frase ? `${frase}\n\n${literal}` : literal;
+  }
   const momento = SENTIDO_MOMENTO[entrada.campoFalta] ?? "";
-  const pedeConsentimento = entrada.campoFalta.startsWith("consentimento") ||
-    entrada.campoFalta === "despedida_recusa";
+  // `consentimento` e `despedida_recusa` ja retornaram acima. Sobram a duvida e a
+  // pausa, onde a fala e gerada mas nao pode abrir assunto novo de dado.
+  const pedeConsentimento = entrada.campoFalta.startsWith("consentimento");
   const precisa = entrada.objetivoTexto ?? SENTIDO_CAMPO[entrada.campoFalta] ?? "";
   const objetivo = momento
     ? momento
     : entrada.campoFalta === "concluido" || !precisa
     ? "Não falta você descobrir mais nada dele. Não faça pergunta de cadastro nenhuma: responda o que ele disse, deixe a conversa aberta e mostre que ele pode pedir o que quiser por aqui."
-    : `Falta você descobrir: ${precisa}. Peça exatamente isso, inteiro, sem encurtar. Se está escrito que precisa de dia, mês e ano, peça os três, nunca só parte.`;
+    // "dela" nas descricoes de campo sempre quis dizer a ouvinte, mas o pronome fica
+    // solto: depois de "o beijo e para a Juliana", o gerador amarrou o "dela" na
+    // Juliana e pediu a data de nascimento DELA. O referente passa a vir amarrado
+    // aqui, junto com o objetivo, e nao so numa regra geral la embaixo.
+    : `Falta você descobrir, sobre o OUVINTE${entrada.primeiroNome ? ` (${entrada.primeiroNome}, a pessoa com quem você está falando)` : " (a pessoa com quem você está falando)"}: ${precisa}. Peça exatamente isso, inteiro, sem encurtar. Se está escrito que precisa de dia, mês e ano, peça os três, nunca só parte.`;
 
   const prompt = `Você é a Adriana, atendente da rádio ${RADIO_LABEL} no WhatsApp. Brasileira, simpática, animada, jeito de rádio. Português do Brasil com acentos corretos. NUNCA use travessão.
 
@@ -2099,7 +2172,10 @@ ${objetivo}
 
 PEDIDO É PARA O AR, VOCÊ NUNCA É A DESTINATÁRIA
 Beijo, abraço, alô, salve e dedicatória são RECADOS que ele quer que a rádio mande para OUTRA PESSOA, no ar, na programação. Ele não está mandando carinho para você. Você é quem leva o recado até a programação, nunca quem recebe. Então nunca responda como se o carinho fosse seu, nunca agradeça por ele, e nunca use "que lindo", "que romântico", "que fofo" ou parecido como quem foi presenteada.
-Se você ainda não sabe para quem é o recado, isso é uma informação que falta e que você vai precisar depois. Reconheça o recado como recado e siga com o que você precisa agora.
+Se você ainda não sabe para quem é o recado, isso é uma informação que falta e que você vai precisar depois. Reconheça o recado como recado e siga com o que você precisa agora. Você só pergunta para quem é o recado quando o sistema colocar isso como o que falta descobrir, e isso só acontece depois que o cadastro dele estiver completo. Enquanto isso não vier, não pergunte para quem é, nem uma vez.
+
+O CADASTRO É SEMPRE DO OUVINTE, NUNCA DE OUTRA PESSOA
+Todo dado que você pede é da pessoa com quem você está falando. Se ela citou alguém, e ela cita o tempo todo (a mãe, a namorada, o amigo, o destinatário do recado), essa pessoa NÃO tem cadastro aqui e você nunca pergunta nada sobre ela: nem data de nascimento, nem cidade, nem bairro, nem número, nem estilo musical, nada. Quando ler "a data de aniversário dela" ou "em que cidade ela mora", "ela" é sempre a ouvinte, jamais a pessoa citada.
 A PROMESSA DE LEVAR SÓ EXISTE SE ESTIVER NOS FATOS. Dizer "vou levar para a programação" é afirmar que o recado foi registrado. Você só afirma isso quando o registro aparece no bloco de fatos acima, porque é ele que diz o que aconteceu de verdade. Se não estiver lá, nada foi guardado ainda: acolha o que ele disse, siga com o que você precisa, e não prometa nem diga que anotou.
 
 COMO A SUA RESPOSTA SE ESCREVE
@@ -2128,7 +2204,14 @@ Responda APENAS com a mensagem que vai para o WhatsApp dele. Sem aspas, sem expl
   const fala = await claudeTexto(prompt, 0.7);
   if (!fala) return null;
   const limpa = limparVazamentoJSON(fala).trim();
-  return limpa.length ? limpa : null;
+  if (!limpa.length) return null;
+  // A duvida sobre dados termina voltando a pedir a autorizacao, e esse pedido e o
+  // mesmo texto juridico de sempre: resposta gerada primeiro, literal por ultimo,
+  // para a pergunta fechada continuar sendo a ultima coisa que ele le.
+  if (entrada.campoFalta === "consentimento_duvida") {
+    return `${limpa}\n\n${textoConsentimento(entrada.primeiroNome)}`;
+  }
+  return limpa;
 }
 
 async function cerebroAdriana(
@@ -3807,6 +3890,23 @@ async function processarWebhook(
       };
     }
 
+    // GUARDAR TAMBEM E UM FATO. O pedido ficava so nas flags e nao aparecia em
+    // lugar nenhum para quem gera a fala, entao ela nao tinha base para dizer "seu
+    // pedido ficou guardado" e largava o cadastro para tratar do pedido na hora.
+    // So entra quando o pedido PASSOU A EXISTIR neste turno (`!pAtual`), senao o
+    // fato se repetiria a cada mensagem e ela ficaria avisando sempre a mesma coisa.
+    //
+    // O fato NAO promete futuro. Ele vive em flags2, nao na tabela `pedidos`, e
+    // some se a pessoa abandonar a conversa: dizer "vou atender quando o cadastro
+    // fechar" seria assumir um compromisso que o sistema nao garante. Diz o que
+    // aconteceu, que e ter ficado guardado, e para por ai.
+    if (!pAtual && flags2.pedido_pendente) {
+      const g = flags2.pedido_pendente as { tipo: string };
+      fatos.push(
+        `O pedido dele (${g.tipo}) ficou guardado nesta conversa. Isso é tudo o que aconteceu: nada foi registrado, nada foi para a programação e nada foi ao ar. Você pode dizer que guardou o pedido e pedir que ele aguarde, mas não diga quando vai acontecer nem prometa prazo.`,
+      );
+    }
+
     return {
       upd, flags2, ctxExtra, registrado, naoAproveitado, fatos,
       campoForcado, objetivoTexto, confirmacaoPendente, intencoes,
@@ -3888,9 +3988,10 @@ async function processarWebhook(
       campos: {},
       precisa_confirmar: false,
     };
-    const lida = ofensivo
-      ? { leitura: leituraOfensa, latenciaMs: 0, erro: null as string | null }
-      : await interpretarMensagem(
+    // Le `texto` na hora da chamada, e nao na hora da declaracao: a reconferencia
+    // logo abaixo pode ter aumentado a rajada entre uma passada e outra.
+    const interpretar = async () =>
+      await interpretarMensagem(
         await histLimpo(),
         {
           etapa,
@@ -3915,6 +4016,54 @@ async function processarWebhook(
         },
         texto,
       );
+
+    let lida = ofensivo
+      ? { leitura: leituraOfensa, latenciaMs: 0, erro: null as string | null }
+      : await interpretar();
+
+    // RECONFERENCIA DA RAJADA.
+    // O debounce so cobre os 2,5s anteriores a decisao. A janela real em que a
+    // pessoa continua digitando e MUITO maior: da hora em que a rajada fecha ate a
+    // mensagem sair sao uns 13s, quase todos gastos esperando os dois modelos.
+    // Caso medido em 31/08: "Tudo otimo / E voce? / Alexandre" fechou a rajada, e
+    // "Quero mandar um beijo pra uma pessoa" chegou 2,3s depois, ja com o Sonnet
+    // rodando. Virou turno separado e a Adriana pediu o consentimento duas vezes.
+    // Nao adianta esticar o debounce: isso atrasaria TODO turno, inclusive os que
+    // nao sao rajada. O que resolve e olhar de novo depois de interpretar, que e
+    // onde o tempo de verdade e gasto, e refazer a leitura com a fala inteira.
+    //
+    // LIMITE CONHECIDO, DE PROPOSITO: durante a SEGUNDA passada a janela reabre.
+    // Quem escrever mais uma linha nesse intervalo vai continuar caindo em turno
+    // separado, e esta certo assim: repetir sem teto e trocar resposta duplicada
+    // por resposta que nunca chega, e ficar sem resposta e pior. Uma repeticao.
+    if (!ofensivo) {
+      const atrasadas = await colherPendentes();
+      // Ofensa e droga tem porta propria e nao podem entrar pela juncao: o texto
+      // delas nunca vai a modelo nenhum. Se veio ofensa no atraso, nao junta nada
+      // e deixa o lote inteiro pendente, para o proximo worker tratar pela porta
+      // certa. Tudo ou nada, para nao sobrar meia rajada sem dono.
+      const ofensaNoAtraso = atrasadas.some((m) =>
+        listaContemTermo(m.texto, TERMOS_OFENSA) ||
+        listaContemTermo(m.texto, TERMOS_DROGAS)
+      );
+      if (atrasadas.length && !ofensaNoAtraso) {
+        texto = [texto, ...atrasadas.map((m) => m.texto)].join("\n");
+        msgIdsAtuais.push(...atrasadas.map((m) => m.id));
+        // O historico memoizado precisa cair: ele exclui a rajada ATUAL, e a rajada
+        // acabou de crescer. Sem isso as mensagens novas apareceriam duas vezes
+        // para o modelo, uma como historico e outra como mensagem da vez.
+        histBancoCache = null;
+        await db
+          .from("conversas")
+          .update({
+            ultima_mensagem_processada_em:
+              atrasadas[atrasadas.length - 1].criado_em,
+          })
+          .eq("id", conversaId);
+        console.log(`rajada reaberta: +${atrasadas.length} mensagem(ns)`);
+        lida = await interpretar();
+      }
+    }
 
     const l = lida.leitura;
     if (l) {
@@ -3954,9 +4103,23 @@ async function processarWebhook(
       // vence a proxima pergunta do roteiro: quem tem pergunta na mesa responde a
       // pergunta antes de abrir outra.
       if (ap.campoForcado) campoFalta = ap.campoForcado;
-      // "Pra quem e o recado" e perguntado na hora, nao no fim: quem acabou de
-      // pedir um beijo esta falando disso AGORA. Perde so para o consentimento.
-      if (faltaDestinatario) campoFalta = "destinatario_pedido";
+      // "PRA QUEM E O RECADO" SO DEPOIS DO CADASTRO FECHADO.
+      // Antes era perguntado na hora, com o argumento de que quem pediu um beijo
+      // esta falando disso agora. Na pratica o pedido SEQUESTRAVA o roteiro: a
+      // Adriana largava o cadastro no meio e ia atras do destinatario. Teste de
+      // 31/08: consentimento dado, ela pulou direto para "pra quem e o carinho?",
+      // e no turno seguinte pediu a data de nascimento da Juliana, que nao e
+      // ouvinte e nao tem cadastro. A ordem certa e reconhecer o pedido, guardar,
+      // completar o cadastro na ordem normal e so entao perguntar para quem e.
+      //
+      // A regua e a MESMA da linha logo acima, que ja decide quando o pedido pode
+      // ser registrado. Usar duas reguas diferentes para "da para atender agora?"
+      // e para "da para perguntar o destinatario?" abriria o buraco de perguntar
+      // algo que ainda nao pode ser usado. Sobre o acoplamento com o painel, ver o
+      // aviso no comentario de cadastroEstaCompleto.
+      if (faltaDestinatario && cadastroEstaCompleto(ouvNovo)) {
+        campoFalta = "destinatario_pedido";
+      }
 
       // BARREIRA DURA DO CONSENTIMENTO. Vence tudo, inclusive a duvida da leitura
       // e o pedido dele. Enquanto nao ha sim, o unico assunto pendente e esse.
@@ -4397,9 +4560,7 @@ async function processarWebhook(
         contexto: { flags: { ...flags, consentimento: false }, historico: [] },
       }).eq("id", conversaId);
       // 4. despedida por ultimo: unica mensagem sobrevivente, sem PII.
-      const msg =
-        "Sem problema, respeito totalmente a sua decisão! Apaguei aqui o que você me mandou e guardo só o registro de que você preferiu não seguir com o cadastro. É assim que a gente cumpre a LGPD, a Lei Geral de Proteção de Dados. Se mudar de ideia, é só me chamar por aqui que a gente continua 🙂";
-      await reply(phone, conversaId, radioId, msg);
+      await reply(phone, conversaId, radioId, TEXTO_DESPEDIDA_RECUSA);
       return new Response("ok", { status: 200 });
     }
 
