@@ -1742,11 +1742,19 @@ O que separa um pedido de uma conversa social é a INTENÇÃO de que aquilo vá 
 
 PEDIDO INCOMPLETO CONTINUA SENDO PEDIDO. Falta de destinatário, de título de música ou de qualquer outro detalhe NUNCA rebaixa um pedido para conversa social. O que faltou você deixa null no campo correspondente, e o sistema pergunta o resto depois. Rebaixar a intenção por causa do que falta apaga a informação e faz o ouvinte ser ignorado, que é o pior resultado possível.
 
+CORREÇÃO PODE VIR A QUALQUER MOMENTO, SOBRE QUALQUER CAMPO
+Um valor já gravado NÃO é definitivo. A pessoa corrige o que quiser, quando quiser, do jeito dela, e quase nunca avisa que está corrigindo. Compare sempre o que ela disse com o bloco JÁ GRAVADO NO CADASTRO. Se a mensagem deixa claro qual é o valor certo de um campo, você preenche esse campo com o valor certo, mesmo que já exista valor gravado, mesmo que a Adriana esteja perguntando outra coisa, e lista "correcao" nas intenções.
+
+Um valor gravado que é na verdade um pedaço solto de uma frase ("Quero", "Manda", "Oi", "Sim") é erro de captura de um turno anterior. Quando o valor de verdade aparecer, corrija sem hesitar: manter o erro faz a Adriana chamar a pessoa por um nome que ela já desmentiu, que é dos piores resultados possíveis.
+
 O QUE DEVOLVER
-Preencha os campos da ferramenta. Em campos, coloque APENAS os campos que esta mensagem permitiu preencher, com o valor lido, e nada mais: se a mensagem não preencheu nenhum, devolva um objeto vazio. Use exatamente os nomes de campo da lista acima. Em raciocinio, uma ou duas frases dizendo por que você leu assim, principalmente quando você decidiu que algo NÃO era um valor.`;
+Preencha os campos da ferramenta. Em campos, coloque APENAS os campos que esta mensagem permitiu preencher, com o valor lido, e nada mais: se a mensagem não preencheu nenhum, devolva um objeto vazio. Use exatamente os nomes de campo da lista acima. Em raciocinio, uma ou duas frases dizendo por que você leu assim, principalmente quando você decidiu que algo NÃO era um valor.
+
+Em o_que_ele_disse, escreva em UMA frase, com suas palavras, o que essa pessoa acabou de dizer e que precisa ser reconhecido na resposta. Não é resumo do cadastro, é o teor humano da mensagem: o que ela pediu, perguntou, corrigiu, elogiou, reclamou ou contou. Quem vai escrever a resposta lê essa frase para não deixar a pessoa falando sozinha. Se a mensagem for só o valor do campo pedido, diga isso mesmo.`;
 
 type Leitura = {
   raciocinio: string;
+  o_que_ele_disse: string;
   intencoes: string[];
   campo_atual_respondido: boolean;
   campos: Record<string, string>;
@@ -1768,6 +1776,11 @@ const FERRAMENTA_LEITURA = {
       raciocinio: {
         type: "string",
         description: "Uma ou duas frases explicando a leitura, em especial quando voce decidiu que algo NAO era um valor de campo.",
+      },
+      o_que_ele_disse: {
+        type: "string",
+        description:
+          "Em UMA frase, com suas palavras, o teor humano do que a pessoa acabou de dizer e que precisa ser reconhecido na resposta: o que ela pediu, perguntou, corrigiu, elogiou, reclamou ou contou. Quem escreve a resposta le isto para nao deixar a pessoa falando sozinha.",
       },
       intencoes: {
         type: "array",
@@ -1815,7 +1828,14 @@ const FERRAMENTA_LEITURA = {
       musica_titulo: { type: ["string", "null"] },
       musica_artista: { type: ["string", "null"] },
     },
-    required: ["raciocinio", "intencoes", "campo_atual_respondido", "campos", "precisa_confirmar"],
+    required: [
+      "raciocinio",
+      "o_que_ele_disse",
+      "intencoes",
+      "campo_atual_respondido",
+      "campos",
+      "precisa_confirmar",
+    ],
     additionalProperties: false,
   },
 };
@@ -1890,6 +1910,98 @@ ${mensagem}`;
   } catch (e) {
     return { leitura: null, latenciaMs: Date.now() - t0, erro: String(e) };
   }
+}
+
+// ===========================================================================
+// PASSO 4 do refactor: A FALA NASCE DO ENTENDIMENTO.
+//
+// Antes, a resposta era escolhida pelo campo que faltava: cada campo tinha a
+// sua frase, e o que o ouvinte dizia no meio era descartado. Agora a unidade de
+// geracao e a COSTURA entre o que ele acabou de dizer e o que ainda falta. O
+// campo faltante entra como INTENCAO ("voce precisa saber X"), nunca como frase
+// pronta, senao trocariamos 15 frases fixas por 15 frases geradas iguais.
+// ===========================================================================
+
+// Significado de cada campo, para a Adriana saber O QUE precisa descobrir sem
+// receber a pergunta pronta. E descricao de dominio, nao roteiro de fala.
+const SENTIDO_CAMPO: Record<string, string> = {
+  nome: "como a pessoa se chama",
+  data_nascimento: "a data de aniversário dela, com dia, mês e ano",
+  cidade: "o CEP da casa dela, que é como você descobre a cidade e o bairro",
+  // Quando ela ja recusou dar o CEP, o que falta e a cidade mesmo, em texto livre.
+  cidade_manual: "em que cidade ela mora",
+  bairro: "em que bairro ela mora",
+  numero: "o número da casa ou do prédio dela",
+  pedido_musica: "se ela quer pedir alguma música pra tocar",
+  estilo_musical: "qual estilo de música ela mais gosta",
+  radio_troca: "que outra rádio ela costuma ouvir",
+  programa_locutor: `o que ela mais gosta aqui na ${RADIO_LABEL}`,
+  concluido: "",
+};
+
+async function responderAdriana(entrada: {
+  historico: Turno[];
+  mensagem: string;
+  leitura: Leitura;
+  primeiroNome: string;
+  registrado: string[];
+  naoAproveitado: string[];
+  campoFalta: string;
+  jaSaudou: boolean;
+}): Promise<string | null> {
+  const l = entrada.leitura;
+  const hist = entrada.historico.length
+    ? entrada.historico.map((h) =>
+      `${h.de === "ouvinte" ? "Ouvinte" : "Você"}: ${h.texto}`
+    ).join("\n")
+    : "(esta é a primeira mensagem dele)";
+  const precisa = SENTIDO_CAMPO[entrada.campoFalta] ?? "";
+  const objetivo = entrada.campoFalta === "concluido" || !precisa
+    ? "O cadastro está completo. Você não precisa perguntar mais nada: agradeça e deixe a conversa aberta."
+    : `Falta você descobrir: ${precisa}.`;
+
+  const prompt = `Você é a Adriana, atendente da rádio ${RADIO_LABEL} no WhatsApp. Brasileira, simpática, animada, jeito de rádio. Português do Brasil com acentos corretos. NUNCA use travessão.
+
+A CONVERSA ATÉ AQUI
+${hist}
+
+A MENSAGEM QUE ELE ACABOU DE MANDAR
+"""${entrada.mensagem}"""
+
+O QUE VOCÊ ENTENDEU DESSA MENSAGEM
+${l.o_que_ele_disse}
+Leitura interna: ${l.raciocinio}
+${l.precisa_confirmar && l.confirmacao_sugerida ? `Você ficou em dúvida e precisa confirmar isto antes de seguir: ${l.confirmacao_sugerida}` : ""}
+${entrada.registrado.length ? `Você acabou de anotar no cadastro: ${entrada.registrado.join(", ")}.` : ""}
+${entrada.naoAproveitado.length ? `Você NÃO conseguiu aproveitar isto e ainda precisa: ${entrada.naoAproveitado.join(", ")}.` : ""}
+
+O QUE VOCÊ AINDA PRECISA
+${objetivo}
+
+COMO A SUA RESPOSTA SE ESCREVE
+Uma mensagem só, curta, de conversa, que faz DUAS coisas na MESMA fala:
+1. Responde de verdade o que ele acabou de dizer. Se ele pediu, reconheça o pedido. Se corrigiu, aceite a correção na hora e mostre que entendeu. Se perguntou, responda. Se elogiou ou brincou, retribua. Se desabafou, acolha em poucas palavras.
+2. E emenda naturalmente o que você ainda precisa saber.
+
+A COSTURA É A UNIDADE. Não existe frase pronta para cada campo: a mesma coisa que você precisa descobrir se pergunta de um jeito diferente conforme o que ele acabou de dizer. A pergunta tem que sair de dentro da resposta, como quem continua um assunto, não como quem lê um formulário.
+
+PROIBIDO, sem exceção:
+- Ignorar o que ele disse e só repetir a pergunta. Ser ignorado é o pior resultado possível para ele, pior do que você responder errado.
+- Repetir uma pergunta com as mesmas palavras que você já usou antes. Olhe a conversa acima e diga de outro jeito.
+- Chamar a pessoa por um nome que ela já corrigiu, ou insistir num dado que ela já desmentiu.
+- Recitar dados dele. Você NUNCA repete sobrenome, data de nascimento, cidade, bairro, número, estilo musical, rádio ou programa. O único dado que você pode falar é o primeiro nome dele, e só para chamá-lo. Não diga "já tenho aqui sua cidade" nem nada parecido.
+- Dizer que já anotou, já registrou ou já colocou no ar um pedido que ainda não foi feito. Você pode prometer que vai anotar, nunca afirmar que anotou.
+- Perguntar duas coisas de uma vez. Uma coisa por vez.
+- Emoji em excesso: no máximo um, e só se couber.
+
+${entrada.primeiroNome ? `O primeiro nome dele é "${entrada.primeiroNome}". Use com moderação, não em toda frase.` : "Você ainda não sabe o nome dele. Não invente nem use placeholder."}
+${entrada.jaSaudou ? "Vocês já estão conversando: não se apresente de novo e não cumprimente como se fosse o primeiro contato." : `Este é o primeiro contato: se apresente rapidinho como Adriana da ${RADIO_LABEL} antes de emendar.`}
+
+Responda APENAS com a mensagem que vai para o WhatsApp dele. Sem aspas, sem explicação, sem JSON.`;
+  const fala = await claudeTexto(prompt, 0.7);
+  if (!fala) return null;
+  const limpa = limparVazamentoJSON(fala).trim();
+  return limpa.length ? limpa : null;
 }
 
 async function cerebroAdriana(
@@ -2377,63 +2489,10 @@ async function processarWebhook(
     return histBancoCache;
   };
 
-  // ===== MODO SOMBRA (passo 2, TEMPORARIO) =====
-  // Interpreta a mensagem em paralelo e grava o resultado em interpretacoes.
-  // Nao altera nenhuma resposta: roda em segundo plano, e qualquer falha aqui e
-  // engolida de proposito. REMOVER este bloco junto com a tabela no passo 4.
-  if (isTexto && texto) {
-    const sombra = (async () => {
-      const t = await interpretarMensagem(
-        await histBanco(),
-        {
-          etapa,
-          campo_atual: camposFaltantes(ouvinte, flags)[0] ?? "",
-          campos_faltantes: camposFaltantes(ouvinte, flags),
-          dados_atuais: {
-            nome: ouvinte.nome,
-            data_nascimento: ouvinte.data_nascimento,
-            cidade: ouvinte.cidade,
-            bairro: ouvinte.bairro,
-            numero: ouvinte.numero,
-            estilo_musical: ouvinte.estilo_musical,
-            programa_locutor: ouvinte.programa_locutor,
-          },
-        },
-        texto,
-      );
-      await db.from("interpretacoes").insert({
-        radio_id: radioId,
-        ouvinte_id: ouvinteId,
-        conversa_id: conversaId,
-        // Ultima mensagem da rajada: e a linha que fecha o bloco que gerou o texto.
-        mensagem_id: msgIdsAtuais[msgIdsAtuais.length - 1] ?? null,
-        etapa,
-        texto,
-        leitura: t.leitura,
-        // O que a producao de hoje usa para decidir. A fala que ela de fato enviou
-        // sai da tabela mensagens, na linha "enviada" logo apos esta mensagem.
-        decisao_atual: {
-          campo_atual: camposFaltantes(ouvinte, flags)[0] ?? null,
-          campos_faltantes: camposFaltantes(ouvinte, flags),
-          cadastro_completo: cadastroEstaCompleto(ouvinte),
-        },
-        modelo: MODELO_INTERPRETE,
-        latencia_ms: t.latenciaMs,
-        erro: t.erro,
-      });
-    })().catch((e) => console.error(`sombra falhou: ${e}`));
-    const rt = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
-    // waitUntil mantem o isolate vivo depois do Response, para a sombra nao
-    // atrasar a resposta ao ouvinte nem ser morta no meio.
-    if (rt?.waitUntil) {
-      rt.waitUntil(sombra);
-    } else {
-      // Sem waitUntil o isolate pode morrer no meio e a sombra perder linhas.
-      // Nao mudamos para await, que atrasaria a resposta ao ouvinte; deixamos o
-      // aviso no log para nao dar tabela vazia sem explicacao.
-      console.error("sombra: EdgeRuntime.waitUntil indisponivel, gravacao pode se perder");
-    }
-  }
+  // O modo sombra do passo 2 saiu aqui: a interpretacao deixou de rodar em paralelo
+  // e passou a DECIDIR, no nucleo de entendimento mais abaixo. Manter os dois seria
+  // pagar duas vezes pelo mesmo Sonnet a cada mensagem. A tabela interpretacoes
+  // continua, agora como registro da decisao (leitura + fala escolhida).
 
   // Nao achou a musica na busca: a Adriana pede o nome de novo, sem inventar nada.
   async function reperguntarMusica(flagsBase: Record<string, unknown>) {
@@ -3717,6 +3776,249 @@ async function processarWebhook(
     }).eq("id", conversaId);
     await reply(phone, conversaId, radioId, msg);
     return new Response("ok", { status: 200 });
+  }
+
+  // ===== NUCLEO DE ENTENDIMENTO (passo 4) =====
+  // Toda resposta daqui para baixo nasce da LEITURA da conversa, nunca do campo que
+  // esta faltando. O campo faltante so diz o que ainda precisa ser descoberto; quem
+  // decide o que falar e o que foi entendido da mensagem.
+  //
+  // Grava os valores que a leitura trouxe, VALIDANDO cada um. A leitura propoe, o
+  // codigo deterministico confere: modelo nenhum escreve direto no cadastro. O que
+  // nao passa na validacao vira "nao aproveitado" e a Adriana pede de outro jeito,
+  // em vez de gravar lixo ou fingir que nao ouviu.
+  async function aplicarLeitura(l: Leitura): Promise<{
+    upd: Record<string, unknown>;
+    flags2: Record<string, unknown>;
+    registrado: string[];
+    naoAproveitado: string[];
+  }> {
+    const upd: Record<string, unknown> = {};
+    const flags2: Record<string, unknown> = { ...flags };
+    const registrado: string[] = [];
+    const naoAproveitado: string[] = [];
+    const campos = (l.campos ?? {}) as Record<string, string>;
+    const ler = (k: string) => (campos[k] ?? "").toString().trim();
+
+    // nome: mesmo filtro do caminho antigo. A diferenca e que agora ele pode
+    // SOBRESCREVER um nome ja gravado, que e o que faz a correcao funcionar.
+    const nomeLido = ler("nome");
+    if (nomeLido) {
+      const soLetras = nomeLido.replace(/[^A-Za-zÀ-ÿ]/g, "");
+      const valido = soLetras.length >= 2 && !pareceIntencao(nomeLido) &&
+        !SAUDACOES_NAO_NOME.has(normalizarSemAcento(nomeLido));
+      const nome = titleCasePtBr(nomeLido) || nomeLido;
+      if (valido && nome !== ouvinte.nome) {
+        upd.nome = nome;
+        delete flags2.nome_tentativas;
+        registrado.push("o nome dele");
+      } else if (!valido) {
+        naoAproveitado.push("o nome");
+      }
+    }
+
+    const dataLida = ler("data_nascimento");
+    if (dataLida) {
+      const iso = /^\d{4}-\d{2}-\d{2}$/.test(dataLida)
+        ? dataLida
+        : parseAniversario(dataLida);
+      const idade = iso ? calcularIdade(iso) : -1;
+      if (iso && idade >= 5 && idade <= 110) {
+        const { data: faixa } = await db.from("faixas_etarias").select("id")
+          .lte("idade_min", idade)
+          .or(`idade_max.gte.${idade},idade_max.is.null`)
+          .order("id").limit(1).maybeSingle();
+        upd.data_nascimento = iso;
+        upd.idade = idade;
+        upd.faixa_etaria = faixa?.id ?? null;
+        for (const k of ["aguardando_ano", "ano_tentativa", "data_tentativa", "aguardando_seculo", "data_dia", "data_mes", "data_ano19", "data_ano20"]) {
+          delete flags2[k];
+        }
+        registrado.push("a data de aniversário");
+      } else {
+        naoAproveitado.push("a data de aniversário completa, com dia, mês e ano");
+      }
+    }
+
+    const cidadeLida = ler("cidade");
+    if (cidadeLida && cidadeLida.replace(/[^A-Za-zÀ-ÿ]/g, "").length >= 2) {
+      upd.cidade = titleCasePtBr(cidadeLida);
+      registrado.push("a cidade");
+    }
+
+    const bairroLido = ler("bairro");
+    if (bairroLido && bairroLido.replace(/[^A-Za-zÀ-ÿ]/g, "").length >= 2) {
+      const cidadeAtual = (upd.cidade as string) ?? (ouvinte.cidade as string) ?? "";
+      if (normalizarSemAcento(cidadeAtual) === "sao paulo") {
+        const z = await resolverZonaCapital(bairroLido, null);
+        upd.bairro = z.bairro;
+        upd.zona = z.zona;
+      } else {
+        upd.bairro = titleCasePtBr(bairroLido);
+      }
+      registrado.push("o bairro");
+    }
+
+    const numeroLido = ler("numero");
+    if (numeroLido) {
+      const so = numeroLido.replace(/\D/g, "");
+      if (so.length >= 1 && so.length <= 6) {
+        upd.numero = so;
+        registrado.push("o número da casa");
+      } else {
+        naoAproveitado.push("o número da casa");
+      }
+    }
+
+    const estilo = ler("estilo_musical");
+    if (estilo && estilo.length >= 2) {
+      upd.estilo_musical = estilo.slice(0, 120);
+      registrado.push("o estilo musical");
+    }
+
+    const programa = ler("programa_locutor");
+    if (programa && programa.length >= 2) {
+      upd.programa_locutor = programa.slice(0, 200);
+      registrado.push("o programa favorito");
+    }
+
+    // Pedido no meio do cadastro: NAO e atendido agora (nenhum pedido e atendido com
+    // cadastro incompleto), mas fica GUARDADO para ser retomado quando o cadastro
+    // fechar. E o que impede o pedido de simplesmente evaporar.
+    const temPedido = (l.intencoes ?? []).includes("pedido_para_radio");
+    if (temPedido && !flags2.pedido_pendente) {
+      flags2.pedido_pendente = {
+        tipo: l.pedido_tipo === "musica" ? "musica" : (l.pedido_tipo ?? "outro"),
+        conteudo: l.pedido_conteudo ?? l.musica_titulo ?? null,
+        destinatario: l.pedido_destinatario ?? null,
+      };
+    }
+    return { upd, flags2, registrado, naoAproveitado };
+  }
+
+  const campoAtualPre = camposFaltantes(ouvinte, flags)[0];
+  // Faixa que o nucleo cobre. E exatamente a mesma que o despacho deterministico
+  // cobria, mais a abertura. Musica e radio_troca continuam nas pipelines proprias
+  // (busca em catalogo, confirmacao com o ouvinte), que serao o passo 5.
+  const CAMPOS_NUCLEO = new Set([
+    "nome", "data_nascimento", "cidade", "bairro", "numero",
+    "estilo_musical", "programa_locutor",
+  ]);
+  if (isTexto && texto && (CAMPOS_NUCLEO.has(campoAtualPre) || !jaSaudou)) {
+    const lida = await interpretarMensagem(
+      await histBanco(),
+      {
+        etapa,
+        campo_atual: campoAtualPre ?? "",
+        campos_faltantes: camposFaltantes(ouvinte, flags),
+        dados_atuais: {
+          nome: ouvinte.nome,
+          data_nascimento: ouvinte.data_nascimento,
+          cidade: ouvinte.cidade,
+          bairro: ouvinte.bairro,
+          numero: ouvinte.numero,
+          estilo_musical: ouvinte.estilo_musical,
+          programa_locutor: ouvinte.programa_locutor,
+        },
+      },
+      texto,
+    );
+    const l = lida.leitura;
+    if (l) {
+      const { upd, flags2, registrado, naoAproveitado } = await aplicarLeitura(l);
+      if (Object.keys(upd).length) {
+        await db.from("ouvintes").update(upd).eq("id", ouvinteId);
+      }
+      const ouvNovo = { ...ouvinte, ...upd };
+
+      // Cadastro fechou neste turno e havia pedido parado: o pedido vem antes do
+      // roteiro. Quem esperou pra mandar o beijo recebe o beijo, nao mais perguntas.
+      const pend = flags2.pedido_pendente as
+        | { tipo: string; conteudo: string | null; destinatario: string | null }
+        | undefined;
+      if (pend && !cadastroEstaCompleto(ouvinte) && cadastroEstaCompleto(ouvNovo)) {
+        const f2 = { ...flags2 };
+        delete f2.pedido_pendente;
+        await retomarPedido(ouvNovo, f2, pend);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Duvida real na leitura trava o avanco: confirmar e melhor do que chutar.
+      const prox = proximaPerguntaFaltante(ouvNovo, flags2);
+      let campoFalta = l.precisa_confirmar && l.confirmacao_sugerida
+        ? campoAtualPre
+        : prox.campo;
+      if (campoFalta === "cidade" && flags2.cep_desistiu === true) {
+        campoFalta = "cidade_manual";
+      }
+      const pnNovo = ((ouvNovo.nome as string) ?? "").trim().split(/\s+/)[0] || "";
+
+      const fala = await responderAdriana({
+        historico: await histBanco(),
+        mensagem: texto,
+        leitura: l,
+        primeiroNome: pnNovo,
+        registrado,
+        naoAproveitado,
+        campoFalta,
+        jaSaudou,
+      });
+
+      if (fala) {
+        // Endereco continua sendo capturado por CEP: a etapa muda junto com a fala.
+        const vaiPedirCep = campoFalta === "cidade" && flags2.cep_desistiu !== true;
+        const concluiu = campoFalta === "concluido";
+        let msg = fala;
+        if (concluiu && flags2.concluido !== true) {
+          flags2.concluido = true;
+          msg = `${msg} Ah, e segue a gente no Instagram: ${INSTAGRAM_URL}`;
+          await db.from("ouvintes").update({
+            participacoes: (ouvinte.participacoes ?? 0) + 1,
+          }).eq("id", ouvinteId);
+        }
+        const hist = pushHist(ctx.historico, texto, msg);
+        await db.from("conversas").update({
+          etapa: vaiPedirCep
+            ? "aguarda_cep"
+            : concluiu
+            ? "concluido"
+            : "cadastro",
+          contexto: {
+            ...ctx,
+            flags: { ...flags2, abertura_feita: true },
+            historico: hist,
+          },
+        }).eq("id", conversaId);
+        await reply(phone, conversaId, radioId, msg);
+        // Registro da decisao, para auditar leitura x fala nos testes reais.
+        await db.from("interpretacoes").insert({
+          radio_id: radioId,
+          ouvinte_id: ouvinteId,
+          conversa_id: conversaId,
+          mensagem_id: msgIdsAtuais[msgIdsAtuais.length - 1] ?? null,
+          etapa,
+          texto,
+          leitura: l,
+          decisao_atual: {
+            campo_atual: campoAtualPre ?? null,
+            campo_falta: campoFalta,
+            registrado,
+            nao_aproveitado: naoAproveitado,
+            fala: msg,
+          },
+          modelo: MODELO_INTERPRETE,
+          latencia_ms: lida.latenciaMs,
+          erro: null,
+        });
+        return new Response("ok", { status: 200 });
+      }
+      // Leu mas nao conseguiu falar: os valores lidos JA foram gravados acima, entao
+      // o caminho deterministico abaixo continua de onde a leitura parou.
+      ouvinte = ouvNovo;
+      console.error("nucleo: leitura ok mas geracao de fala falhou, caindo no deterministico");
+    } else {
+      console.error(`nucleo: sem leitura (${lida.erro}), caindo no deterministico`);
+    }
   }
 
   // ===== Abertura: no primeiro contato, se apresenta e pede o nome (texto fixo do roteiro) =====
