@@ -1628,7 +1628,9 @@ type Turno = { de: string; texto: string };
 async function carregarHistorico(
   ouvinteId: string,
   radioId: string,
-  excluirId: string | null,
+  // Ids da rajada ATUAL. Sao varios porque a pessoa manda a fala em partes, e o
+  // texto delas ja vai separado nos prompts como "nova mensagem do ouvinte".
+  excluirIds: string[],
   opcoes?: { turnos?: number; horas?: number; maxChars?: number },
 ): Promise<Turno[]> {
   const turnos = opcoes?.turnos ?? 60;
@@ -1648,7 +1650,7 @@ async function carregarHistorico(
   }
   const ids = (convs ?? []).map((c) => c.id as string);
   if (!ids.length) return [];
-  let q = db
+  const { data, error } = await db
     .from("mensagens")
     .select("id, direcao, conteudo, criado_em")
     .eq("radio_id", radioId)
@@ -1656,14 +1658,19 @@ async function carregarHistorico(
     .not("conteudo", "is", null)
     .gte("criado_em", desde)
     .order("criado_em", { ascending: false })
-    .limit(turnos);
-  if (excluirId) q = q.neq("id", excluirId);
-  const { data, error } = await q;
+    .limit(turnos + excluirIds.length);
   if (error) {
     console.error(`carregarHistorico mensagens falhou: ${error.code} ${error.message}`);
     return [];
   }
-  const linhas = (data ?? []) as { direcao?: string; conteudo?: string | null }[];
+  // Exclusao em JS, e nao na query: encadear um `not in` no builder do supabase-js
+  // estoura o limite de profundidade de tipos do TS (TS2589).
+  const excluir = new Set(excluirIds);
+  const linhas = ((data ?? []) as {
+    id?: string;
+    direcao?: string;
+    conteudo?: string | null;
+  }[]).filter((l) => !l.id || !excluir.has(l.id));
   const out: Turno[] = [];
   let total = 0;
   // linhas vem do mais novo pro mais velho; percorremos nessa ordem e damos unshift,
@@ -2010,7 +2017,53 @@ function intencaoProximoCampo(campo: string): string {
   }
 }
 
+// ===========================================================================
+// PASSO 3 do refactor: RAJADA.
+//
+// No WhatsApp a pessoa manda UMA fala em varias mensagens ("Alexandre", "Tudo
+// bem", "E voce"). Cada uma disparava um webhook proprio, e a Adriana respondia
+// tres vezes, cada resposta decidida sem saber das outras duas. Era a causa da
+// LGPD sair duas vezes e de a segunda parte da fala atropelar a primeira.
+//
+// A regra passa a ser: uma resposta por rajada, e a rajada inteira lida junta.
+// Duas pecas: uma trava por ouvinte (so um worker responde de cada vez) e um
+// debounce (espera a pessoa terminar de digitar antes de decidir).
+// ===========================================================================
+
+// Espera entre uma mensagem e a decisao. Reinicia a cada mensagem nova.
+const RAJADA_DEBOUNCE_MS = 2500;
+// Teto absoluto da espera: quem escreve sem parar recebe resposta mesmo assim.
+const RAJADA_TETO_MS = 10000;
+// Validade da trava. So existe para o caso de o worker morrer sem soltar.
+const RAJADA_LOCK_MS = 30000;
+// Quanto um worker espera pela vez antes de desistir e ficar calado.
+const RAJADA_ESPERA_MAX_MS = 20000;
+const RAJADA_POLL_MS = 500;
+
+// Ponteiro da trava. Fica FORA do handler porque as saidas dele sao dezenas de
+// `return new Response(...)`, e a trava precisa ser solta em todas elas.
+type TravaRajada = { ouvinteId: string | null };
+
+const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 Deno.serve(async (req: Request) => {
+  const trava: TravaRajada = { ouvinteId: null };
+  try {
+    return await processarWebhook(req, trava);
+  } finally {
+    if (trava.ouvinteId) {
+      await db
+        .from("ouvintes")
+        .update({ processamento_lock_ate: "-infinity" })
+        .eq("id", trava.ouvinteId);
+    }
+  }
+});
+
+async function processarWebhook(
+  req: Request,
+  trava: TravaRajada,
+): Promise<Response> {
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -2093,7 +2146,9 @@ Deno.serve(async (req: Request) => {
     .update({ ultimo_contato_em: new Date().toISOString() })
     .eq("id", ouvinteId);
 
-  const primeiroNome = (ouvinte.nome ?? "").trim().split(/\s+/)[0] ||
+  // `let` porque o portao da rajada recarrega o ouvinte: quem esperou a vez pode
+  // estar com um nome que o worker anterior acabou de gravar.
+  let primeiroNome = (ouvinte.nome ?? "").trim().split(/\s+/)[0] ||
     (ouvinte.nome ?? "");
 
   // Janela de 5 min: acha a conversa mais recente ANTES de atualizar atividade.
@@ -2192,6 +2247,115 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { status: 200 });
   }
 
+  // ===== PORTAO DA RAJADA =====
+  // Fica DEPOIS da gravacao da mensagem de proposito: a mensagem precisa estar no
+  // banco antes de qualquer espera, senao quem detem a trava nao enxerga a rajada
+  // se formando. Fica ANTES da leitura de `etapa` porque quem esperou pela vez
+  // esta com a conversa desatualizada: o worker anterior ja mexeu nela.
+
+  // Toma a vez com um UPDATE condicional: o proprio banco decide quem ganhou, e a
+  // linha so volta para quem ganhou. A coluna e NOT NULL com default '-infinity'
+  // justamente para a condicao ser um unico `lt`, sem `or`: se a condicao errasse,
+  // ninguem tomaria a trava e a Adriana ficaria muda.
+  const tentarTravar = async (): Promise<boolean> => {
+    const agora = new Date();
+    const { data } = await db
+      .from("ouvintes")
+      .update({
+        processamento_lock_ate: new Date(agora.getTime() + RAJADA_LOCK_MS)
+          .toISOString(),
+      })
+      .eq("id", ouvinteId)
+      .lt("processamento_lock_ate", agora.toISOString())
+      .select("id");
+    return !!data && data.length > 0;
+  };
+
+  // Quem perde a vez ESPERA, nao vai embora. Ir embora deixaria a ultima mensagem
+  // da rajada sem dono se ela chegasse depois de o vencedor ja ter lido o banco, e
+  // ser ignorado e o pior resultado possivel. Esperando, ele vira o dono do que
+  // sobrou; se nao sobrou nada, ele sai calado, que e o certo.
+  const limiteEspera = Date.now() + RAJADA_ESPERA_MAX_MS;
+  let travou = await tentarTravar();
+  while (!travou && Date.now() < limiteEspera) {
+    await dormir(RAJADA_POLL_MS);
+    travou = await tentarTravar();
+  }
+  if (!travou) return new Response("ok", { status: 200 });
+  trava.ouvinteId = ouvinteId;
+
+  // Le tudo que ainda nao foi considerado em nenhuma resposta.
+  const colherPendentes = async () => {
+    const { data: convMarcador } = await db
+      .from("conversas")
+      .select("ultima_mensagem_processada_em")
+      .eq("id", conversaId)
+      .maybeSingle();
+    const marcador =
+      (convMarcador?.ultima_mensagem_processada_em as string | null) ?? null;
+    let q = db
+      .from("mensagens")
+      .select("id, conteudo, criado_em")
+      .eq("conversa_id", conversaId)
+      .eq("direcao", "recebida")
+      .not("conteudo", "is", null)
+      .order("criado_em", { ascending: true });
+    if (marcador) q = q.gt("criado_em", marcador);
+    const { data } = await q;
+    return (data ?? [])
+      .map((m) => ({
+        id: m.id as string,
+        texto: ((m.conteudo as string) ?? "").trim(),
+        criado_em: m.criado_em as string,
+      }))
+      .filter((m) => m.texto.length > 0);
+  };
+
+  let pendentes = await colherPendentes();
+  // Nada pendente: outra invocacao ja absorveu esta mensagem na rajada dela.
+  // Responder de novo seria a Adriana falando duas vezes a mesma coisa.
+  if (!pendentes.length) return new Response("ok", { status: 200 });
+
+  // Debounce: enquanto continuar chegando mensagem, espera mais um pouco. E o que
+  // transforma tres webhooks em uma leitura so, com a fala inteira na mao.
+  const tetoRajada = Date.now() + RAJADA_TETO_MS;
+  while (Date.now() < tetoRajada) {
+    await dormir(RAJADA_DEBOUNCE_MS);
+    const novo = await colherPendentes();
+    const estabilizou = novo.length === pendentes.length;
+    pendentes = novo;
+    if (estabilizou) break;
+  }
+
+  // A rajada vira UMA fala. As partes vao em linhas separadas, na ordem em que
+  // foram digitadas, para o interpretador ver que sao pedacos e nao uma frase so.
+  const msgIdsAtuais = pendentes.map((m) => m.id);
+  texto = pendentes.map((m) => m.texto).join("\n");
+  isTexto = texto.length > 0;
+  await db
+    .from("conversas")
+    .update({
+      ultima_mensagem_processada_em: pendentes[pendentes.length - 1].criado_em,
+    })
+    .eq("id", conversaId);
+
+  // Recarrega ouvinte e conversa: enquanto este worker esperava a vez, o anterior
+  // pode ter gravado o nome, o consentimento ou trocado a etapa.
+  const { data: ouvinteFresco } = await db
+    .from("ouvintes")
+    .select("*")
+    .eq("id", ouvinteId)
+    .maybeSingle();
+  if (ouvinteFresco) ouvinte = ouvinteFresco;
+  const { data: conversaFresca } = await db
+    .from("conversas")
+    .select("*")
+    .eq("id", conversaId)
+    .maybeSingle();
+  if (conversaFresca) conversa = conversaFresca;
+  primeiroNome = (ouvinte.nome ?? "").trim().split(/\s+/)[0] ||
+    ((ouvinte.nome ?? "") as string);
+
   const etapa = conversa.etapa as string;
   const setEtapa = (e: string) =>
     db.from("conversas").update({ etapa: e }).eq("id", conversaId);
@@ -2208,7 +2372,7 @@ Deno.serve(async (req: Request) => {
   let histBancoCache: Turno[] | null = null;
   const histBanco = async (): Promise<Turno[]> => {
     if (!histBancoCache) {
-      histBancoCache = await carregarHistorico(ouvinteId, radioId, msgAtualId);
+      histBancoCache = await carregarHistorico(ouvinteId, radioId, msgIdsAtuais);
     }
     return histBancoCache;
   };
@@ -2241,7 +2405,8 @@ Deno.serve(async (req: Request) => {
         radio_id: radioId,
         ouvinte_id: ouvinteId,
         conversa_id: conversaId,
-        mensagem_id: msgAtualId,
+        // Ultima mensagem da rajada: e a linha que fecha o bloco que gerou o texto.
+        mensagem_id: msgIdsAtuais[msgIdsAtuais.length - 1] ?? null,
         etapa,
         texto,
         leitura: t.leitura,
@@ -3796,4 +3961,4 @@ Deno.serve(async (req: Request) => {
   }).eq("id", conversaId);
   await reply(phone, conversaId, radioId, resposta);
   return new Response("ok", { status: 200 });
-});
+}
