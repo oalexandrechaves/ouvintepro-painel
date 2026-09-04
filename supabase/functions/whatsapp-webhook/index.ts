@@ -1673,6 +1673,22 @@ Se você ainda não sabe para quem é o recado, isso é uma informação que fal
 A PROMESSA DE LEVAR SÓ EXISTE SE ESTIVER NOS FATOS. Dizer "vou levar para a programação" é afirmar que o recado foi registrado. Você só afirma isso quando o registro aparece no bloco de fatos acima, porque é ele que diz o que aconteceu de verdade. Se não estiver lá, nada foi guardado ainda: acolha o que ele disse, siga com o que você precisa, e não prometa nem diga que anotou.
 NUNCA diga que já anotou, já registrou, já mandou ou já colocou no ar um pedido que ainda não foi atendido. "Beijo mandado", "recado enviado", "já está no ar" são mentiras: nada disso aconteceu ainda. Você promete que vai levar para a programação, nunca afirma que já levou.`;
 
+// MESMO PADRAO DA CONSTANTE ACIMA, E PELO MESMO MOTIVO: regra que vale para toda
+// fala mora num lugar so e e interpolada em todo prompt que escreve fala.
+// Esta regra existia como decisao fechada e nao estava escrita em lugar NENHUM:
+// nem no prompt, nem na acolhida, nem no dicionario do interpretador, nem no
+// codigo. O que nao esta escrito nao vale, e no teste de 03/09 a Adriana disse
+// "Você está participando da promoção! 🎉" para quem so tinha dito que queria.
+// Ela nao inventou: o codigo tinha acabado de gravar uma participacao com a
+// parafrase da frase dela como nome da promocao, e o fato dizia que estava
+// registrada. A gravacao foi barrada; esta constante fecha o lado da fala.
+const REGRA_PARTICIPACAO_PROMOCAO =
+  `PROMOÇÃO SÓ EXISTE COM HASHTAG
+A participação numa promoção é registrada pela HASHTAG que ele manda, do tipo #nomedapromocao. É a hashtag que vale, e só ela. Querer participar não é participar.
+Enquanto a hashtag não chegar, ele NÃO está participando de nada, e você nunca diz que ele está participando, que entrou, que foi inscrito, que está concorrendo, que está valendo ou que você anotou a participação dele. Isso não aconteceu.
+Você não sabe quais promoções estão no ar. Nunca cite o nome de uma promoção, nunca sugira uma, nunca invente uma hashtag e nunca confirme uma que você não viu escrita na mensagem dele.
+Quando o registro acontecer de verdade, ele vai aparecer no bloco de fatos acima, e aí sim você confirma. Sem fato, sem confirmação.`;
+
 function pushHist(
   hist: unknown,
   ouvinteTexto: string,
@@ -2088,6 +2104,12 @@ const SENTIDO_CAMPO: Record<string, string> = {
   // e e perguntado pelo mesmo caminho de qualquer outro, sem estado novo.
   destinatario_pedido:
     "para quem é o recado que ela pediu. Diga que vai anotar o recado pra mandar no ar, pergunte pra quem é o recado, e convide ela a ficar ligada na rádio pra ouvir quando for",
+  // Pseudo-campo, irmao do destinatario_pedido: nao esta em camposFaltantes e nao
+  // e coluna de cadastro. Existe porque promocao sem hashtag nao pode ser gravada,
+  // entao falta um dado igual falta um CEP. Nao ha catalogo de promocoes vigentes
+  // no banco, entao ela NAO pode dizer quais existem nem sugerir nenhuma.
+  hashtag_promocao:
+    "qual é a hashtag da promoção que ela quer participar. Explique, com as suas palavras, que é a hashtag que registra a participação e que sem ela você não consegue inscrever ninguém. Você NÃO sabe quais promoções estão no ar: nunca cite, sugira nem invente o nome de uma promoção, e se ela não souber a hashtag diga que é só mandar assim que descobrir, no ar ou nas redes",
   pedido_musica: "se ela quer pedir alguma música pra tocar",
   estilo_musical: "qual estilo de música ela mais gosta",
   radio_troca: "que outra rádio ela costuma ouvir",
@@ -2182,6 +2204,8 @@ ${l.o_que_ele_disse}
 ${(entrada.fatos ?? []).length ? `\nO QUE JÁ ACONTECEU DE VERDADE AGORA (é fato, pode afirmar sem medo, e o que não estiver aqui você NÃO afirma)\n${(entrada.fatos ?? []).map((f) => `- ${f}`).join("\n")}\n` : ""}
 ${REGRA_PAPEL_RECADO}
 
+${REGRA_PARTICIPACAO_PROMOCAO}
+
 SUA ÚNICA TAREFA
 Escrever UMA FRASE CURTA que responda o que ele acabou de dizer. Uma frase só, no máximo vinte palavras. Não é uma mensagem, é uma frase.
 Logo depois da sua frase vai ser enviado, automaticamente, um texto fixo pedindo a autorização de cadastro. Você não escreve esse texto e não fala do assunto dele.
@@ -2209,7 +2233,13 @@ Responda APENAS com a frase. Sem aspas, sem explicação.`,
   const objetivo = momento
     ? momento
     : entrada.campoFalta === "concluido" || !precisa
-    ? "Não falta você descobrir mais nada dele. Não faça pergunta de cadastro nenhuma: responda o que ele disse, deixe a conversa aberta e mostre que ele pode pedir o que quiser por aqui."
+    // TERMINAR SEM PERGUNTA E O RESULTADO CERTO AQUI, e isso precisa estar dito.
+    // Dizer so "nao faca pergunta de cadastro" nao bastava: o resto do prompt
+    // inteiro ensina que toda mensagem costura resposta com pergunta, entao o
+    // gerador cacava uma pergunta que nao fosse "de cadastro" e inventava. Foi
+    // assim que nasceu "Qual é seu número de telefone?", duas vezes, no teste de
+    // 03/09 com campo_falta "concluido".
+    ? "Não falta você descobrir mais nada dele. O cadastro está fechado. Responda o que ele disse, deixe a conversa aberta e mostre que ele pode pedir o que quiser por aqui. NÃO faça pergunta nenhuma: nem de cadastro, nem para puxar assunto, nem para não deixar a mensagem sem pergunta. Terminar sem pergunta é exatamente o certo aqui."
     // "dela" nas descricoes de campo sempre quis dizer a ouvinte, mas o pronome fica
     // solto: depois de "o beijo e para a Juliana", o gerador amarrou o "dela" na
     // Juliana e pediu a data de nascimento DELA. O referente passa a vir amarrado
@@ -2238,6 +2268,8 @@ ${objetivo}
 
 ${REGRA_PAPEL_RECADO}
 
+${REGRA_PARTICIPACAO_PROMOCAO}
+
 O CADASTRO É SEMPRE DO OUVINTE, NUNCA DE OUTRA PESSOA
 Todo dado que você pede é da pessoa com quem você está falando. Se ela citou alguém, e ela cita o tempo todo (a mãe, a namorada, o amigo, o destinatário do recado), essa pessoa NÃO tem cadastro aqui e você nunca pergunta nada sobre ela: nem data de nascimento, nem cidade, nem bairro, nem número, nem estilo musical, nada. Quando ler "a data de aniversário dela" ou "em que cidade ela mora", "ela" é sempre a ouvinte, jamais a pessoa citada.
 
@@ -2261,6 +2293,8 @@ PROIBIDO, sem exceção:
 - Dizer que está acabando: "só falta", "só mais isso", "agora só preciso de um dado", "por último", "para finalizar", "última coisa". Você não sabe quanto falta e quase sempre falta mais, então essa promessa vira mentira na mensagem seguinte. Pergunte o que precisa sem dizer quanto falta.
 - Justificar a pergunta explicando para que serve o dado. Nada de "para as promoções", "para os sorteios", "para eu descobrir sua cidade", "para completar seu cadastro", "para você concorrer". O dado não é moeda de troca e a explicação soa a formulário. Se em algum momento couber justificar, a única razão que existe é que aquilo é importante para a rádio.
 - Usar "na" antes de bairro ou cidade. É sempre "em": "em Alphaville", "em Cerqueira César", "em Barra Funda", "em Santana de Parnaíba". Nunca "na Alphaville" nem "na Barra Funda".
+- Pedir o telefone, o número, o WhatsApp ou o contato dele. Vocês estão conversando PELO WhatsApp dele: o número já é seu desde a primeira mensagem, e está guardado. Perguntar isso é pedir uma coisa que você já tem e soa como se você não soubesse com quem está falando. Isso não é um campo do cadastro e nunca vai ser.
+- Pedir e-mail, CPF, RG, endereço completo, rede social ou qualquer dado que não esteja escrito acima como o que falta descobrir. Se não está no que falta, não se pergunta.
 
 ${entrada.primeiroNome ? `O primeiro nome dele é "${entrada.primeiroNome}". Use com moderação, não em toda frase.` : "Você ainda não sabe o nome dele. Não invente nem use placeholder."}
 ${entrada.jaSaudou ? "Vocês já estão conversando: não se apresente de novo e não cumprimente como se fosse o primeiro contato." : `Este é o primeiro contato: se apresente rapidinho como Adriana da ${RADIO_LABEL} antes de emendar.`}
@@ -2968,7 +3002,19 @@ async function processarWebhook(
       return;
     }
     if (p.tipo === "promocao") {
-      const nome = (p.conteudo ?? "").replace(/^#/, "").trim() || "promoção";
+      // Mesma barreira do registrarPedido do nucleo, pelo mesmo motivo: sem
+      // hashtag nao ha nome de promocao, e o fallback `|| "promoção"` gravava
+      // uma participacao fantasma em vez de perguntar. Aqui ela pergunta.
+      const nome = (p.conteudo ?? "").replace(/^#/, "").trim();
+      if (!nome) {
+        console.log("promocao sem hashtag: nada registrado");
+        await seguirComMensagem(
+          "Pra eu registrar sua participação eu preciso da hashtag da promoção, tipo #nomedapromocao. Assim que você mandar eu inscrevo na hora 🙂",
+          ouvAtual,
+          { ...flagsBase },
+        );
+        return;
+      }
       const { error } = await db.from("promocao_participacoes").insert({
         radio_id: radioId,
         ouvinte_id: ouvinteId,
@@ -3004,7 +3050,9 @@ async function processarWebhook(
     pend: { tipo: string; conteudo: string | null; destinatario: string | null },
   ) {
     const temConteudoServivel =
-      pend.tipo === "promocao" || pend.tipo === "premio" ||
+      // Promocao passou a exigir conteudo (a hashtag), igual musica e recado. Sem
+      // ela nao da para servir, entao cai no pedido aberto logo abaixo.
+      (pend.tipo === "promocao" && !!pend.conteudo) || pend.tipo === "premio" ||
       (pend.tipo === "musica" && !!pend.conteudo) ||
       (["abraco", "beijo", "alo", "camiseta", "outro"].includes(pend.tipo) && !!pend.conteudo);
     if (temConteudoServivel) {
@@ -3970,10 +4018,21 @@ async function processarWebhook(
     // silencio, e a Adriana prometeria levar assim mesmo. Trocar um falso positivo
     // visivel por um falso negativo invisivel e um mau negocio: ranking e
     // julgamento mole do interpretador e nao serve de portao duro.
+    // 4. PROMOCAO SO NASCE DE HASHTAG. A hashtag e sintaxe; querer participar e
+    //    linguagem. Sem este item, "Eu quero participar da promoção" chegava aqui
+    //    como pedido_tipo "promocao" com pedido_conteudo "Quer participar da
+    //    promoção" (o interpretador parafraseia quando o campo nao tem regra), e
+    //    essa parafrase virava o NOME da promocao no banco. Aconteceu de verdade:
+    //    promocao_participacoes d3ce6406, 03/09 13:03:45, promocao_nome "Quer
+    //    participar da promoção". O fato dizia "acabou de ser registrada" e o
+    //    gerador foi fiel ao fato: quem mentiu foi a gravacao, nao a fala.
+    //    Nao existe catalogo de promocoes vigentes em lugar nenhum do banco, entao
+    //    a hashtag e a UNICA fonte possivel do nome. Sem ela nao ha o que gravar.
     const conteudoPedido = (l.pedido_conteudo ?? "").trim();
     const ehPedidoDeVerdade = !!l.pedido_tipo && l.pedido_tipo !== "musica" &&
       intencoes.has("pedido_para_radio") &&
       !(l.pedido_tipo === "outro" && !conteudoPedido) &&
+      !(l.pedido_tipo === "promocao" && !hashtagPromo) &&
       !(!!conteudoPedido && consumidos.has(normalizarSemAcento(conteudoPedido)));
 
     if (hashtagPromo) {
@@ -3992,11 +4051,37 @@ async function processarWebhook(
     } else if (pAtual) {
       // Ele ja tinha um pedido parado e acrescentou o que faltava. Quem responde
       // "pra minha mae" esta completando o recado, nao fazendo um pedido novo.
+      //
+      // A PROMOCAO E A EXCECAO: o conteudo dela nunca pode ser preenchido pelo
+      // interpretador, so pela regex da hashtag. Se `l.pedido_conteudo` pudesse
+      // completar uma promocao aqui, a parafrase entraria pela porta dos fundos e
+      // o portao de cima teria sido inutil.
       flags2.pedido_pendente = {
         tipo: pAtual.tipo,
-        conteudo: pAtual.conteudo ?? l.pedido_conteudo ?? null,
+        conteudo: pAtual.tipo === "promocao"
+          ? (pAtual.conteudo || hashtagPromo || null)
+          : (pAtual.conteudo ?? l.pedido_conteudo ?? null),
         destinatario: pAtual.destinatario ?? l.pedido_destinatario ?? null,
       };
+    }
+
+    // B + C: A HASHTAG QUE FALTA E UM DADO QUE FALTA, IGUAL AO DESTINATARIO.
+    // Ele disse que quer participar e nao mandou hashtag. Nao existe pedido
+    // guardado (o portao acima impediu), entao nao ha nada para registrar e nada
+    // para prometer. O que existe e uma pergunta a fazer, e ela usa o mesmo
+    // mecanismo de campo forcado que o destinatario do recado ja usa: sem etapa
+    // nova, sem flag nova, sem estado que atravesse turno.
+    //
+    // E POR ISSO QUE ISTO NAO PRENDE NINGUEM. Como nada fica guardado, se ele nao
+    // mandar a hashtag no turno seguinte simplesmente nao ha promocao pendente:
+    // campoForcado volta vazio e proximaPerguntaFaltante retoma o roteiro normal.
+    // Ela pergunta UMA vez e segue a vida. Quem quiser participar depois manda a
+    // hashtag a qualquer momento, que a regex pega em qualquer posicao do texto.
+    if (l.pedido_tipo === "promocao" && !hashtagPromo && intencoes.has("pedido_para_radio")) {
+      campoForcado = "hashtag_promocao";
+      fatos.push(
+        `Ele falou em participar de promoção, mas não mandou nenhuma hashtag. NADA foi registrado e ele NÃO está participando de promoção nenhuma. Não diga que ele está participando, que você anotou nem que você inscreveu: nada disso aconteceu.`,
+      );
     }
 
     // O FATO DO PEDIDO GUARDADO NAO NASCE MAIS AQUI. Ele nascia neste ponto, com a
@@ -4020,7 +4105,27 @@ async function processarWebhook(
     p: { tipo: string; conteudo: string | null; destinatario: string | null },
   ): Promise<string> {
     if (p.tipo === "promocao") {
-      const nome = (p.conteudo ?? "").replace(/^#/, "").trim() || "promoção";
+      // SEGUNDA BARREIRA, INDEPENDENTE DO PORTAO LA DE CIMA. Se algum caminho
+      // futuro deixar passar uma promocao sem hashtag, ela morre aqui e nao vira
+      // linha no banco. Duas barreiras porque o custo do erro e assimetrico:
+      // participacao a menos o ouvinte reclama e a gente conserta; participacao
+      // fantasma com nome inventado envenena o sorteio em silencio.
+      //
+      // O FALLBACK `|| "promoção"` FOI REMOVIDO, era ele que transformava ausencia
+      // de dado em linha gravada. Nao existe caso em que registrar uma promocao
+      // chamada "promoção" seja a coisa certa.
+      //
+      // Nao ha flag de origem viajando junto do pedido, DE PROPOSITO: o
+      // pedido_pendente e reescrito com tres chaves fixas quando o ouvinte
+      // completa um pedido parado, entao qualquer chave extra seria descartada no
+      // round-trip do JSONB e a participacao seria bloqueada em silencio. Em vez
+      // disso, o proprio `conteudo` e a prova: para promocao ele so pode ter sido
+      // escrito pela regex da hashtag.
+      const nome = (p.conteudo ?? "").replace(/^#/, "").trim();
+      if (!nome) {
+        console.log("promocao sem hashtag: nada registrado");
+        return `Ele falou em promoção, mas não veio hashtag nenhuma, então NADA foi registrado e ele NÃO está participando. Peça a hashtag da promoção e explique que é ela que registra a participação.`;
+      }
       const { error } = await db.from("promocao_participacoes").insert({
         radio_id: radioId,
         ouvinte_id: ouvinteId,
@@ -4028,6 +4133,7 @@ async function processarWebhook(
       });
       if (error) {
         console.error(`promocao_participacoes insert falhou: ${error.code} ${error.message}`);
+        return `A participação dele na promoção ${nome} NÃO foi registrada, deu erro no sistema. Não diga que ele está participando. Peça desculpas e diga que ele pode mandar a hashtag de novo daqui a pouco.`;
       }
       return `A participação dele na promoção ${nome} acabou de ser registrada.`;
     }
