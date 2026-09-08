@@ -2144,6 +2144,63 @@ const SENTIDO_MOMENTO: Record<string, string> = {
     `A mensagem que ele mandou fala de droga ilegal, e você NÃO recebeu o texto dela de propósito. Não repita, não cite e não comente o que ele escreveu, porque você não leu. Diga com leveza que sobre isso você não fala, sem moralismo e sem sermão, e emende no que você precisa saber.`,
 };
 
+// TRAVA DE CODIGO DA ACOLHIDA DO CONSENTIMENTO.
+// O prompt da acolhida proibe terminar com pergunta. Em 07/09 01:21:55 ela
+// perguntou assim mesmo: "Qual e a musica que voce quer pedir? 🎵" saiu colada no
+// literal, que tambem pergunta, e a ouvinte respondeu a pergunta errada. O "sim"
+// que serve de prova de consentimento tem que ter UM dono, e duas perguntas na
+// mesma mensagem tiram o dono dele.
+// PROIBICAO EM PROMPT NAO E GARANTIA. Esta funcao e a garantia.
+//
+// Criterio 100% SINTATICO: a primeira "?" e onde a acolhida deixou de ser
+// acolhida. Nao ha lista de palavras e nao ha julgamento de conteudo. Corta na
+// primeira interrogacao e recua ate o fim da frase anterior, porque o pedaco entre
+// o ultimo terminador e a "?" E a pergunta.
+//
+// ACOLHIDA QUE TERMINA EM DOIS PONTOS E DESCARTADA INTEIRA, e a mensagem sai so
+// com o literal. E DELIBERADO: `:` e `;` nao sao terminadores aqui porque frase que
+// termina em dois pontos esta anunciando o que vem depois, e o que vem depois e
+// exatamente o que esta sendo cortado. Vale para todo caso em que nao sobra frase
+// inteira antes da "?". O custo aceito e perder a acolhida; o que nao se aceita,
+// nunca, e enviar duas perguntas.
+function cortarNaPrimeiraPergunta(frase: string): string {
+  const idx = frase.indexOf("?");
+  if (idx === -1) return frase.trim();
+  const antes = frase.slice(0, idx);
+  const ateOFim = antes.match(/[\s\S]*[.!…\n]/);
+  if (!ateOFim) return "";
+  const sobra = ateOFim[0]
+    // Espaco duplo nasce quando o corte tira o meio de uma linha.
+    .replace(/[ \t]{2,}/g, " ")
+    // Pontuacao de conexao orfa: o que ela conectava foi cortado.
+    .replace(/[\s,;:\-–—]+$/u, "")
+    .trim();
+  // Sobrou so emoji, pontuacao ou espaco: nao e frase, e lixo. Melhor nada.
+  if (!/\p{L}|\p{N}/u.test(sobra)) return "";
+  return sobra;
+}
+
+// O BLOCO DE FATOS NAO PODE SUMIR DO PROMPT, NEM QUANDO NAO HA FATO.
+// Ele era condicional nos dois prompts, entao `fatos: []` apagava a secao inteira.
+// So que REGRA_PAPEL_RECADO e REGRA_PARTICIPACAO_PROMOCAO dizem, as duas, "quando
+// aparecer no bloco de fatos ACIMA" e "sem fato, sem confirmacao". Sem o bloco, as
+// regras apontam para uma secao que nao existe no prompt: nao e silencio, e
+// referencia quebrada, e o gerador preenche o vazio com o historico.
+// Foi o que produziu, com fatos = [], "Vou levar seu pedido de Sara Camargo para a
+// programacao" (07/09 01:22:10, acolhida) e "Ja levo seu pedido para a programacao"
+// (01:22:40, consentimento_pausa). Nos dois turnos nada tinha sido gravado.
+// Agora a ausencia de fato E um fato, dito por extenso. Mesmo motivo do lembrete
+// positivo do pedido guardado: neste codigo, regra negativa sozinha ja falhou.
+function blocoDeFatos(fatos?: string[]): string {
+  const f = fatos ?? [];
+  const cabecalho =
+    "O QUE JÁ ACONTECEU DE VERDADE AGORA (é fato, pode afirmar sem medo, e o que não estiver aqui você NÃO afirma)";
+  if (!f.length) {
+    return `${cabecalho}\n- NADA. Neste turno o sistema não registrou nada, não guardou nada, não procurou nada, não levou nada para a programação e não colocou nada no ar. Não existe um único fato para você afirmar. Acolha o que ele disse e siga com o que você precisa, sem prometer que vai levar, sem dizer que anotou e sem dizer que já levou.`;
+  }
+  return `${cabecalho}\n${f.map((x) => `- ${x}`).join("\n")}`;
+}
+
 async function responderAdriana(entrada: {
   historico: Turno[];
   mensagem: string;
@@ -2201,7 +2258,9 @@ A MENSAGEM QUE ELE ACABOU DE MANDAR
 
 O QUE VOCÊ ENTENDEU DESSA MENSAGEM
 ${l.o_que_ele_disse}
-${(entrada.fatos ?? []).length ? `\nO QUE JÁ ACONTECEU DE VERDADE AGORA (é fato, pode afirmar sem medo, e o que não estiver aqui você NÃO afirma)\n${(entrada.fatos ?? []).map((f) => `- ${f}`).join("\n")}\n` : ""}
+
+${blocoDeFatos(entrada.fatos)}
+
 ${REGRA_PAPEL_RECADO}
 
 ${REGRA_PARTICIPACAO_PROMOCAO}
@@ -2222,7 +2281,12 @@ Responda APENAS com a frase. Sem aspas, sem explicação.`,
       0.7,
     );
     const literal = textoConsentimento(entrada.primeiroNome);
-    const frase = acolhida ? limparVazamentoJSON(acolhida).trim() : "";
+    // A trava vem DEPOIS da limpeza de JSON e ANTES da concatenacao: o literal
+    // precisa ser a unica pergunta da mensagem. Frase vazia cai no literal sozinho,
+    // caminho que este return ja sabia fazer.
+    const frase = acolhida
+      ? cortarNaPrimeiraPergunta(limparVazamentoJSON(acolhida).trim())
+      : "";
     return frase ? `${frase}\n\n${literal}` : literal;
   }
   const momento = SENTIDO_MOMENTO[entrada.campoFalta] ?? "";
@@ -2260,7 +2324,7 @@ Leitura interna: ${l.raciocinio}
 ${l.precisa_confirmar && l.confirmacao_sugerida && !pedeConsentimento ? `Você ficou em dúvida e precisa confirmar isto antes de seguir: ${l.confirmacao_sugerida}` : ""}
 ${entrada.registrado.length ? `Você acabou de anotar no cadastro: ${entrada.registrado.join(", ")}.` : ""}
 ${entrada.naoAproveitado.length ? `Você NÃO conseguiu aproveitar isto e ainda precisa: ${entrada.naoAproveitado.join(", ")}.` : ""}
-${(entrada.fatos ?? []).length ? `O QUE JÁ ACONTECEU DE VERDADE AGORA (é fato, pode afirmar sem medo, e o que não estiver aqui você NÃO afirma)\n${(entrada.fatos ?? []).map((f) => `- ${f}`).join("\n")}` : ""}
+${blocoDeFatos(entrada.fatos)}
 
 ${entrada.aviso ? `ANTES DE MAIS NADA\n${entrada.aviso}\n` : ""}
 O QUE VOCÊ AINDA PRECISA
@@ -3990,6 +4054,34 @@ async function processarWebhook(
         objetivoTexto =
           `qual música de ${titleCasePtBr(artista)} ele quer ouvir. Ele já disse quem canta, então não pergunte o cantor de novo. Se ele disser que tanto faz, você mesma escolhe uma`;
       }
+    }
+
+    // MUSICA PEDIDA COM O CONSENTIMENTO PENDENTE SAI DO NUCLEO MUDA, E MUDO E O
+    // UNICO ESTADO EM QUE A FALA MENTE. Este e o vao por onde a Sara passou.
+    // O pedido de musica nao produz fato NENHUM quando falta o aceite, e nao por
+    // esquecimento: por construcao, nos dois mecanismos ao mesmo tempo.
+    //   1. o bloco de musica acima exige `temConsentimento`, entao sem aceite o
+    //      catalogo nem e consultado e todo `fatos.push` de la fica inalcancavel;
+    //   2. o `pedido_pendente`, que tem o lembrete positivo do "esta guardado e
+    //      continua guardado", exclui musica por construcao: `ehPedidoDeVerdade`
+    //      exige `pedido_tipo !== "musica"`.
+    // Recado tem fato negativo, promocao sem hashtag tem fato negativo. Musica
+    // barrada pelo consentimento era o unico pedido que saia daqui sem nenhum, e o
+    // gerador preencheu o silencio: "Vou levar seu pedido de Sara Camargo para a
+    // programacao" (07/09 01:22:10) e "Ja levo seu pedido para a programacao"
+    // (01:22:40), as duas com fatos = [] e consentimento_em null.
+    // A condicao e a NEGACAO EXATA do gate acima, sobre o mesmo conjunto, para nao
+    // sobrar terceiro caminho entre os dois: ou a musica foi tratada la, ou o fato
+    // negativo sai aqui. Tudo vem de campo que o interpretador ja devolve.
+    // Isto NAO destrava nada e nao toca na barreira: nada e gravado, nada e
+    // guardado. So diz, por extenso, o que nao aconteceu.
+    if (
+      !temConsentimento && turnoDeMusica && !vazouDeOutroCampo &&
+      (tituloNovo || artistaNovo || (querQualquer && musPend))
+    ) {
+      fatos.push(
+        `Ele falou em pedir música, mas o cadastro dele ainda não foi autorizado. NADA aconteceu: você não procurou essa música, não anotou nada, não guardou o pedido e não levou nada para a programação. Não diga que vai levar, não diga que já levou, não diga que anotou e não prometa prazo. Reconheça que ele pediu, sem prometer nada, e siga com o que você precisa agora.`,
+      );
     }
 
     // PEDIDO no meio do cadastro: NAO e atendido agora (nenhum pedido e atendido
