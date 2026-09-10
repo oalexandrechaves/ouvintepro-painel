@@ -146,3 +146,33 @@
 ::-webkit-scrollbar-thumb:hover {
   background: linear-gradient(#ff3d81, #22d3ee);
 }
+
+/* IMPRESSAO DA PECA DE CAMPANHA.
+   O documento e gerado assim, e nao por biblioteca de PDF: o dialogo do
+   navegador ja oferece "Salvar como PDF", entao um botao cobre imprimir e
+   baixar, sem dependencia nova e sem problema de acentuacao por fonte
+   embutida. `visibility` em vez de `display` preserva o layout do que fica. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .orb,
+  .noise {
+    display: none !important;
+  }
+}

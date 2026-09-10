@@ -41,3 +41,21 @@ export const sessionCookieOptions = {
   path: "/",
   maxAge: MAX_AGE,
 };
+
+// Nome do usuario logado, para a area de usuario da barra lateral.
+// ADITIVA: nao altera sessaoValida, criarSessao nem credenciaisValidas, que
+// continuam sendo o caminho de autenticacao. Recebe o token em vez de ler o
+// cookie sozinha porque este modulo tambem roda no middleware (edge), onde
+// next/headers nao existe. Quem le o cookie e o layout.
+export async function usuarioDaSessao(
+  token: string | undefined,
+): Promise<string | null> {
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify(token, getSecret());
+    const u = payload.user;
+    return typeof u === "string" && u.trim() ? u.trim() : null;
+  } catch {
+    return null;
+  }
+}

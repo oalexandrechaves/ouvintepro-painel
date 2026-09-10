@@ -1628,7 +1628,9 @@ type Turno = { de: string; texto: string };
 async function carregarHistorico(
   ouvinteId: string,
   radioId: string,
-  excluirId: string | null,
+  // Ids da rajada ATUAL. Sao varios porque a pessoa manda a fala em partes, e o
+  // texto delas ja vai separado nos prompts como "nova mensagem do ouvinte".
+  excluirIds: string[],
   opcoes?: { turnos?: number; horas?: number; maxChars?: number },
 ): Promise<Turno[]> {
   const turnos = opcoes?.turnos ?? 60;
@@ -1648,7 +1650,7 @@ async function carregarHistorico(
   }
   const ids = (convs ?? []).map((c) => c.id as string);
   if (!ids.length) return [];
-  let q = db
+  const { data, error } = await db
     .from("mensagens")
     .select("id, direcao, conteudo, criado_em")
     .eq("radio_id", radioId)
@@ -1656,14 +1658,19 @@ async function carregarHistorico(
     .not("conteudo", "is", null)
     .gte("criado_em", desde)
     .order("criado_em", { ascending: false })
-    .limit(turnos);
-  if (excluirId) q = q.neq("id", excluirId);
-  const { data, error } = await q;
+    .limit(turnos + excluirIds.length);
   if (error) {
     console.error(`carregarHistorico mensagens falhou: ${error.code} ${error.message}`);
     return [];
   }
-  const linhas = (data ?? []) as { direcao?: string; conteudo?: string | null }[];
+  // Exclusao em JS, e nao na query: encadear um `not in` no builder do supabase-js
+  // estoura o limite de profundidade de tipos do TS (TS2589).
+  const excluir = new Set(excluirIds);
+  const linhas = ((data ?? []) as {
+    id?: string;
+    direcao?: string;
+    conteudo?: string | null;
+  }[]).filter((l) => !l.id || !excluir.has(l.id));
   const out: Turno[] = [];
   let total = 0;
   // linhas vem do mais novo pro mais velho; percorremos nessa ordem e damos unshift,
@@ -1735,11 +1742,22 @@ O que separa um pedido de uma conversa social é a INTENÇÃO de que aquilo vá 
 
 PEDIDO INCOMPLETO CONTINUA SENDO PEDIDO. Falta de destinatário, de título de música ou de qualquer outro detalhe NUNCA rebaixa um pedido para conversa social. O que faltou você deixa null no campo correspondente, e o sistema pergunta o resto depois. Rebaixar a intenção por causa do que falta apaga a informação e faz o ouvinte ser ignorado, que é o pior resultado possível.
 
+CONSENTIMENTO É BARREIRA, NÃO É ETAPA DO ROTEIRO
+Enquanto a pessoa não tiver autorizado expressamente a guarda dos dados dela, o sistema NÃO grava campo nenhum de cadastro, por mais correta que seja a sua leitura. Continue lendo e preenchendo normalmente o que ela disser, porque ler não é gravar e a informação pode ser reaproveitada depois do aceite. Só não conte com nada disso como coletado, e nunca sugira seguir para o próximo dado antes da autorização.
+
+CORREÇÃO PODE VIR A QUALQUER MOMENTO, SOBRE QUALQUER CAMPO
+Um valor já gravado NÃO é definitivo. A pessoa corrige o que quiser, quando quiser, do jeito dela, e quase nunca avisa que está corrigindo. Compare sempre o que ela disse com o bloco JÁ GRAVADO NO CADASTRO. Se a mensagem deixa claro qual é o valor certo de um campo, você preenche esse campo com o valor certo, mesmo que já exista valor gravado, mesmo que a Adriana esteja perguntando outra coisa, e lista "correcao" nas intenções.
+
+Um valor gravado que é na verdade um pedaço solto de uma frase ("Quero", "Manda", "Oi", "Sim") é erro de captura de um turno anterior. Quando o valor de verdade aparecer, corrija sem hesitar: manter o erro faz a Adriana chamar a pessoa por um nome que ela já desmentiu, que é dos piores resultados possíveis.
+
 O QUE DEVOLVER
-Preencha os campos da ferramenta. Em campos, coloque APENAS os campos que esta mensagem permitiu preencher, com o valor lido, e nada mais: se a mensagem não preencheu nenhum, devolva um objeto vazio. Use exatamente os nomes de campo da lista acima. Em raciocinio, uma ou duas frases dizendo por que você leu assim, principalmente quando você decidiu que algo NÃO era um valor.`;
+Preencha os campos da ferramenta. Em campos, coloque APENAS os campos que esta mensagem permitiu preencher, com o valor lido, e nada mais: se a mensagem não preencheu nenhum, devolva um objeto vazio. Use exatamente os nomes de campo da lista acima. Em raciocinio, uma ou duas frases dizendo por que você leu assim, principalmente quando você decidiu que algo NÃO era um valor.
+
+Em o_que_ele_disse, escreva em UMA frase, com suas palavras, o que essa pessoa acabou de dizer e que precisa ser reconhecido na resposta. Não é resumo do cadastro, é o teor humano da mensagem: o que ela pediu, perguntou, corrigiu, elogiou, reclamou ou contou. Quem vai escrever a resposta lê essa frase para não deixar a pessoa falando sozinha. Se a mensagem for só o valor do campo pedido, diga isso mesmo.`;
 
 type Leitura = {
   raciocinio: string;
+  o_que_ele_disse: string;
   intencoes: string[];
   campo_atual_respondido: boolean;
   campos: Record<string, string>;
@@ -1761,6 +1779,11 @@ const FERRAMENTA_LEITURA = {
       raciocinio: {
         type: "string",
         description: "Uma ou duas frases explicando a leitura, em especial quando voce decidiu que algo NAO era um valor de campo.",
+      },
+      o_que_ele_disse: {
+        type: "string",
+        description:
+          "Em UMA frase, com suas palavras, o teor humano do que a pessoa acabou de dizer e que precisa ser reconhecido na resposta: o que ela pediu, perguntou, corrigiu, elogiou, reclamou ou contou. Quem escreve a resposta le isto para nao deixar a pessoa falando sozinha.",
       },
       intencoes: {
         type: "array",
@@ -1798,17 +1821,35 @@ const FERRAMENTA_LEITURA = {
         type: ["string", "null"],
         description: "Pergunta curta que resolveria a duvida. Preencha so quando precisa_confirmar for true.",
       },
+      // Este enum e o MESMO vocabulario que a tabela pedidos e o servirPedido usam.
+      // Enquanto ele foi diferente ("recado"), o pedido lido corretamente nao era
+      // reconhecido na hora de servir e evaporava. Um vocabulario so.
       pedido_tipo: {
         type: ["string", "null"],
-        enum: ["musica", "recado", "dedicatoria", "aviso", "outro", null],
-        description: "Tipo do pedido feito A RADIO. null quando nao ha pedido.",
+        enum: [
+          "musica", "abraco", "beijo", "alo", "promocao", "premio", "camiseta",
+          "outro", null,
+        ],
+        description:
+          "Tipo do pedido feito A RADIO. null quando nao ha pedido. abraco, beijo e alo sao RECADOS que a radio manda no ar PARA OUTRA PESSOA (a Adriana nunca e a destinataria); escolha o gesto que ele pediu. promocao e querer participar de sorteio; premio e sobre premio ja ganho; camiseta e brinde da radio.",
       },
       pedido_conteudo: { type: ["string", "null"], description: "O que a radio deve colocar no ar." },
-      pedido_destinatario: { type: ["string", "null"], description: "Para quem e o recado, quando ele disser." },
+      pedido_destinatario: {
+        type: ["string", "null"],
+        description:
+          "Para quem e o recado, com as palavras dele (\"minha mae\", \"Joao\", \"a Flavia\"). null quando ele ainda nao disse. NUNCA preencha com a Adriana nem com a radio: o recado nunca e para elas.",
+      },
       musica_titulo: { type: ["string", "null"] },
       musica_artista: { type: ["string", "null"] },
     },
-    required: ["raciocinio", "intencoes", "campo_atual_respondido", "campos", "precisa_confirmar"],
+    required: [
+      "raciocinio",
+      "o_que_ele_disse",
+      "intencoes",
+      "campo_atual_respondido",
+      "campos",
+      "precisa_confirmar",
+    ],
     additionalProperties: false,
   },
 };
@@ -1883,6 +1924,108 @@ ${mensagem}`;
   } catch (e) {
     return { leitura: null, latenciaMs: Date.now() - t0, erro: String(e) };
   }
+}
+
+// ===========================================================================
+// PASSO 4 do refactor: A FALA NASCE DO ENTENDIMENTO.
+//
+// Antes, a resposta era escolhida pelo campo que faltava: cada campo tinha a
+// sua frase, e o que o ouvinte dizia no meio era descartado. Agora a unidade de
+// geracao e a COSTURA entre o que ele acabou de dizer e o que ainda falta. O
+// campo faltante entra como INTENCAO ("voce precisa saber X"), nunca como frase
+// pronta, senao trocariamos 15 frases fixas por 15 frases geradas iguais.
+// ===========================================================================
+
+// Significado de cada campo, para a Adriana saber O QUE precisa descobrir sem
+// receber a pergunta pronta. E descricao de dominio, nao roteiro de fala.
+const SENTIDO_CAMPO: Record<string, string> = {
+  nome: "como a pessoa se chama",
+  data_nascimento: "a data de aniversário dela, com dia, mês e ano",
+  cidade: "o CEP da casa dela, que é como você descobre a cidade e o bairro",
+  // Quando ela ja recusou dar o CEP, o que falta e a cidade mesmo, em texto livre.
+  cidade_manual: "em que cidade ela mora",
+  bairro: "em que bairro ela mora",
+  numero: "o número da casa ou do prédio dela",
+  pedido_musica: "se ela quer pedir alguma música pra tocar",
+  estilo_musical: "qual estilo de música ela mais gosta",
+  radio_troca: "que outra rádio ela costuma ouvir",
+  programa_locutor: `o que ela mais gosta aqui na ${RADIO_LABEL}`,
+  concluido: "",
+};
+
+async function responderAdriana(entrada: {
+  historico: Turno[];
+  mensagem: string;
+  leitura: Leitura;
+  primeiroNome: string;
+  registrado: string[];
+  naoAproveitado: string[];
+  campoFalta: string;
+  jaSaudou: boolean;
+}): Promise<string | null> {
+  const l = entrada.leitura;
+  const hist = entrada.historico.length
+    ? entrada.historico.map((h) =>
+      `${h.de === "ouvinte" ? "Ouvinte" : "Você"}: ${h.texto}`
+    ).join("\n")
+    : "(esta é a primeira mensagem dele)";
+  const pedeConsentimento = entrada.campoFalta === "consentimento";
+  const precisa = SENTIDO_CAMPO[entrada.campoFalta] ?? "";
+  const objetivo = pedeConsentimento
+    ? `Você ainda NÃO tem a autorização dele para guardar os dados dele, e sem ela você não pode registrar nada. É isso, e só isso, que falta nesta mensagem: pedir essa autorização. Diga com todas as letras que é para fazer o cadastro dele para as promoções, que os dados ficam protegidos de acordo com a LGPD, a Lei Geral de Proteção de Dados, e termine com uma pergunta que ele responda com sim ou não. NÃO pergunte nenhum outro dado agora, nem data, nem CEP, nem cidade, nem número. Este é o momento mais sério da conversa: seja simpática, mas trate a autorização com seriedade, nunca como formalidade boba ou detalhe pequeno.`
+    : entrada.campoFalta === "concluido" || !precisa
+    ? "O cadastro está completo. Você não precisa perguntar mais nada: agradeça e deixe a conversa aberta."
+    : `Falta você descobrir: ${precisa}. Peça exatamente isso, inteiro, sem encurtar. Se está escrito que precisa de dia, mês e ano, peça os três, nunca só parte.`;
+
+  const prompt = `Você é a Adriana, atendente da rádio ${RADIO_LABEL} no WhatsApp. Brasileira, simpática, animada, jeito de rádio. Português do Brasil com acentos corretos. NUNCA use travessão.
+
+A CONVERSA ATÉ AQUI
+${hist}
+
+A MENSAGEM QUE ELE ACABOU DE MANDAR
+"""${entrada.mensagem}"""
+
+O QUE VOCÊ ENTENDEU DESSA MENSAGEM
+${l.o_que_ele_disse}
+Leitura interna: ${l.raciocinio}
+${l.precisa_confirmar && l.confirmacao_sugerida && !pedeConsentimento ? `Você ficou em dúvida e precisa confirmar isto antes de seguir: ${l.confirmacao_sugerida}` : ""}
+${entrada.registrado.length ? `Você acabou de anotar no cadastro: ${entrada.registrado.join(", ")}.` : ""}
+${entrada.naoAproveitado.length ? `Você NÃO conseguiu aproveitar isto e ainda precisa: ${entrada.naoAproveitado.join(", ")}.` : ""}
+
+O QUE VOCÊ AINDA PRECISA
+${objetivo}
+
+PEDIDO É PARA O AR, VOCÊ NUNCA É A DESTINATÁRIA
+Beijo, abraço, alô, salve e dedicatória são RECADOS que ele quer que a rádio mande para OUTRA PESSOA, no ar, na programação. Ele não está mandando carinho para você. Você é quem leva o recado até a programação, nunca quem recebe. Então nunca responda como se o carinho fosse seu, nunca agradeça por ele, e nunca use "que lindo", "que romântico", "que fofo" ou parecido como quem foi presenteada.
+Se você ainda não sabe para quem é o recado, isso é uma informação que falta e que você vai precisar depois. Reconheça o recado como recado, deixe claro que vai levar para a programação, e siga com o que você precisa agora.
+
+COMO A SUA RESPOSTA SE ESCREVE
+Uma mensagem só, curta, de conversa, que faz DUAS coisas na MESMA fala:
+1. Responde de verdade o que ele acabou de dizer. Se ele pediu, reconheça o pedido. Se corrigiu, aceite a correção na hora e mostre que entendeu. Se perguntou, responda. Se elogiou ou brincou, retribua. Se desabafou, acolha em poucas palavras.
+2. E emenda naturalmente o que você ainda precisa saber.
+
+A COSTURA É A UNIDADE. Não existe frase pronta para cada campo: a mesma coisa que você precisa descobrir se pergunta de um jeito diferente conforme o que ele acabou de dizer. A pergunta tem que sair de dentro da resposta, como quem continua um assunto, não como quem lê um formulário.
+
+PROIBIDO, sem exceção:
+- Ignorar o que ele disse e só repetir a pergunta. Ser ignorado é o pior resultado possível para ele, pior do que você responder errado.
+- Repetir uma pergunta com as mesmas palavras que você já usou antes. Olhe a conversa acima e diga de outro jeito.
+- Chamar a pessoa por um nome que ela já corrigiu, ou insistir num dado que ela já desmentiu.
+- Recitar dados dele. Você NUNCA repete sobrenome, data de nascimento, cidade, bairro, número, estilo musical, rádio ou programa. O único dado que você pode falar é o primeiro nome dele, e só para chamá-lo. Não diga "já tenho aqui sua cidade" nem nada parecido.
+- Dizer que já anotou, já registrou, já mandou ou já colocou no ar um pedido que ainda não foi atendido. "Beijo mandado", "recado enviado", "já está no ar" são mentiras: nada disso aconteceu ainda. Você promete que vai levar para a programação, nunca afirma que já levou.
+- Perguntar duas coisas de uma vez. Uma coisa por vez.
+- Emoji em excesso: no máximo um, e só se couber.
+- Diminutivo no cadastro ou nos dados. Nada de "cadastrinho", "dadinhos", "coisinha", "perguntinha". O cadastro é coisa séria e o diminutivo tira a seriedade dele justamente na hora em que você pede autorização para guardar dado pessoal.
+- Exagero. Nada de "demais", "muito muito", superlativo empilhado nem duas exclamações na mesma frase. Você é simpática e animada sem ser exagerada: no máximo um adjetivo entusiasmado por mensagem.
+- Encurtar o que você precisa descobrir para a pergunta ficar mais curta.
+
+${entrada.primeiroNome ? `O primeiro nome dele é "${entrada.primeiroNome}". Use com moderação, não em toda frase.` : "Você ainda não sabe o nome dele. Não invente nem use placeholder."}
+${entrada.jaSaudou ? "Vocês já estão conversando: não se apresente de novo e não cumprimente como se fosse o primeiro contato." : `Este é o primeiro contato: se apresente rapidinho como Adriana da ${RADIO_LABEL} antes de emendar.`}
+
+Responda APENAS com a mensagem que vai para o WhatsApp dele. Sem aspas, sem explicação, sem JSON.`;
+  const fala = await claudeTexto(prompt, 0.7);
+  if (!fala) return null;
+  const limpa = limparVazamentoJSON(fala).trim();
+  return limpa.length ? limpa : null;
 }
 
 async function cerebroAdriana(
@@ -2010,7 +2153,53 @@ function intencaoProximoCampo(campo: string): string {
   }
 }
 
+// ===========================================================================
+// PASSO 3 do refactor: RAJADA.
+//
+// No WhatsApp a pessoa manda UMA fala em varias mensagens ("Alexandre", "Tudo
+// bem", "E voce"). Cada uma disparava um webhook proprio, e a Adriana respondia
+// tres vezes, cada resposta decidida sem saber das outras duas. Era a causa da
+// LGPD sair duas vezes e de a segunda parte da fala atropelar a primeira.
+//
+// A regra passa a ser: uma resposta por rajada, e a rajada inteira lida junta.
+// Duas pecas: uma trava por ouvinte (so um worker responde de cada vez) e um
+// debounce (espera a pessoa terminar de digitar antes de decidir).
+// ===========================================================================
+
+// Espera entre uma mensagem e a decisao. Reinicia a cada mensagem nova.
+const RAJADA_DEBOUNCE_MS = 2500;
+// Teto absoluto da espera: quem escreve sem parar recebe resposta mesmo assim.
+const RAJADA_TETO_MS = 10000;
+// Validade da trava. So existe para o caso de o worker morrer sem soltar.
+const RAJADA_LOCK_MS = 30000;
+// Quanto um worker espera pela vez antes de desistir e ficar calado.
+const RAJADA_ESPERA_MAX_MS = 20000;
+const RAJADA_POLL_MS = 500;
+
+// Ponteiro da trava. Fica FORA do handler porque as saidas dele sao dezenas de
+// `return new Response(...)`, e a trava precisa ser solta em todas elas.
+type TravaRajada = { ouvinteId: string | null };
+
+const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 Deno.serve(async (req: Request) => {
+  const trava: TravaRajada = { ouvinteId: null };
+  try {
+    return await processarWebhook(req, trava);
+  } finally {
+    if (trava.ouvinteId) {
+      await db
+        .from("ouvintes")
+        .update({ processamento_lock_ate: "-infinity" })
+        .eq("id", trava.ouvinteId);
+    }
+  }
+});
+
+async function processarWebhook(
+  req: Request,
+  trava: TravaRajada,
+): Promise<Response> {
   let body: Record<string, unknown>;
   try {
     body = await req.json();
@@ -2093,7 +2282,9 @@ Deno.serve(async (req: Request) => {
     .update({ ultimo_contato_em: new Date().toISOString() })
     .eq("id", ouvinteId);
 
-  const primeiroNome = (ouvinte.nome ?? "").trim().split(/\s+/)[0] ||
+  // `let` porque o portao da rajada recarrega o ouvinte: quem esperou a vez pode
+  // estar com um nome que o worker anterior acabou de gravar.
+  let primeiroNome = (ouvinte.nome ?? "").trim().split(/\s+/)[0] ||
     (ouvinte.nome ?? "");
 
   // Janela de 5 min: acha a conversa mais recente ANTES de atualizar atividade.
@@ -2192,6 +2383,115 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { status: 200 });
   }
 
+  // ===== PORTAO DA RAJADA =====
+  // Fica DEPOIS da gravacao da mensagem de proposito: a mensagem precisa estar no
+  // banco antes de qualquer espera, senao quem detem a trava nao enxerga a rajada
+  // se formando. Fica ANTES da leitura de `etapa` porque quem esperou pela vez
+  // esta com a conversa desatualizada: o worker anterior ja mexeu nela.
+
+  // Toma a vez com um UPDATE condicional: o proprio banco decide quem ganhou, e a
+  // linha so volta para quem ganhou. A coluna e NOT NULL com default '-infinity'
+  // justamente para a condicao ser um unico `lt`, sem `or`: se a condicao errasse,
+  // ninguem tomaria a trava e a Adriana ficaria muda.
+  const tentarTravar = async (): Promise<boolean> => {
+    const agora = new Date();
+    const { data } = await db
+      .from("ouvintes")
+      .update({
+        processamento_lock_ate: new Date(agora.getTime() + RAJADA_LOCK_MS)
+          .toISOString(),
+      })
+      .eq("id", ouvinteId)
+      .lt("processamento_lock_ate", agora.toISOString())
+      .select("id");
+    return !!data && data.length > 0;
+  };
+
+  // Quem perde a vez ESPERA, nao vai embora. Ir embora deixaria a ultima mensagem
+  // da rajada sem dono se ela chegasse depois de o vencedor ja ter lido o banco, e
+  // ser ignorado e o pior resultado possivel. Esperando, ele vira o dono do que
+  // sobrou; se nao sobrou nada, ele sai calado, que e o certo.
+  const limiteEspera = Date.now() + RAJADA_ESPERA_MAX_MS;
+  let travou = await tentarTravar();
+  while (!travou && Date.now() < limiteEspera) {
+    await dormir(RAJADA_POLL_MS);
+    travou = await tentarTravar();
+  }
+  if (!travou) return new Response("ok", { status: 200 });
+  trava.ouvinteId = ouvinteId;
+
+  // Le tudo que ainda nao foi considerado em nenhuma resposta.
+  const colherPendentes = async () => {
+    const { data: convMarcador } = await db
+      .from("conversas")
+      .select("ultima_mensagem_processada_em")
+      .eq("id", conversaId)
+      .maybeSingle();
+    const marcador =
+      (convMarcador?.ultima_mensagem_processada_em as string | null) ?? null;
+    let q = db
+      .from("mensagens")
+      .select("id, conteudo, criado_em")
+      .eq("conversa_id", conversaId)
+      .eq("direcao", "recebida")
+      .not("conteudo", "is", null)
+      .order("criado_em", { ascending: true });
+    if (marcador) q = q.gt("criado_em", marcador);
+    const { data } = await q;
+    return (data ?? [])
+      .map((m) => ({
+        id: m.id as string,
+        texto: ((m.conteudo as string) ?? "").trim(),
+        criado_em: m.criado_em as string,
+      }))
+      .filter((m) => m.texto.length > 0);
+  };
+
+  let pendentes = await colherPendentes();
+  // Nada pendente: outra invocacao ja absorveu esta mensagem na rajada dela.
+  // Responder de novo seria a Adriana falando duas vezes a mesma coisa.
+  if (!pendentes.length) return new Response("ok", { status: 200 });
+
+  // Debounce: enquanto continuar chegando mensagem, espera mais um pouco. E o que
+  // transforma tres webhooks em uma leitura so, com a fala inteira na mao.
+  const tetoRajada = Date.now() + RAJADA_TETO_MS;
+  while (Date.now() < tetoRajada) {
+    await dormir(RAJADA_DEBOUNCE_MS);
+    const novo = await colherPendentes();
+    const estabilizou = novo.length === pendentes.length;
+    pendentes = novo;
+    if (estabilizou) break;
+  }
+
+  // A rajada vira UMA fala. As partes vao em linhas separadas, na ordem em que
+  // foram digitadas, para o interpretador ver que sao pedacos e nao uma frase so.
+  const msgIdsAtuais = pendentes.map((m) => m.id);
+  texto = pendentes.map((m) => m.texto).join("\n");
+  isTexto = texto.length > 0;
+  await db
+    .from("conversas")
+    .update({
+      ultima_mensagem_processada_em: pendentes[pendentes.length - 1].criado_em,
+    })
+    .eq("id", conversaId);
+
+  // Recarrega ouvinte e conversa: enquanto este worker esperava a vez, o anterior
+  // pode ter gravado o nome, o consentimento ou trocado a etapa.
+  const { data: ouvinteFresco } = await db
+    .from("ouvintes")
+    .select("*")
+    .eq("id", ouvinteId)
+    .maybeSingle();
+  if (ouvinteFresco) ouvinte = ouvinteFresco;
+  const { data: conversaFresca } = await db
+    .from("conversas")
+    .select("*")
+    .eq("id", conversaId)
+    .maybeSingle();
+  if (conversaFresca) conversa = conversaFresca;
+  primeiroNome = (ouvinte.nome ?? "").trim().split(/\s+/)[0] ||
+    ((ouvinte.nome ?? "") as string);
+
   const etapa = conversa.etapa as string;
   const setEtapa = (e: string) =>
     db.from("conversas").update({ etapa: e }).eq("id", conversaId);
@@ -2208,67 +2508,15 @@ Deno.serve(async (req: Request) => {
   let histBancoCache: Turno[] | null = null;
   const histBanco = async (): Promise<Turno[]> => {
     if (!histBancoCache) {
-      histBancoCache = await carregarHistorico(ouvinteId, radioId, msgAtualId);
+      histBancoCache = await carregarHistorico(ouvinteId, radioId, msgIdsAtuais);
     }
     return histBancoCache;
   };
 
-  // ===== MODO SOMBRA (passo 2, TEMPORARIO) =====
-  // Interpreta a mensagem em paralelo e grava o resultado em interpretacoes.
-  // Nao altera nenhuma resposta: roda em segundo plano, e qualquer falha aqui e
-  // engolida de proposito. REMOVER este bloco junto com a tabela no passo 4.
-  if (isTexto && texto) {
-    const sombra = (async () => {
-      const t = await interpretarMensagem(
-        await histBanco(),
-        {
-          etapa,
-          campo_atual: camposFaltantes(ouvinte, flags)[0] ?? "",
-          campos_faltantes: camposFaltantes(ouvinte, flags),
-          dados_atuais: {
-            nome: ouvinte.nome,
-            data_nascimento: ouvinte.data_nascimento,
-            cidade: ouvinte.cidade,
-            bairro: ouvinte.bairro,
-            numero: ouvinte.numero,
-            estilo_musical: ouvinte.estilo_musical,
-            programa_locutor: ouvinte.programa_locutor,
-          },
-        },
-        texto,
-      );
-      await db.from("interpretacoes").insert({
-        radio_id: radioId,
-        ouvinte_id: ouvinteId,
-        conversa_id: conversaId,
-        mensagem_id: msgAtualId,
-        etapa,
-        texto,
-        leitura: t.leitura,
-        // O que a producao de hoje usa para decidir. A fala que ela de fato enviou
-        // sai da tabela mensagens, na linha "enviada" logo apos esta mensagem.
-        decisao_atual: {
-          campo_atual: camposFaltantes(ouvinte, flags)[0] ?? null,
-          campos_faltantes: camposFaltantes(ouvinte, flags),
-          cadastro_completo: cadastroEstaCompleto(ouvinte),
-        },
-        modelo: MODELO_INTERPRETE,
-        latencia_ms: t.latenciaMs,
-        erro: t.erro,
-      });
-    })().catch((e) => console.error(`sombra falhou: ${e}`));
-    const rt = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
-    // waitUntil mantem o isolate vivo depois do Response, para a sombra nao
-    // atrasar a resposta ao ouvinte nem ser morta no meio.
-    if (rt?.waitUntil) {
-      rt.waitUntil(sombra);
-    } else {
-      // Sem waitUntil o isolate pode morrer no meio e a sombra perder linhas.
-      // Nao mudamos para await, que atrasaria a resposta ao ouvinte; deixamos o
-      // aviso no log para nao dar tabela vazia sem explicacao.
-      console.error("sombra: EdgeRuntime.waitUntil indisponivel, gravacao pode se perder");
-    }
-  }
+  // O modo sombra do passo 2 saiu aqui: a interpretacao deixou de rodar em paralelo
+  // e passou a DECIDIR, no nucleo de entendimento mais abaixo. Manter os dois seria
+  // pagar duas vezes pelo mesmo Sonnet a cada mensagem. A tabela interpretacoes
+  // continua, agora como registro da decisao (leitura + fala escolhida).
 
   // Nao achou a musica na busca: a Adriana pede o nome de novo, sem inventar nada.
   async function reperguntarMusica(flagsBase: Record<string, unknown>) {
@@ -3085,7 +3333,14 @@ Deno.serve(async (req: Request) => {
   // fallback determinístico FAIL-CLOSED. Consentimento SO em aceite explicito. Ambiguidade
   // reformula ate 2x e entao encerra. Correcao de nome tem teto proprio de 2. Na
   // recusa/esgotamento, LIMPEZA REAL (nome, mensagens, historico) ANTES da despedida.
-  if (isTexto && etapa === "aguarda_consentimento") {
+  // A pessoa que ficou em consentimento_pausado e voltou POR CONTA PROPRIA entra aqui
+  // pela mesma porta. Voltar sozinha e o oposto de desistir, entao o contador de
+  // tentativas zera: ela nao pode ser dispensada de novo pela primeira mensagem da volta.
+  const retomandoPausa = etapa === "consentimento_pausado";
+  if (isTexto && (etapa === "aguarda_consentimento" || retomandoPausa)) {
+    // Zera na PROPRIA flags (e nao so na leitura) porque os ramos de pedido, duvida e
+    // correcao de nome espalham ...flags e levariam o contador velho adiante.
+    if (retomandoPausa) flags.consentimento_reformulacoes = 0;
     const reformulacoes = typeof flags.consentimento_reformulacoes === "number"
       ? flags.consentimento_reformulacoes as number
       : 0;
@@ -3238,11 +3493,28 @@ Deno.serve(async (req: Request) => {
       return new Response("ok", { status: 200 });
     }
 
-    // Recusa OU esgotou as 2 reformulacoes: ENCERRA com limpeza real.
-    // O esgotamento so vale quando a IA classificou de fato: se ela estava fora, nao
-    // houve leitura, e ninguem pode ser encerrado como se tivesse recusado sem que o
-    // sistema tenha entendido uma unica mensagem dele.
-    if (tipo === "recusa" || (reformulacoes >= 2 && !iaIndisponivel)) {
+    // Esgotou as 2 tentativas SEM recusa explicita: para de insistir e pronto.
+    // NAO apaga nada e NAO afirma que a pessoa recusou, porque ela nao recusou: ela so
+    // nao respondeu. Recusa e uma coisa, nao ter conseguido responder e outra, e gravar
+    // a segunda como se fosse a primeira registra uma afirmacao falsa em nome do ouvinte.
+    // O consentimento continua NAO concedido: sem sim, sem cadastro.
+    // O esgotamento so vale quando houve classificacao de verdade: com a IA fora nao
+    // houve leitura nenhuma, e ninguem pode ser dispensado sem o sistema ter entendido
+    // uma unica mensagem dele.
+    if (reformulacoes >= 2 && !iaIndisponivel) {
+      const msg =
+        "Tudo bem, não vou mais ficar insistindo, tá? 🙂 Se você quiser fazer o cadastro pra participar das promoções, é só me chamar por aqui a qualquer momento que a gente faz rapidinho. Fico à disposição!";
+      const hist = pushHist(ctx.historico, texto, msg);
+      await db.from("conversas").update({
+        etapa: "consentimento_pausado",
+        contexto: { ...ctx, historico: hist },
+      }).eq("id", conversaId);
+      await reply(phone, conversaId, radioId, msg);
+      return new Response("ok", { status: 200 });
+    }
+
+    // Recusa EXPLICITA: ENCERRA com limpeza real. So aqui a afirmacao e verdadeira.
+    if (tipo === "recusa") {
       // ORDEM OBRIGATORIA: limpar ANTES de enviar a despedida (a despedida sobrevive).
       // 1. anula o nome no cadastro (mantem telefone e ddd, chave de reencontro).
       await db.from("ouvintes").update({ nome: null }).eq("id", ouvinteId);
@@ -3265,9 +3537,21 @@ Deno.serve(async (req: Request) => {
     }
 
     // "outro" com reformulacoes < 2: reformula, sem conceder consentimento.
-    const msg = reformulacoes === 0
-      ? `Só pra confirmar${primeiroNome ? ", " + primeiroNome : ""}: posso guardar seus dados com segurança pra te avisar das promoções? É só me dizer que sim 🙂`
-      : "Me confirma só com um sim: você autoriza a gente a guardar seus dados pro cadastro? Se preferir não, também tudo bem, é só dizer.";
+    // Na VOLTA depois da pausa a Adriana nao pode recomecar do zero: ela ja sabe o nome e
+    // ja conversou com essa pessoa. Reapresentar-se seria apagar a conversa que existiu.
+    const gerada = retomandoPausa
+      ? await falaAdriana(
+        `o ouvinte tinha parado no meio do cadastro, voce disse que ficava a disposicao, e agora ele voltou por conta propria dizendo "${texto.trim()}". Voces JA se conhecem: NAO se apresente, NAO diga quem voce e, NAO pergunte o nome dele de novo. Reconheca em uma frase o que ele acabou de dizer, mostre que voce lembra que voces tinham comecado o cadastro, e pergunte se ele quer seguir com o cadastro agora. Curto e natural`,
+        primeiroNome,
+        true,
+      )
+      : null;
+    const msg = gerada ??
+      (retomandoPausa
+        ? `Que bom te ver por aqui de novo${primeiroNome ? ", " + primeiroNome : ""}! A gente tinha parado no seu cadastro. Quer seguir de onde paramos? É rapidinho 🙂`
+        : reformulacoes === 0
+        ? `Só pra confirmar${primeiroNome ? ", " + primeiroNome : ""}: posso guardar seus dados com segurança pra te avisar das promoções? É só me dizer que sim 🙂`
+        : "Me confirma só com um sim: você autoriza a gente a guardar seus dados pro cadastro? Se preferir não, também tudo bem, é só dizer.");
     const hist = pushHist(ctx.historico, texto, msg);
     await db.from("conversas").update({
       etapa: "aguarda_consentimento",
@@ -3518,6 +3802,276 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { status: 200 });
   }
 
+  // ===== NUCLEO DE ENTENDIMENTO (passo 4) =====
+  // Toda resposta daqui para baixo nasce da LEITURA da conversa, nunca do campo que
+  // esta faltando. O campo faltante so diz o que ainda precisa ser descoberto; quem
+  // decide o que falar e o que foi entendido da mensagem.
+  //
+  // Grava os valores que a leitura trouxe, VALIDANDO cada um. A leitura propoe, o
+  // codigo deterministico confere: modelo nenhum escreve direto no cadastro. O que
+  // nao passa na validacao vira "nao aproveitado" e a Adriana pede de outro jeito,
+  // em vez de gravar lixo ou fingir que nao ouviu.
+  async function aplicarLeitura(l: Leitura): Promise<{
+    upd: Record<string, unknown>;
+    flags2: Record<string, unknown>;
+    registrado: string[];
+    naoAproveitado: string[];
+  }> {
+    const upd: Record<string, unknown> = {};
+    const flags2: Record<string, unknown> = { ...flags };
+    const registrado: string[] = [];
+    const naoAproveitado: string[] = [];
+    const campos = (l.campos ?? {}) as Record<string, string>;
+    // PORTAO LGPD, BARREIRA DURA. Sem consentimento gravado, NENHUM campo de cadastro
+    // e persistido, por mais que o interpretador tenha lido corretamente. O modelo
+    // conduz a conversa; ele NAO decide pular o consentimento. A unica excecao e o
+    // nome, que ja era gravado antes do aceite no fluxo original: e ele que permite
+    // pedir a autorizacao chamando a pessoa pelo nome, e sem ele o portao nao abre.
+    const semConsentimento = !ouvinte.consentimento_em;
+    const ler = (k: string) => {
+      if (semConsentimento && k !== "nome") return "";
+      return (campos[k] ?? "").toString().trim();
+    };
+
+    // nome: mesmo filtro do caminho antigo. A diferenca e que agora ele pode
+    // SOBRESCREVER um nome ja gravado, que e o que faz a correcao funcionar.
+    const nomeLido = ler("nome");
+    if (nomeLido) {
+      const soLetras = nomeLido.replace(/[^A-Za-zÀ-ÿ]/g, "");
+      const valido = soLetras.length >= 2 && !pareceIntencao(nomeLido) &&
+        !SAUDACOES_NAO_NOME.has(normalizarSemAcento(nomeLido));
+      const nome = titleCasePtBr(nomeLido) || nomeLido;
+      if (valido && nome !== ouvinte.nome) {
+        upd.nome = nome;
+        delete flags2.nome_tentativas;
+        registrado.push("o nome dele");
+      } else if (!valido) {
+        naoAproveitado.push("o nome");
+      }
+    }
+
+    const dataLida = ler("data_nascimento");
+    if (dataLida) {
+      const iso = /^\d{4}-\d{2}-\d{2}$/.test(dataLida)
+        ? dataLida
+        : parseAniversario(dataLida);
+      const idade = iso ? calcularIdade(iso) : -1;
+      if (iso && idade >= 5 && idade <= 110) {
+        const { data: faixa } = await db.from("faixas_etarias").select("id")
+          .lte("idade_min", idade)
+          .or(`idade_max.gte.${idade},idade_max.is.null`)
+          .order("id").limit(1).maybeSingle();
+        upd.data_nascimento = iso;
+        upd.idade = idade;
+        upd.faixa_etaria = faixa?.id ?? null;
+        for (const k of ["aguardando_ano", "ano_tentativa", "data_tentativa", "aguardando_seculo", "data_dia", "data_mes", "data_ano19", "data_ano20"]) {
+          delete flags2[k];
+        }
+        registrado.push("a data de aniversário");
+      } else {
+        naoAproveitado.push("a data de aniversário completa, com dia, mês e ano");
+      }
+    }
+
+    const cidadeLida = ler("cidade");
+    if (cidadeLida && cidadeLida.replace(/[^A-Za-zÀ-ÿ]/g, "").length >= 2) {
+      upd.cidade = titleCasePtBr(cidadeLida);
+      registrado.push("a cidade");
+    }
+
+    const bairroLido = ler("bairro");
+    if (bairroLido && bairroLido.replace(/[^A-Za-zÀ-ÿ]/g, "").length >= 2) {
+      const cidadeAtual = (upd.cidade as string) ?? (ouvinte.cidade as string) ?? "";
+      if (normalizarSemAcento(cidadeAtual) === "sao paulo") {
+        const z = await resolverZonaCapital(bairroLido, null);
+        upd.bairro = z.bairro;
+        upd.zona = z.zona;
+      } else {
+        upd.bairro = titleCasePtBr(bairroLido);
+      }
+      registrado.push("o bairro");
+    }
+
+    const numeroLido = ler("numero");
+    if (numeroLido) {
+      const so = numeroLido.replace(/\D/g, "");
+      if (so.length >= 1 && so.length <= 6) {
+        upd.numero = so;
+        registrado.push("o número da casa");
+      } else {
+        naoAproveitado.push("o número da casa");
+      }
+    }
+
+    const estilo = ler("estilo_musical");
+    if (estilo && estilo.length >= 2) {
+      upd.estilo_musical = estilo.slice(0, 120);
+      registrado.push("o estilo musical");
+    }
+
+    const programa = ler("programa_locutor");
+    if (programa && programa.length >= 2) {
+      upd.programa_locutor = programa.slice(0, 200);
+      registrado.push("o programa favorito");
+    }
+
+    // Pedido no meio do cadastro: NAO e atendido agora (nenhum pedido e atendido com
+    // cadastro incompleto), mas fica GUARDADO para ser retomado quando o cadastro
+    // fechar. E o que impede o pedido de simplesmente evaporar.
+    const temPedido = (l.intencoes ?? []).includes("pedido_para_radio");
+    if (temPedido && !flags2.pedido_pendente) {
+      flags2.pedido_pendente = {
+        tipo: l.pedido_tipo ?? "outro",
+        conteudo: l.pedido_conteudo ?? l.musica_titulo ?? null,
+        destinatario: l.pedido_destinatario ?? null,
+      };
+    } else if (temPedido && flags2.pedido_pendente) {
+      // O pedido ja estava parado e ele acrescentou o que faltava (tipico: disse pra
+      // quem era so agora). Completa os buracos sem sobrescrever o que ja se sabia.
+      const p = flags2.pedido_pendente as Record<string, unknown>;
+      flags2.pedido_pendente = {
+        tipo: p.tipo ?? l.pedido_tipo ?? "outro",
+        conteudo: p.conteudo ?? l.pedido_conteudo ?? l.musica_titulo ?? null,
+        destinatario: p.destinatario ?? l.pedido_destinatario ?? null,
+      };
+    }
+    return { upd, flags2, registrado, naoAproveitado };
+  }
+
+  const campoAtualPre = camposFaltantes(ouvinte, flags)[0];
+  // Faixa que o nucleo cobre. E exatamente a mesma que o despacho deterministico
+  // cobria, mais a abertura. Musica e radio_troca continuam nas pipelines proprias
+  // (busca em catalogo, confirmacao com o ouvinte), que serao o passo 5.
+  const CAMPOS_NUCLEO = new Set([
+    "nome", "data_nascimento", "cidade", "bairro", "numero",
+    "estilo_musical", "programa_locutor",
+  ]);
+  if (isTexto && texto && (CAMPOS_NUCLEO.has(campoAtualPre) || !jaSaudou)) {
+    const lida = await interpretarMensagem(
+      await histBanco(),
+      {
+        etapa,
+        campo_atual: campoAtualPre ?? "",
+        campos_faltantes: camposFaltantes(ouvinte, flags),
+        dados_atuais: {
+          nome: ouvinte.nome,
+          data_nascimento: ouvinte.data_nascimento,
+          cidade: ouvinte.cidade,
+          bairro: ouvinte.bairro,
+          numero: ouvinte.numero,
+          estilo_musical: ouvinte.estilo_musical,
+          programa_locutor: ouvinte.programa_locutor,
+        },
+      },
+      texto,
+    );
+    const l = lida.leitura;
+    if (l) {
+      const { upd, flags2, registrado, naoAproveitado } = await aplicarLeitura(l);
+      if (Object.keys(upd).length) {
+        await db.from("ouvintes").update(upd).eq("id", ouvinteId);
+      }
+      const ouvNovo = { ...ouvinte, ...upd };
+
+      // Cadastro fechou neste turno e havia pedido parado: o pedido vem antes do
+      // roteiro. Quem esperou pra mandar o beijo recebe o beijo, nao mais perguntas.
+      const pend = flags2.pedido_pendente as
+        | { tipo: string; conteudo: string | null; destinatario: string | null }
+        | undefined;
+      if (pend && !cadastroEstaCompleto(ouvinte) && cadastroEstaCompleto(ouvNovo)) {
+        const f2 = { ...flags2 };
+        delete f2.pedido_pendente;
+        await retomarPedido(ouvNovo, f2, pend);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Duvida real na leitura trava o avanco: confirmar e melhor do que chutar.
+      const prox = proximaPerguntaFaltante(ouvNovo, flags2);
+      let campoFalta = l.precisa_confirmar && l.confirmacao_sugerida
+        ? campoAtualPre
+        : prox.campo;
+      if (campoFalta === "cidade" && flags2.cep_desistiu === true) {
+        campoFalta = "cidade_manual";
+      }
+      // O consentimento vem antes de tudo, menos do nome, e vence ate a duvida da
+      // leitura. Enquanto ele nao existe, o unico assunto pendente e ele.
+      const faltaConsentimento = !ouvNovo.consentimento_em &&
+        (!!ouvNovo.nome || flags2.nome_pulado === true);
+      if (faltaConsentimento) campoFalta = "consentimento";
+      const pnNovo = ((ouvNovo.nome as string) ?? "").trim().split(/\s+/)[0] || "";
+
+      const fala = await responderAdriana({
+        historico: await histBanco(),
+        mensagem: texto,
+        leitura: l,
+        primeiroNome: pnNovo,
+        registrado,
+        naoAproveitado,
+        campoFalta,
+        jaSaudou,
+      });
+
+      if (fala) {
+        // Endereco continua sendo capturado por CEP: a etapa muda junto com a fala.
+        const vaiPedirCep = campoFalta === "cidade" && flags2.cep_desistiu !== true;
+        const concluiu = campoFalta === "concluido";
+        let msg = fala;
+        if (concluiu && flags2.concluido !== true) {
+          flags2.concluido = true;
+          msg = `${msg} Ah, e segue a gente no Instagram: ${INSTAGRAM_URL}`;
+          await db.from("ouvintes").update({
+            participacoes: (ouvinte.participacoes ?? 0) + 1,
+          }).eq("id", ouvinteId);
+        }
+        const hist = pushHist(ctx.historico, texto, msg);
+        await db.from("conversas").update({
+          // Pedir o aceite joga a proxima mensagem no portao de consentimento, que e
+          // codigo deterministico e endurecido. O nucleo nao julga o "sim".
+          etapa: faltaConsentimento
+            ? "aguarda_consentimento"
+            : vaiPedirCep
+            ? "aguarda_cep"
+            : concluiu
+            ? "concluido"
+            : "cadastro",
+          contexto: {
+            ...ctx,
+            flags: { ...flags2, abertura_feita: true },
+            historico: hist,
+          },
+        }).eq("id", conversaId);
+        await reply(phone, conversaId, radioId, msg);
+        // Registro da decisao, para auditar leitura x fala nos testes reais.
+        await db.from("interpretacoes").insert({
+          radio_id: radioId,
+          ouvinte_id: ouvinteId,
+          conversa_id: conversaId,
+          mensagem_id: msgIdsAtuais[msgIdsAtuais.length - 1] ?? null,
+          etapa,
+          texto,
+          leitura: l,
+          decisao_atual: {
+            campo_atual: campoAtualPre ?? null,
+            campo_falta: campoFalta,
+            registrado,
+            nao_aproveitado: naoAproveitado,
+            fala: msg,
+          },
+          modelo: MODELO_INTERPRETE,
+          latencia_ms: lida.latenciaMs,
+          erro: null,
+        });
+        return new Response("ok", { status: 200 });
+      }
+      // Leu mas nao conseguiu falar: os valores lidos JA foram gravados acima, entao
+      // o caminho deterministico abaixo continua de onde a leitura parou.
+      ouvinte = ouvNovo;
+      console.error("nucleo: leitura ok mas geracao de fala falhou, caindo no deterministico");
+    } else {
+      console.error(`nucleo: sem leitura (${lida.erro}), caindo no deterministico`);
+    }
+  }
+
   // ===== Abertura: no primeiro contato, se apresenta e pede o nome (texto fixo do roteiro) =====
   if (isTexto && !jaSaudou && !ouvinte.nome && flags.abertura_feita !== true) {
     const msg = "Olá! Sou a Adriana da Rádio Liverpool, tudo bem? Qual é o seu nome?";
@@ -3539,6 +4093,30 @@ Deno.serve(async (req: Request) => {
       return new Response("ok", { status: 200 });
     }
     flags.aguardando_correcao_musica = false;
+  }
+
+  // ===== Rede de seguranca do portao LGPD =====
+  // O portao sempre foi ESTRUTURAL: capturar o nome mandava a etapa pra
+  // aguarda_consentimento e nada avancava sem o aceite. Quem chegar aqui com nome e
+  // sem consentimento saiu daquele trilho (interprete indisponivel, estado antigo) e
+  // coletaria dado pessoal sem autorizacao. Volta pro portao antes de perguntar nada.
+  if (
+    isTexto && !ouvinte.consentimento_em &&
+    (!!ouvinte.nome || flags.nome_pulado === true)
+  ) {
+    const pnLgpd = ((ouvinte.nome as string) ?? "").trim().split(/\s+/)[0] || "";
+    const msgLgpd = await falaAdriana(
+      `voce ainda NAO tem autorizacao dele pra guardar os dados. Peca essa autorizacao agora: diga que e pra fazer o cadastro dele pras promocoes, que os dados ficam protegidos de acordo com a LGPD, a Lei Geral de Protecao de Dados, e termine com uma pergunta de sim ou nao. NAO pergunte nenhum outro dado. Nada de diminutivo e nada de exagero`,
+      pnLgpd,
+      true,
+    ) ??
+      `Antes de seguir${pnLgpd ? ", " + pnLgpd : ""}: posso fazer seu cadastro pra te avisar das promoções? Seus dados ficam protegidos de acordo com a LGPD, a Lei Geral de Proteção de Dados. Posso? 🙂`;
+    await db.from("conversas").update({
+      etapa: "aguarda_consentimento",
+      contexto: { ...ctx, flags, historico: pushHist(ctx.historico, texto, msgLgpd) },
+    }).eq("id", conversaId);
+    await reply(phone, conversaId, radioId, msgLgpd);
+    return new Response("ok", { status: 200 });
   }
 
   // ===== Cadastro deterministico: trata o campo ATUAL antes do cerebro (imune a 503/429, sem loop) =====
@@ -3760,4 +4338,4 @@ Deno.serve(async (req: Request) => {
   }).eq("id", conversaId);
   await reply(phone, conversaId, radioId, resposta);
   return new Response("ok", { status: 200 });
-});
+}
