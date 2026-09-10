@@ -1617,9 +1617,70 @@ function cadastroEstaCompleto(o: Record<string, unknown>): boolean {
 // TEXTO UNICO DO CONSENTIMENTO. Existia em cinco variantes espalhadas pelo arquivo, e
 // a pessoa via uma versao diferente conforme o caminho que a conversa tinha tomado.
 // Cinco versoes do mesmo texto juridico e a propria sensacao de inconsistencia. Uma so.
-function textoConsentimento(primeiroNome: string): string {
+// O DIA E O DA RADIO, NAO O DO SERVIDOR.
+// A edge roda em UTC, entao "hoje" para o processo comeca as 21h de ontem para quem
+// esta ouvindo radio em Sao Paulo. A conversa que motivou esta regra e o exemplo:
+// 2026-09-07T01:22Z e 06/09 as 22:22 em Brasilia, dia anterior.
+// Intl com fuso nomeado, e nao offset -3 fixo: o fixo funciona hoje e passa a mentir
+// em silencio no dia em que o horario de verao voltar. `en-CA` ja emite YYYY-MM-DD.
+const FUSO_RADIO = "America/Sao_Paulo";
+const fmtDiaRadio = new Intl.DateTimeFormat("en-CA", {
+  timeZone: FUSO_RADIO,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+function diaDaRadio(d = new Date()): string {
+  return fmtDiaRadio.format(d);
+}
+
+// COMPLEMENTO DE NOME: "Sara" virando "Sara Camargo".
+// Existe por causa de um buraco estreito e real: com o nome ja gravado e o campo da
+// vez ja em data_nascimento, `podeTrocar` fecha, e quem manda o sobrenome ANTES de
+// autorizar perde o sobrenome num descarte silencioso. Foi a posicao exata da Sara.
+// Criterio ESTRUTURAL, sem lista de palavras: o nome novo e o atual seguido de mais
+// palavras. Isso aceita complemento e continua recusando TROCA de identidade sem
+// aceite ("Sara" -> "Maria Silva" nao passa).
+//
+// LIMITE CONHECIDO, NAO E ESQUECIMENTO: exige prefixo EXATO, entao ordem invertida
+// ("Sara" -> "Camargo, Sara") NAO passa e cai no mesmo descarte silencioso de antes.
+// Tratar inversao exigiria comparar conjuntos de palavras, e ai "Sara" casaria com
+// "Camargo Sara Souza" e com qualquer frase que contivesse o nome. O prefixo e o
+// criterio que distingue complemento de coincidencia. Correcao de grafia continua
+// entrando pelo caminho de sempre, `intencoes.has("correcao")`.
+function ehComplementoDeNome(atual: string, novo: string): boolean {
+  const pa = normalizarSemAcento(atual).split(/\s+/).filter(Boolean);
+  const pn = normalizarSemAcento(novo).split(/\s+/).filter(Boolean);
+  if (!pa.length || pn.length <= pa.length) return false;
+  return pa.every((palavra, i) => palavra === pn[i]);
+}
+
+// OS QUATRO TEXTOS DO CONSENTIMENTO, LITERAIS, ESCOLHIDOS PELO CONTADOR.
+// Continuam sendo texto juridico: nenhum deles passa por gerador, nenhum e
+// parafraseado, e a escolha entre eles e do codigo, nunca do modelo. O que muda da
+// 1 para a 4 e so a insistencia; o compromisso legal (LGPD nomeada por extenso e
+// pergunta fechada no fim) e identico nos quatro, porque e ele que faz o "sim"
+// valer como prova.
+// O texto 1 e byte a byte o que ja estava no ar antes desta mudanca.
+const TEXTOS_CONSENTIMENTO = [
+  `[Nome], posso fazer seu cadastro pras promoções? Seus dados ficam protegidos pela LGPD, a Lei Geral de Proteção de Dados. Pode ser?`,
+  `[Nome], eu só consigo continuar depois que você autorizar. Sem isso eu não posso anotar nada, nem seu pedido nem seu cadastro. Seus dados ficam protegidos pela LGPD, a Lei Geral de Proteção de Dados. Posso seguir?`,
+  `[Nome], sem a sua autorização eu não consigo seguir com você. Nada do que a gente conversar fica registrado, então não dá para levar pedido para a programação nem te incluir nas promoções. É só me dizer que sim. Seus dados ficam protegidos pela LGPD, a Lei Geral de Proteção de Dados. Você autoriza?`,
+  `[Nome], essa é a última vez que eu pergunto hoje, para não te incomodar. Sem a sua autorização eu não posso seguir de jeito nenhum, e nada fica registrado. Se quiser continuar, me diga que sim. Seus dados ficam protegidos pela LGPD, a Lei Geral de Proteção de Dados. Pode ser?`,
+];
+const TETO_CONSENTIMENTO_DIA = TEXTOS_CONSENTIMENTO.length;
+
+// `tentativa` tem default 1 de proposito: todo chamador da rede que so quer "o texto
+// do consentimento" continua recebendo o texto 1, sem precisar saber que existem
+// quatro. Quem escala e o nucleo, que e quem tem o contador na mao.
+function textoConsentimento(primeiroNome: string, tentativa = 1): string {
+  const i = Math.min(Math.max(Math.trunc(tentativa) || 1, 1), TEXTOS_CONSENTIMENTO.length) - 1;
+  const t = TEXTOS_CONSENTIMENTO[i];
   const pn = primeiroNome.trim();
-  return `${pn ? pn + ", p" : "P"}osso fazer seu cadastro pras promoções? Seus dados ficam protegidos pela LGPD, a Lei Geral de Proteção de Dados. Pode ser?`;
+  if (pn) return t.replace("[Nome]", pn);
+  // Sem nome (quem seguiu com nome_pulado): cai o vocativo e a frase sobe a inicial.
+  const sem = t.replace("[Nome], ", "");
+  return sem.charAt(0).toUpperCase() + sem.slice(1);
 }
 
 // TEXTO UNICO DA DESPEDIDA POR RECUSA. Mesmo motivo do consentimento: afirma o que
@@ -2219,6 +2280,9 @@ async function responderAdriana(entrada: {
   // Restricao que vale ANTES do objetivo, sem trocar o assunto pendente. Hoje so a
   // ofensa e a droga usam: a fala tem que recusar e mesmo assim seguir o roteiro.
   aviso?: string | null;
+  // Qual dos quatro textos do consentimento vai sair, decidido pelo contador no
+  // nucleo. Vale para `consentimento` e para `consentimento_duvida`.
+  tentativaConsentimento?: number;
 }): Promise<string | null> {
   const l = entrada.leitura;
   const hist = entrada.historico.length
@@ -2247,6 +2311,12 @@ async function responderAdriana(entrada: {
     return TEXTO_DESPEDIDA_RECUSA;
   }
   if (entrada.campoFalta === "consentimento") {
+    const tentativa = entrada.tentativaConsentimento ?? 1;
+    // ACOLHIDA SO NA PRIMEIRA TENTATIVA. Da segunda em diante quem esta sendo
+    // perguntado de novo ja teve a fala dele reconhecida uma vez, e mais uma frase
+    // amaciando o pedido so afasta a pergunta do fim da mensagem. Alem disso o
+    // modelo nem e chamado aqui: uma ida a menos por turno.
+    if (tentativa > 1) return textoConsentimento(entrada.primeiroNome, tentativa);
     const acolhida = await claudeTexto(
       `Você é a Adriana, atendente da rádio ${RADIO_LABEL} no WhatsApp. Brasileira, simpática, jeito de rádio. Português do Brasil com acentos corretos. NUNCA use travessão.
 
@@ -2280,7 +2350,7 @@ ${entrada.primeiroNome ? `\nO primeiro nome dele é "${entrada.primeiroNome}", p
 Responda APENAS com a frase. Sem aspas, sem explicação.`,
       0.7,
     );
-    const literal = textoConsentimento(entrada.primeiroNome);
+    const literal = textoConsentimento(entrada.primeiroNome, tentativa);
     // A trava vem DEPOIS da limpeza de JSON e ANTES da concatenacao: o literal
     // precisa ser a unica pergunta da mensagem. Frase vazia cai no literal sozinho,
     // caminho que este return ja sabia fazer.
@@ -2372,7 +2442,10 @@ Responda APENAS com a mensagem que vai para o WhatsApp dele. Sem aspas, sem expl
   // mesmo texto juridico de sempre: resposta gerada primeiro, literal por ultimo,
   // para a pergunta fechada continuar sendo a ultima coisa que ele le.
   if (entrada.campoFalta === "consentimento_duvida") {
-    return `${limpa}\n\n${textoConsentimento(entrada.primeiroNome)}`;
+    // REPETE o texto da tentativa atual, sem escalar e sem consumir tentativa (a
+    // duvida tem teto proprio). Quem faz uma pergunta legitima sobre os proprios
+    // dados nao pode ser empurrado para o texto 4, que anuncia a ultima vez do dia.
+    return `${limpa}\n\n${textoConsentimento(entrada.primeiroNome, entrada.tentativaConsentimento ?? 1)}`;
   }
   return limpa;
 }
@@ -3773,8 +3846,14 @@ async function processarWebhook(
       const valido = soLetras.length >= 2 && !pareceIntencao(nomeLido) &&
         !SAUDACOES_NAO_NOME.has(normalizarSemAcento(nomeLido));
       const nome = titleCasePtBr(nomeLido) || nomeLido;
+      // O ULTIMO TERMO E A JANELA DO CONSENTIMENTO. Com o nome gravado, o campo da
+      // vez ja avanca para data_nascimento (a regua de cadastro nao conhece
+      // consentimento), e a partir dai um sobrenome que chegasse antes do aceite era
+      // descartado em silencio. Enquanto nao ha aceite, COMPLEMENTO continua
+      // entrando; troca de identidade, nao. Ver ehComplementoDeNome.
       const podeTrocar = !ouvinte.nome || campoAtualPre === "nome" ||
-        intencoes.has("correcao");
+        intencoes.has("correcao") ||
+        (!temConsentimento && ehComplementoDeNome((ouvinte.nome as string) ?? "", nome));
       if (valido && podeTrocar && nome !== ouvinte.nome) {
         upd.nome = nome;
         delete flags2.nome_tentativas;
@@ -4439,9 +4518,27 @@ async function processarWebhook(
       // BARREIRA DURA DO CONSENTIMENTO. Vence tudo, inclusive a duvida da leitura
       // e o pedido dele. Enquanto nao ha sim, o unico assunto pendente e esse.
       let encerrouPorRecusa = false;
+      let tentativaConsent = 1;
       const faltaConsentimento = !ouvNovo.consentimento_em &&
         (!!ouvNovo.nome || flags2.nome_pulado === true);
       if (faltaConsentimento) {
+        // A PORTA REABRE TODO DIA, E O RESET MORA AQUI, NO CAMINHO VIVO.
+        // O reset existia so na rede, que quase nunca executa, entao na pratica a
+        // porta fechava para sempre: o contador chegava a 2, as flags atravessavam
+        // as conversas pela heranca de contexto, e quem voltasse dias depois caia
+        // direto na pausa sem nunca mais ver o pedido. A intencao estava escrita e
+        // nao estava acontecendo.
+        // O criterio tambem mudou: nao e "voltou da pausa", e "e outro dia". Vale
+        // para quem pausou e para quem so demorou, e nao depende de a conversa ter
+        // sido encerrada de um jeito ou de outro.
+        // Comparacao de igualdade de string, nao aritmetica de datas: nao importa
+        // quantos dias passaram, so se o dia e outro.
+        // FLAG AUSENTE ZERA, e isso e o que destrava todo cadastro que ja existia
+        // antes desta mudanca, sem tocar em uma linha do banco.
+        const hoje = diaDaRadio();
+        if (flags2.consentimento_pedido_dia !== hoje) {
+          flags2.consentimento_reformulacoes = 0;
+        }
         const reformulacoes = typeof flags2.consentimento_reformulacoes === "number"
           ? flags2.consentimento_reformulacoes as number
           : 0;
@@ -4460,13 +4557,21 @@ async function processarWebhook(
         } else if (intencoes.has("duvida_sobre_dados") && duvidas < 2) {
           flags2.duvida_dados_respostas = duvidas + 1;
           campoFalta = "consentimento_duvida";
-        } else if (reformulacoes >= 2) {
-          // Esgotou sem recusa explicita: para de insistir. NAO apaga nada e NAO
-          // afirma que recusou, porque ele nao recusou: ele so nao respondeu.
+          // Repete o texto da tentativa atual: a duvida nao escala e nao consome
+          // tentativa. Antes do primeiro pedido o contador e 0, e ai o texto e o 1.
+          tentativaConsent = Math.min(Math.max(reformulacoes, 1), TETO_CONSENTIMENTO_DIA);
+        } else if (reformulacoes >= TETO_CONSENTIMENTO_DIA) {
+          // Esgotou o dia sem recusa explicita: para de insistir ATE AMANHA. NAO
+          // apaga nada e NAO afirma que recusou, porque ele nao recusou: ele so nao
+          // respondeu. E agora "a porta continua aberta", que a fala da pausa diz,
+          // e verdade: o reset por dia la em cima reabre sozinho.
           campoFalta = "consentimento_pausa";
         } else {
           campoFalta = "consentimento";
+          tentativaConsent = reformulacoes + 1;
           flags2.consentimento_reformulacoes = reformulacoes + 1;
+          // O contador so vale acompanhado do dia em que foi contado.
+          flags2.consentimento_pedido_dia = hoje;
         }
       }
 
@@ -4487,6 +4592,7 @@ async function processarWebhook(
           : ehDroga
           ? SENTIDO_MOMENTO.drogas
           : null,
+        tentativaConsentimento: tentativaConsent,
       });
 
       if (fala) {
@@ -4701,7 +4807,13 @@ async function processarWebhook(
   if (isTexto && (etapa === "aguarda_consentimento" || retomandoPausa)) {
     // Zera na PROPRIA flags (e nao so na leitura) porque os ramos de pedido, duvida e
     // correcao de nome espalham ...flags e levariam o contador velho adiante.
-    if (retomandoPausa) flags.consentimento_reformulacoes = 0;
+    // MESMO CRITERIO DO NUCLEO, e de proposito: com duas reguas diferentes o numero
+    // de chances passaria a depender de qual caminho atendeu a mensagem. O reset
+    // continua existindo aqui (a rede nao pode regredir quando executar), mas quem
+    // decide e a virada do dia, nao o fato de ter voltado da pausa.
+    if (flags.consentimento_pedido_dia !== diaDaRadio()) {
+      flags.consentimento_reformulacoes = 0;
+    }
     const reformulacoes = typeof flags.consentimento_reformulacoes === "number"
       ? flags.consentimento_reformulacoes as number
       : 0;
@@ -4856,7 +4968,7 @@ async function processarWebhook(
       return new Response("ok", { status: 200 });
     }
 
-    // Esgotou as 2 tentativas SEM recusa explicita: para de insistir e pronto.
+    // Esgotou as tentativas do DIA sem recusa explicita: para de insistir e pronto.
     // NAO apaga nada e NAO afirma que a pessoa recusou, porque ela nao recusou: ela so
     // nao respondeu. Recusa e uma coisa, nao ter conseguido responder e outra, e gravar
     // a segunda como se fosse a primeira registra uma afirmacao falsa em nome do ouvinte.
@@ -4864,7 +4976,7 @@ async function processarWebhook(
     // O esgotamento so vale quando houve classificacao de verdade: com a IA fora nao
     // houve leitura nenhuma, e ninguem pode ser dispensado sem o sistema ter entendido
     // uma unica mensagem dele.
-    if (reformulacoes >= 2 && !iaIndisponivel) {
+    if (reformulacoes >= TETO_CONSENTIMENTO_DIA && !iaIndisponivel) {
       const msg =
         "Tudo bem, não vou mais ficar insistindo, tá? 🙂 Se você quiser fazer o cadastro pra participar das promoções, é só me chamar por aqui a qualquer momento que a gente faz rapidinho. Fico à disposição!";
       const hist = pushHist(ctx.historico, texto, msg);
@@ -4923,6 +5035,9 @@ async function processarWebhook(
         flags: {
           ...flags,
           consentimento_reformulacoes: iaIndisponivel ? reformulacoes : reformulacoes + 1,
+          // Contador e dia andam juntos aqui pelo mesmo motivo do nucleo: contador
+          // sem a data em que foi contado nao da para comparar com nada.
+          ...(iaIndisponivel ? {} : { consentimento_pedido_dia: diaDaRadio() }),
         },
         historico: hist,
       },
@@ -5197,11 +5312,12 @@ async function processarWebhook(
     (!!ouvinte.nome || flags.nome_pulado === true)
   ) {
     const pnLgpd = ((ouvinte.nome as string) ?? "").trim().split(/\s+/)[0] || "";
-    const msgLgpd = await falaAdriana(
-      `voce ainda NAO tem autorizacao dele pra guardar os dados. Peca essa autorizacao agora: diga que e pra fazer o cadastro dele pras promocoes, que os dados ficam protegidos de acordo com a LGPD, a Lei Geral de Protecao de Dados, e termine com uma pergunta de sim ou nao. NAO pergunte nenhum outro dado. Nada de diminutivo e nada de exagero`,
-      pnLgpd,
-      true,
-    ) ?? textoConsentimento(pnLgpd);
+    // TEXTO JURIDICO NAO SE GERA, e este era o ultimo ponto do arquivo que ainda
+    // gerava. O literal estava aqui so como fallback do `??`, ou seja: com o modelo
+    // no ar, cada pessoa que caisse nesta rede recebia uma redacao diferente do
+    // mesmo pedido de autorizacao. Mesma familia dos tres pontos que o passo 4
+    // fechou; este sobrou porque a chamada tinha o literal do lado e parecia coberta.
+    const msgLgpd = textoConsentimento(pnLgpd);
     await db.from("conversas").update({
       etapa: "aguarda_consentimento",
       contexto: { ...ctx, flags, historico: pushHist(ctx.historico, texto, msgLgpd) },
