@@ -1193,14 +1193,22 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
       return Array.from(new Set(brutos));
     };
 
-    // OPCOES saem do universo inteiro (sem filtro), senao escolher um bairro
-    // apagaria os outros bairros da lista e o comercial nao conseguiria trocar.
+    // AS OPCOES RESPEITAM O INTERRUPTOR DE DEMONSTRACAO, E MAIS NADA.
+    // A distincao e a coisa toda aqui:
+    //  - respeitar o interruptor: com a demo DESLIGADA, um bairro que so existe
+    //    no seed continuava aparecendo no select e devolvia ZERO. O comercial
+    //    filtrava na frente do anunciante e via a lista vazia. Nunca houve lista
+    //    fixa neste arquivo, mas o universo das opcoes era o de antes do corte.
+    //  - NAO respeitar os demais filtros: se as opcoes saissem do resultado ja
+    //    filtrado, escolher um bairro apagaria todos os outros bairros da lista e
+    //    nao daria mais para trocar de bairro sem limpar tudo antes.
+    const universoOpcoes = ouvintes.filter((o) => f.incluirDemo || !ehDemo(o));
     const setCidades = new Set<string>();
     const setBairros = new Set<string>();
     const setZonas = new Set<string>();
     const setEstilos = new Set<string>();
     const setProgramas = new Set<string>();
-    for (const o of ouvintes) {
+    for (const o of universoOpcoes) {
       if (o.cidade) setCidades.add(o.cidade);
       if (o.bairro) setBairros.add(o.bairro);
       if (o.zona) setZonas.add(o.zona);
