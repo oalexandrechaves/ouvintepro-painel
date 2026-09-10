@@ -16,7 +16,6 @@ const FILTROS_VAZIOS: AudienciaFiltros = {
   faixa: null,
   estilo: null,
   programa: null,
-  radio: null,
   comPedido: false,
   comPromocao: false,
   incluirDemo: true,
@@ -34,14 +33,14 @@ function Select({
   onChange: (v: string | null) => void;
 }) {
   return (
-    <label className="flex flex-col gap-1">
+    <label className="flex min-w-0 flex-col gap-1">
       <span className="text-[11px] uppercase tracking-wide text-mist-400">
         {label}
       </span>
       <select
         value={valor ?? ""}
         onChange={(e) => onChange(e.target.value || null)}
-        className="rounded-lg border border-white/10 bg-ink-850/60 px-3 py-2 text-sm text-mist-50 outline-none focus:border-neon-violet/50"
+        className="w-full min-w-0 truncate rounded-lg border border-white/10 bg-ink-850/60 px-3 py-2 text-sm text-mist-50 outline-none focus:border-neon-violet/50"
       >
         <option value="">Todos</option>
         {opcoes.map((o) => (
@@ -79,7 +78,6 @@ export default function Audiencia({ inicial }: { inicial: AudienciaData }) {
     if (f.faixa) p.set("faixa", String(f.faixa));
     if (f.estilo) p.set("estilo", f.estilo);
     if (f.programa) p.set("programa", f.programa);
-    if (f.radio) p.set("radio", f.radio);
     if (f.comPedido) p.set("comPedido", "1");
     if (f.comPromocao) p.set("comPromocao", "1");
     if (!f.incluirDemo) p.set("incluirDemo", "0");
@@ -115,6 +113,9 @@ export default function Audiencia({ inicial }: { inicial: AudienciaData }) {
   const brl = (n: number) =>
     n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 
+  const pctExclusivo =
+    dados.total > 0 ? Math.round((dados.exclusivos / dados.total) * 100) : 0;
+
   const custoTotal = dados.comEndereco * custoNum;
   const custoPorAlcancado =
     dados.comEndereco > 0 ? custoTotal / dados.comEndereco : 0;
@@ -126,8 +127,7 @@ export default function Audiencia({ inicial }: { inicial: AudienciaData }) {
       filtros.zona ||
       filtros.faixa ||
       filtros.estilo ||
-      filtros.programa ||
-      filtros.radio,
+      filtros.programa,
     ) ||
     filtros.comPedido ||
     filtros.comPromocao;
@@ -152,49 +152,43 @@ export default function Audiencia({ inicial }: { inicial: AudienciaData }) {
         </div>
       ) : null}
 
-      {/* DESTAQUE: o filtro de radio concorrente e o argumento comercial mais
-          forte, porque e audiencia que o anunciante NAO alcanca pela outra
-          radio. Por isso vem antes dos demais e com o numero por extenso. */}
+      {/* DESTAQUE: EXCLUSIVIDADE.
+          Aqui existia a comparacao com a radio concorrente ("temos X ouvintes
+          que tambem ouvem a Alpha"). Saiu de proposito: a frase tem dupla
+          leitura e podia sugerir ao anunciante que valia anunciar na outra
+          radio. O dado continua no banco e o bot continua perguntando; o que
+          nao existe mais e comparacao com concorrente NESTA tela.
+          O argumento agora e o publico que so se alcanca aqui. */}
       <section className="glass mt-8 flex flex-col gap-4 p-6">
         <div className="flex flex-col gap-1">
           <span className="text-[11px] uppercase tracking-widest text-neon-cyan">
             Argumento de venda
           </span>
           <h2 className="font-display text-lg text-mist-50">
-            Ouvintes que também escutam a concorrência
+            Público exclusivo da Rádio Liverpool
           </h2>
         </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Select
-            label="Rádio concorrente"
-            valor={filtros.radio ?? null}
-            opcoes={opcoes.radios}
-            onChange={(v) => set("radio", v)}
-          />
-          <div className="flex items-end">
-            {filtros.radio ? (
-              <p className="text-sm text-mist-100">
-                <span className="font-display text-2xl text-mist-50">
-                  {dados.total.toLocaleString("pt-BR")}
-                </span>{" "}
-                ouvintes{" "}
-                {regiaoLabel && regiaoLabel !== filtros.radio
-                  ? `em ${regiaoLabel} `
-                  : ""}
-                que também ouvem a {filtros.radio}.
-              </p>
-            ) : (
-              <p className="text-sm text-mist-400">
-                Escolha uma rádio para montar a frase de venda.
-              </p>
-            )}
-          </div>
-        </div>
+        <p className="text-lg leading-relaxed text-mist-100">
+          <span className="font-display text-3xl text-mist-50">
+            {dados.total.toLocaleString("pt-BR")}
+          </span>{" "}
+          {dados.total === 1 ? "ouvinte" : "ouvintes"}
+          {regiaoLabel ? ` em ${regiaoLabel}` : ""},{" "}
+          <span className="font-display text-3xl text-gradient">
+            {dados.exclusivos.toLocaleString("pt-BR")}
+          </span>{" "}
+          {dados.exclusivos === 1 ? "dele" : "deles"} não{" "}
+          {dados.exclusivos === 1 ? "ouve" : "ouvem"} nenhuma outra rádio.
+        </p>
+        <p className="text-xs text-mist-400">
+          {pctExclusivo}% do público selecionado. Essas pessoas o anunciante só
+          alcança aqui.
+        </p>
       </section>
 
       {/* Demais filtros */}
       <section className="glass mt-6 flex flex-col gap-5 p-6">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <Select
             label="Cidade"
             valor={filtros.cidade ?? null}
@@ -213,7 +207,7 @@ export default function Audiencia({ inicial }: { inicial: AudienciaData }) {
             opcoes={opcoes.zonas}
             onChange={(v) => set("zona", v)}
           />
-          <label className="flex flex-col gap-1">
+          <label className="flex min-w-0 flex-col gap-1">
             <span className="text-[11px] uppercase tracking-wide text-mist-400">
               Faixa etária
             </span>
@@ -222,7 +216,7 @@ export default function Audiencia({ inicial }: { inicial: AudienciaData }) {
               onChange={(e) =>
                 set("faixa", e.target.value ? Number(e.target.value) : null)
               }
-              className="rounded-lg border border-white/10 bg-ink-850/60 px-3 py-2 text-sm text-mist-50 outline-none focus:border-neon-violet/50"
+              className="w-full min-w-0 truncate rounded-lg border border-white/10 bg-ink-850/60 px-3 py-2 text-sm text-mist-50 outline-none focus:border-neon-violet/50"
             >
               <option value="">Todas</option>
               {opcoes.faixas.map((f) => (
@@ -346,7 +340,7 @@ export default function Audiencia({ inicial }: { inicial: AudienciaData }) {
         <h3 className="font-display text-base text-mist-50">
           Simulador de mala direta
         </h3>
-        <div className="grid gap-4 sm:grid-cols-4">
+        <div className="grid min-w-0 gap-4 sm:grid-cols-4">
           <label className="flex flex-col gap-1">
             <span className="text-[11px] uppercase tracking-wide text-mist-400">
               Custo por correspondência
@@ -412,7 +406,50 @@ export default function Audiencia({ inicial }: { inicial: AudienciaData }) {
           campanha é feita pela própria rádio: o anunciante não recebe a base.
         </p>
 
-        <div className="overflow-x-auto">
+        {/* CARTOES ABAIXO DE sm, TABELA DE sm PARA CIMA.
+            A tabela nao estava vazando (o overflow-x-auto segurava), mas em
+            390px so cabiam Nome, Bairro e Cidade: Faixa, Telefone e Endereco
+            ficavam fora de vista e NADA indicava que dava para rolar. O
+            telefone mascarado e a prova de que sao pessoas reais, que e o
+            motivo desta lista existir, e no celular ninguem o encontrava.
+            Mesmos dados, mesma mascara, mesma ordem: so a forma muda. */}
+        <ul className="flex flex-col gap-2 sm:hidden">
+          {dados.lista.map((o) => (
+            <li
+              key={o.id}
+              className="flex flex-col gap-1.5 rounded-xl border border-white/5 bg-ink-850/40 px-3.5 py-3"
+            >
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="truncate font-medium text-mist-50">
+                  {o.primeiroNome ?? "—"}
+                </span>
+                {/* TELEFONE EM DESTAQUE, na primeira linha e nao no rodape do
+                    cartao: e o dado que prova que a pessoa existe. */}
+                <span className="shrink-0 font-display text-sm tabular-nums text-mist-50">
+                  {o.telefoneMasc ?? "—"}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-mist-300">
+                <span className="truncate">{o.bairro ?? "—"}</span>
+                <span className="text-mist-400">·</span>
+                <span className="truncate">{o.cidade ?? "—"}</span>
+                <span className="text-mist-400">·</span>
+                <span>{o.faixa ?? "—"}</span>
+                {o.temEndereco ? (
+                  <span className="rounded-full bg-neon-lime/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-neon-lime">
+                    parcial
+                  </span>
+                ) : (
+                  <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-mist-400">
+                    sem
+                  </span>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+
+        <div className="hidden overflow-x-auto sm:block">
           <table className="w-full min-w-[560px] text-left text-sm">
             <thead>
               <tr className="border-b border-white/10 text-[11px] uppercase tracking-wide text-mist-400">

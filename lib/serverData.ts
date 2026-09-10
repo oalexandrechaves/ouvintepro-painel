@@ -1009,7 +1009,6 @@ export interface AudienciaFiltros {
   faixa?: number | null;
   estilo?: string | null;
   programa?: string | null;
-  radio?: string | null;
   comPedido?: boolean;
   comPromocao?: boolean;
   incluirDemo?: boolean;
@@ -1031,7 +1030,6 @@ export interface AudienciaOpcoes {
   zonas: string[];
   estilos: string[];
   programas: string[];
-  radios: string[];
   faixas: { id: number; label: string }[];
 }
 
@@ -1039,11 +1037,14 @@ export interface Audiencia {
   configurado: boolean;
   total: number;
   comEndereco: number;
+  // EXCLUSIVOS: quantos do publico filtrado nao aparecem em radios_concorrentes,
+  // ou seja, nao declararam ouvir nenhuma outra radio. E o numero que o
+  // anunciante so alcanca aqui, e substituiu a comparacao com a concorrencia.
+  exclusivos: number;
   demoNoTotal: number;
   distFaixa: SerieItem[];
   distEstilo: SerieItem[];
   distPrograma: SerieItem[];
-  distRadio: SerieItem[];
   lista: AudienciaItem[];
   listaTruncadaEm: number;
   opcoes: AudienciaOpcoes;
@@ -1053,11 +1054,11 @@ const audienciaVazia: Audiencia = {
   configurado: false,
   total: 0,
   comEndereco: 0,
+  exclusivos: 0,
   demoNoTotal: 0,
   distFaixa: [],
   distEstilo: [],
   distPrograma: [],
-  distRadio: [],
   lista: [],
   listaTruncadaEm: 0,
   opcoes: {
@@ -1066,7 +1067,6 @@ const audienciaVazia: Audiencia = {
     zonas: [],
     estilos: [],
     programas: [],
-    radios: [],
     faixas: [],
   },
 };
@@ -1179,9 +1179,13 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
     const comPedido = new Set(pedidosRows.map((r) => r.ouvinte_id));
     const comPromo = new Set(promoRows.map((r) => r.ouvinte_id));
 
-    // Radio concorrente: nome_canonico primeiro, que e a coluna que ja agrupa as
-    // variacoes de digitacao ("alpha fm", "Radio Alpha" -> "Alpha FM"). Sem isso
-    // o filtro comercial mais forte se estilhacaria em dezenas de grafias.
+    // A COMPARACAO COM A CONCORRENCIA SAIU DA TELA, DE PROPOSITO.
+    // Dizer "temos X ouvintes que tambem ouvem a Alpha" tem dupla leitura e pode
+    // sugerir ao anunciante que vale anunciar na outra radio. O dado continua no
+    // banco e o bot continua perguntando; o que mudou e que a tela de Audiencia
+    // nao filtra nem exibe por concorrente.
+    // O que sobrou desta funcao e medir EXCLUSIVIDADE: quem nao aparece em
+    // radios_concorrentes nenhuma vez so e alcancavel pela Liverpool.
     const radiosDe = (o: OuvinteAud): string[] => {
       const brutos = (o.radios_concorrentes ?? [])
         .map((r) => (r.nome_canonico ?? r.nome_radio ?? "").trim())
@@ -1196,14 +1200,12 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
     const setZonas = new Set<string>();
     const setEstilos = new Set<string>();
     const setProgramas = new Set<string>();
-    const setRadios = new Set<string>();
     for (const o of ouvintes) {
       if (o.cidade) setCidades.add(o.cidade);
       if (o.bairro) setBairros.add(o.bairro);
       if (o.zona) setZonas.add(o.zona);
       if (o.estilo_musical) setEstilos.add(o.estilo_musical);
       if (o.programa_locutor) setProgramas.add(o.programa_locutor);
-      for (const r of radiosDe(o)) setRadios.add(r);
     }
     const ordenar = (s: Set<string>) =>
       Array.from(s).sort((a, b) => a.localeCompare(b, "pt-BR"));
@@ -1216,7 +1218,6 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
       if (f.faixa && o.faixa_etaria !== f.faixa) return false;
       if (f.estilo && o.estilo_musical !== f.estilo) return false;
       if (f.programa && o.programa_locutor !== f.programa) return false;
-      if (f.radio && !radiosDe(o).includes(f.radio)) return false;
       if (f.comPedido && !comPedido.has(o.id)) return false;
       if (f.comPromocao && !comPromo.has(o.id)) return false;
       return true;
@@ -1225,11 +1226,12 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
     const mFaixa = new Map<string, number>();
     const mEstilo = new Map<string, number>();
     const mPrograma = new Map<string, number>();
-    const mRadio = new Map<string, number>();
+    let exclusivos = 0;
     let comEndereco = 0;
     let demoNoTotal = 0;
     for (const o of filtrados) {
       if (temEnderecoParcial(o)) comEndereco += 1;
+      if (radiosDe(o).length === 0) exclusivos += 1;
       if (ehDemo(o)) demoNoTotal += 1;
       const fl = o.faixa_etaria != null ? faixaLabel.get(o.faixa_etaria) : null;
       if (fl) mFaixa.set(fl, (mFaixa.get(fl) ?? 0) + 1);
@@ -1240,7 +1242,6 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
           o.programa_locutor,
           (mPrograma.get(o.programa_locutor) ?? 0) + 1,
         );
-      for (const r of radiosDe(o)) mRadio.set(r, (mRadio.get(r) ?? 0) + 1);
     }
 
     // A ordem da distribuicao por faixa segue a idade, nao o volume: faixa
@@ -1270,11 +1271,11 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
       configurado: true,
       total: filtrados.length,
       comEndereco,
+      exclusivos,
       demoNoTotal,
       distFaixa,
       distEstilo: ordenarSerie(mEstilo, 8),
       distPrograma: ordenarSerie(mPrograma, 6),
-      distRadio: ordenarSerie(mRadio, 8),
       lista,
       listaTruncadaEm: AUDIENCIA_LISTA_MAX,
       opcoes: {
@@ -1283,7 +1284,6 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
         zonas: ordenar(setZonas),
         estilos: ordenar(setEstilos),
         programas: ordenar(setProgramas),
-        radios: ordenar(setRadios),
         faixas,
       },
     };

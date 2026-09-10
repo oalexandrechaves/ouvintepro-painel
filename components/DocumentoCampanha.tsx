@@ -99,7 +99,7 @@ export default function DocumentoCampanha({
 
         {/* A PECA. Fundo claro de proposito: e papel, não interface. */}
         <div className="print-area rounded-2xl bg-[#FBFAF7] p-8 text-[#1A1A1A] shadow-2xl sm:p-12">
-          <div className="flex items-start justify-between border-b border-[#D32029]/30 pb-5">
+          <div className="flex flex-col gap-3 border-b border-[#D32029]/30 pb-5 sm:flex-row sm:items-start sm:justify-between sm:gap-0">
             <div className="flex flex-col">
               <span className="font-display text-2xl font-black italic tracking-tight">
                 Rádio <span className="text-[#D32029]">Liverpool</span>
@@ -108,7 +108,7 @@ export default function DocumentoCampanha({
                 FM · São Paulo
               </span>
             </div>
-            <div className="text-right">
+            <div className="text-left sm:text-right">
               <div className="text-[11px] uppercase tracking-widest text-[#6B6B6B]">
                 em parceria com
               </div>
