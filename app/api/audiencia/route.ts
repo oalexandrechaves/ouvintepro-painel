@@ -21,7 +21,6 @@ export async function GET(req: NextRequest) {
     faixa: Number.isFinite(faixaBruta) && faixaBruta > 0 ? faixaBruta : null,
     estilo: texto(p.get("estilo")),
     programa: texto(p.get("programa")),
-    radio: texto(p.get("radio")),
     comPedido: p.get("comPedido") === "1",
     comPromocao: p.get("comPromocao") === "1",
     // Demo LIGADO por padrao: a base real ainda e pequena e a tela existe para
