@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 // NAVEGACAO LATERAL DO PAINEL.
 // Vive dentro do route group (painel), entao NAO aparece no /login: mostrar
@@ -27,6 +27,19 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
   const router = useRouter();
   const [aberto, setAberto] = useState(false);
   const [saindo, setSaindo] = useState(false);
+  // SO PARA ACESSIBILIDADE. Quem decide a visibilidade continua sendo o Tailwind
+  // (lg:hidden e lg:flex). Isto existe porque display:none esconde da tela mas os
+  // DOIS blocos de navegacao coexistem no DOM: querySelectorAll("nav a") devolvia
+  // 4 links e um leitor de tela anunciava Dashboard e Audiencia duas vezes.
+  // Comeca false para o HTML do servidor bater com o do cliente na hidratacao.
+  const [ehDesktop, setEhDesktop] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const sync = () => setEhDesktop(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
 
   async function sair() {
     setSaindo(true);
@@ -107,7 +120,10 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
   return (
     <>
       {/* Barra superior: abaixo de lg. Sem biblioteca, so estado e classes. */}
-      <div className="sticky top-0 z-40 flex items-center justify-between border-b border-white/5 bg-ink-950/80 px-5 py-3 backdrop-blur-xl lg:hidden">
+      <div
+        aria-hidden={ehDesktop}
+        className="sticky top-0 z-40 flex items-center justify-between border-b border-white/5 bg-ink-950/80 px-5 py-3 backdrop-blur-xl lg:hidden"
+      >
         {marca}
         <button
           onClick={() => setAberto((v) => !v)}
@@ -119,14 +135,20 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
         </button>
       </div>
       {aberto ? (
-        <div className="sticky top-[57px] z-30 flex flex-col gap-4 border-b border-white/5 bg-ink-950/95 px-5 py-4 backdrop-blur-xl lg:hidden">
+        <div
+          aria-hidden={ehDesktop}
+          className="sticky top-[57px] z-30 flex flex-col gap-4 border-b border-white/5 bg-ink-950/95 px-5 py-4 backdrop-blur-xl lg:hidden"
+        >
           {navItens}
           {rodape}
         </div>
       ) : null}
 
       {/* Coluna fixa: a partir de lg. */}
-      <aside className="sticky top-0 z-30 hidden h-screen w-60 shrink-0 flex-col justify-between border-r border-white/5 bg-ink-900/50 px-4 py-6 backdrop-blur-xl lg:flex">
+      <aside
+        aria-hidden={!ehDesktop}
+        className="sticky top-0 z-30 hidden h-screen w-60 shrink-0 flex-col justify-between border-r border-white/5 bg-ink-900/50 px-4 py-6 backdrop-blur-xl lg:flex"
+      >
         <div className="flex flex-col gap-7">
           {marca}
           {navItens}
