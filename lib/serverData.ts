@@ -107,7 +107,8 @@ const vazio: PainelExtra = {
 function mascararTelefone(tel: string | null | undefined): string | null {
   const t = (tel ?? "").replace(/\D/g, "");
   if (!t) return null;
-  if (t.length <= 8) return t.slice(0, 2) + "*".repeat(Math.max(0, t.length - 6)) + t.slice(-4);
+  if (t.length <= 8)
+    return t.slice(0, 2) + "*".repeat(Math.max(0, t.length - 6)) + t.slice(-4);
   const inicio = t.slice(0, 4);
   const fim = t.slice(-4);
   return `${inicio}${"*".repeat(t.length - 8)}${fim}`;
@@ -115,15 +116,18 @@ function mascararTelefone(tel: string | null | undefined): string | null {
 
 // Conta ocorrencias agrupando por chave canonica (minusculo, sem acento),
 // exibindo o primeiro rotulo visto. Devolve ranking desc.
-function ranking(itens: (string | null | undefined)[], limite = 10): SerieItem[] {
+function ranking(
+  itens: (string | null | undefined)[],
+  limite = 10,
+): SerieItem[] {
   const mapa = new Map<string, { label: string; valor: number }>();
   for (const it of itens) {
     const raw = (it ?? "").trim();
     if (!raw) continue;
-    const key = raw.toLowerCase().normalize("NFD").replace(
-      /[\u0300-\u036f]/g,
-      "",
-    );
+    const key = raw
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
     const cur = mapa.get(key);
     if (cur) cur.valor += 1;
     else mapa.set(key, { label: raw, valor: 1 });
@@ -186,10 +190,17 @@ function ouvinteCompleto(o: {
   bairro: string | null;
   zona: string | null;
 }): boolean {
-  const base = !!o.nome && !!o.data_nascimento && !!o.cidade && !!o.numero &&
+  const base =
+    !!o.nome &&
+    !!o.data_nascimento &&
+    !!o.cidade &&
+    !!o.numero &&
     !!o.consentimento_em;
   if (!base) return false;
-  const cidade = (o.cidade ?? "").trim().toLowerCase().normalize("NFD")
+  const cidade = (o.cidade ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
   const capital = cidade === "sao paulo";
   if (capital) return !!o.bairro && !!o.zona;
@@ -211,7 +222,10 @@ function etapaAbandono(o: {
   if (!o.consentimento_em) return "Sem consentimento";
   if (!o.data_nascimento) return "Sem data de nascimento";
   if (!o.cidade) return "Sem cidade";
-  const cidade = (o.cidade ?? "").trim().toLowerCase().normalize("NFD")
+  const cidade = (o.cidade ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
   if (cidade === "sao paulo" && (!o.bairro || !o.zona)) return "Sem bairro";
   if (!o.numero) return "Sem número";
@@ -292,19 +306,13 @@ export async function getPainelExtra(
 
     // Pedidos diversos (v82): abraco/beijo/alo/camiseta/premio/outro registrados pelo bot
     // apos cadastro completo. Card por tipo, respeitando radio_id + a mesma janela de periodo.
-    let qPedidos = sb
-      .from("pedidos")
-      .select("tipo")
-      .limit(50000);
+    let qPedidos = sb.from("pedidos").select("tipo").limit(50000);
     if (radioId) qPedidos = qPedidos.eq("radio_id", radioId);
     if (deUtc) qPedidos = qPedidos.gte("criado_em", deUtc);
     if (ateUtc) qPedidos = qPedidos.lt("criado_em", ateUtc);
 
     // Hotlink: cliques na mesma janela (a view painel_hotlink nao filtra data).
-    let qHot = sb
-      .from("hotlink_cliques")
-      .select("convertido")
-      .limit(100000);
+    let qHot = sb.from("hotlink_cliques").select("convertido").limit(100000);
     if (deUtc) qHot = qHot.gte("criado_em", deUtc);
     if (ateUtc) qHot = qHot.lt("criado_em", ateUtc);
 
@@ -316,8 +324,14 @@ export async function getPainelExtra(
     let qConvOwner = sb.from("conversas").select("id, ouvinte_id").limit(50000);
     if (radioId) qConvOwner = qConvOwner.eq("radio_id", radioId);
 
-    const [{ data, error }, promoRes, msgRes, convOwnerRes, pedidosRes, hotRes] =
-      await Promise.all([q, qPromo, qMsgConv, qConvOwner, qPedidos, qHot]);
+    const [
+      { data, error },
+      promoRes,
+      msgRes,
+      convOwnerRes,
+      pedidosRes,
+      hotRes,
+    ] = await Promise.all([q, qPromo, qMsgConv, qConvOwner, qPedidos, qHot]);
     if (error) throw error;
     const rows = (data ?? []) as unknown as OuvinteEmbed[];
 
@@ -396,9 +410,9 @@ export async function getPainelExtra(
           if (m.artista && completo) rejArt.push(m.artista);
         }
       }
-      const radios = (o.radios_concorrentes ?? []).map(
-        (r) => r.nome_canonico ?? r.nome_radio ?? "",
-      ).filter(Boolean);
+      const radios = (o.radios_concorrentes ?? [])
+        .map((r) => r.nome_canonico ?? r.nome_radio ?? "")
+        .filter(Boolean);
       if (completo) radiosAll.push(...radios);
 
       if (completo && o.zona) {
@@ -411,7 +425,10 @@ export async function getPainelExtra(
       }
       if (completo && o.bairro) bairrosAll.push(o.bairro);
       if (completo && o.faixa_etaria != null) {
-        faixaCount.set(o.faixa_etaria, (faixaCount.get(o.faixa_etaria) ?? 0) + 1);
+        faixaCount.set(
+          o.faixa_etaria,
+          (faixaCount.get(o.faixa_etaria) ?? 0) + 1,
+        );
       }
 
       return {
@@ -424,7 +441,7 @@ export async function getPainelExtra(
         estado: o.estado,
         idade: o.idade,
         dataNascimento: o.data_nascimento,
-        faixa: o.faixa_etaria ? faixaLabel.get(o.faixa_etaria) ?? null : null,
+        faixa: o.faixa_etaria ? (faixaLabel.get(o.faixa_etaria) ?? null) : null,
         estiloMusical: o.estilo_musical,
         cadastroEm: o.primeiro_contato_em,
         participacoes: o.participacoes ?? 0,
@@ -454,7 +471,8 @@ export async function getPainelExtra(
     // Pedidos diversos por tipo (rotulo pt-BR). Ranking desc para o card.
     const pedidoCount = new Map<string, number>();
     for (const p of (pedidosRes.data ?? []) as { tipo: string | null }[]) {
-      const label = PEDIDO_TIPO_LABEL[(p.tipo ?? "").toLowerCase()] ??
+      const label =
+        PEDIDO_TIPO_LABEL[(p.tipo ?? "").toLowerCase()] ??
         PEDIDO_TIPO_LABEL.outro;
       pedidoCount.set(label, (pedidoCount.get(label) ?? 0) + 1);
     }
@@ -483,7 +501,9 @@ export async function getPainelExtra(
       .map((e) => ({ label: e, valor: funilCount.get(e) ?? 0 }));
 
     // Hotlink no periodo: conta cliques e conversoes na janela.
-    const cliques = (hotRes.data ?? []) as unknown as { convertido: boolean | null }[];
+    const cliques = (hotRes.data ?? []) as unknown as {
+      convertido: boolean | null;
+    }[];
     const acessos = cliques.length;
     const conversoes = cliques.filter((h) => h.convertido).length;
     const hotlink: HotlinkExtra = {
@@ -548,8 +568,7 @@ export async function getConversa(ouvinteId: string): Promise<MensagemChat[]> {
     return (data ?? []).map((m) => ({
       id: m.id as string,
       direcao: (m.direcao === "enviada" ? "enviada" : "recebida") as
-        | "recebida"
-        | "enviada",
+        "recebida" | "enviada",
       tipo: (m.tipo as string) ?? null,
       conteudo: (m.conteudo as string) ?? null,
       criadoEm: (m.criado_em as string) ?? null,
@@ -612,7 +631,11 @@ export interface GrupoPromo {
 export function agruparPromocoes(parts: ParticipacaoRaw[]): GrupoPromo[] {
   const porChave = new Map<
     string,
-    { rawCount: Map<string, number>; participacoes: number; ouvintes: Set<string> }
+    {
+      rawCount: Map<string, number>;
+      participacoes: number;
+      ouvintes: Set<string>;
+    }
   >();
   for (const p of parts) {
     const raw = (p.raw ?? "").trim();
@@ -680,7 +703,8 @@ export function agruparPromocoes(parts: ParticipacaoRaw[]): GrupoPromo[] {
   });
 
   return grupos.sort(
-    (a, b) => b.ouvintes.size - a.ouvintes.size || b.participacoes - a.participacoes,
+    (a, b) =>
+      b.ouvintes.size - a.ouvintes.size || b.participacoes - a.participacoes,
   );
 }
 
@@ -956,5 +980,315 @@ export async function registrarGanhador(input: {
     return !error;
   } catch {
     return false;
+  }
+}
+
+// ============================================================================
+// AUDIENCIA: publico segmentado para a equipe comercial provar alcance.
+//
+// LGPD, e a razao do desenho: esta tela e mostrada a um TERCEIRO (o anunciante).
+// Quem consentiu autorizou a radio a guardar os dados dele, nao autorizou a
+// radio a entregar a base para um anunciante. Entao:
+//  - so entra quem tem consentimento_em (quem recusou teve o nome anulado e
+//    quem esta em consentimento_pausado nunca teve carimbo, os dois caem por
+//    esta mesma condicao, sem precisar consultar conversas.etapa);
+//  - a lista devolve PRIMEIRO nome, nunca o nome inteiro;
+//  - telefone sai mascarado pelo mesmo mascararTelefone do resto do painel;
+//  - numero da casa e data de nascimento NAO saem daqui.
+//
+// NAO usa ouvinteCompleto nem toca nela. "Da para mandar carta para essa
+// pessoa?" e outra pergunta que "o cadastro esta completo?", e as tres reguas de
+// cadastro completo (bot, view ouvinte_completo, ouvinteCompleto aqui) precisam
+// continuar identicas entre si.
+// ============================================================================
+
+export interface AudienciaFiltros {
+  cidade?: string | null;
+  bairro?: string | null;
+  zona?: string | null;
+  faixa?: number | null;
+  estilo?: string | null;
+  programa?: string | null;
+  radio?: string | null;
+  comPedido?: boolean;
+  comPromocao?: boolean;
+  incluirDemo?: boolean;
+}
+
+export interface AudienciaItem {
+  id: string;
+  primeiroNome: string | null;
+  bairro: string | null;
+  cidade: string | null;
+  faixa: string | null;
+  telefoneMasc: string | null;
+  temEndereco: boolean;
+}
+
+export interface AudienciaOpcoes {
+  cidades: string[];
+  bairros: string[];
+  zonas: string[];
+  estilos: string[];
+  programas: string[];
+  radios: string[];
+  faixas: { id: number; label: string }[];
+}
+
+export interface Audiencia {
+  configurado: boolean;
+  total: number;
+  comEndereco: number;
+  demoNoTotal: number;
+  distFaixa: SerieItem[];
+  distEstilo: SerieItem[];
+  distPrograma: SerieItem[];
+  distRadio: SerieItem[];
+  lista: AudienciaItem[];
+  listaTruncadaEm: number;
+  opcoes: AudienciaOpcoes;
+}
+
+const audienciaVazia: Audiencia = {
+  configurado: false,
+  total: 0,
+  comEndereco: 0,
+  demoNoTotal: 0,
+  distFaixa: [],
+  distEstilo: [],
+  distPrograma: [],
+  distRadio: [],
+  lista: [],
+  listaTruncadaEm: 0,
+  opcoes: {
+    cidades: [],
+    bairros: [],
+    zonas: [],
+    estilos: [],
+    programas: [],
+    radios: [],
+    faixas: [],
+  },
+};
+
+// Quantas linhas da lista vao para o navegador. O TOTAL nao passa por aqui: ele
+// e contado sobre o universo inteiro. Limite existe porque a lista e prova
+// visual ("sao pessoas de verdade"), nao a base para levar embora.
+const AUDIENCIA_LISTA_MAX = 120;
+
+// PAGINACAO REAL, E NAO .limit(N).
+// O PostgREST corta em db-max-rows=1000 por requisicao, entao `.limit(2000)`
+// devolve 1000 calado. Numero apresentado a anunciante nao pode ser truncado em
+// silencio, entao aqui se busca em blocos ate a pagina vir incompleta.
+async function carregarTodos<T>(
+  monta: (de: number, ate: number) => PromiseLike<{ data: T[] | null }>,
+  bloco = 1000,
+  tetoAbsoluto = 50000,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let de = 0; de < tetoAbsoluto; de += bloco) {
+    const { data } = await monta(de, de + bloco - 1);
+    const linhas = data ?? [];
+    out.push(...linhas);
+    if (linhas.length < bloco) break;
+  }
+  return out;
+}
+
+type OuvinteAud = {
+  id: string;
+  nome: string | null;
+  telefone: string | null;
+  bairro: string | null;
+  zona: string | null;
+  cidade: string | null;
+  numero: string | null;
+  faixa_etaria: number | null;
+  estilo_musical: string | null;
+  programa_locutor: string | null;
+  consentimento_texto: string | null;
+  radios_concorrentes:
+    { nome_radio: string | null; nome_canonico: string | null }[] | null;
+};
+
+function ehDemo(o: OuvinteAud): boolean {
+  return (o.consentimento_texto ?? "").startsWith("[DEMO]");
+}
+
+// ENDERECO POSTAVEL NAO EXISTE NA BASE DE HOJE, e este comentario e para quem
+// vier depois achar que faltou colocar: `ouvintes` guarda cidade, bairro, zona,
+// estado e numero, e NAO guarda logradouro nem CEP. O bot consulta o ViaCEP e
+// descarta a rua que vem na resposta. Entao o maximo que da para dizer e "tem
+// bairro e numero", que e o que esta funcao mede, e a tela diz com todas as
+// letras que falta a rua para postar. Chamar isso de "endereco utilizavel" sem
+// a ressalva faria o comercial prometer carta que os Correios nao entregam.
+function temEnderecoParcial(o: OuvinteAud): boolean {
+  return Boolean(o.cidade && o.bairro && o.numero);
+}
+
+function ordenarSerie(m: Map<string, number>, limite?: number): SerieItem[] {
+  const arr = Array.from(m.entries())
+    .map(([label, valor]) => ({ label, valor }))
+    .sort(
+      (a, b) => b.valor - a.valor || a.label.localeCompare(b.label, "pt-BR"),
+    );
+  return limite ? arr.slice(0, limite) : arr;
+}
+
+export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
+  const sb = getServiceClient();
+  if (!sb) return audienciaVazia;
+
+  try {
+    const [{ data: faixasRows }, ouvintes, pedidosRows, promoRows] =
+      await Promise.all([
+        sb.from("faixas_etarias").select("id, label").order("id"),
+        carregarTodos<OuvinteAud>((de, ate) =>
+          sb
+            .from("ouvintes")
+            .select(
+              "id, nome, telefone, bairro, zona, cidade, numero, faixa_etaria, estilo_musical, programa_locutor, consentimento_texto, radios_concorrentes(nome_radio, nome_canonico)",
+            )
+            .not("consentimento_em", "is", null)
+            .order("id")
+            .range(de, ate),
+        ),
+        carregarTodos<{ ouvinte_id: string }>((de, ate) =>
+          sb
+            .from("pedidos")
+            .select("ouvinte_id")
+            .order("ouvinte_id")
+            .range(de, ate),
+        ),
+        carregarTodos<{ ouvinte_id: string }>((de, ate) =>
+          sb
+            .from("promocao_participacoes")
+            .select("ouvinte_id")
+            .order("ouvinte_id")
+            .range(de, ate),
+        ),
+      ]);
+
+    const faixas = (faixasRows ?? []).map((r) => ({
+      id: Number((r as { id: number }).id),
+      label: String((r as { label: string }).label),
+    }));
+    const faixaLabel = new Map(
+      faixas.map((x) => [x.id, x.label] as [number, string]),
+    );
+    const comPedido = new Set(pedidosRows.map((r) => r.ouvinte_id));
+    const comPromo = new Set(promoRows.map((r) => r.ouvinte_id));
+
+    // Radio concorrente: nome_canonico primeiro, que e a coluna que ja agrupa as
+    // variacoes de digitacao ("alpha fm", "Radio Alpha" -> "Alpha FM"). Sem isso
+    // o filtro comercial mais forte se estilhacaria em dezenas de grafias.
+    const radiosDe = (o: OuvinteAud): string[] => {
+      const brutos = (o.radios_concorrentes ?? [])
+        .map((r) => (r.nome_canonico ?? r.nome_radio ?? "").trim())
+        .filter(Boolean);
+      return Array.from(new Set(brutos));
+    };
+
+    // OPCOES saem do universo inteiro (sem filtro), senao escolher um bairro
+    // apagaria os outros bairros da lista e o comercial nao conseguiria trocar.
+    const setCidades = new Set<string>();
+    const setBairros = new Set<string>();
+    const setZonas = new Set<string>();
+    const setEstilos = new Set<string>();
+    const setProgramas = new Set<string>();
+    const setRadios = new Set<string>();
+    for (const o of ouvintes) {
+      if (o.cidade) setCidades.add(o.cidade);
+      if (o.bairro) setBairros.add(o.bairro);
+      if (o.zona) setZonas.add(o.zona);
+      if (o.estilo_musical) setEstilos.add(o.estilo_musical);
+      if (o.programa_locutor) setProgramas.add(o.programa_locutor);
+      for (const r of radiosDe(o)) setRadios.add(r);
+    }
+    const ordenar = (s: Set<string>) =>
+      Array.from(s).sort((a, b) => a.localeCompare(b, "pt-BR"));
+
+    const filtrados = ouvintes.filter((o) => {
+      if (!f.incluirDemo && ehDemo(o)) return false;
+      if (f.cidade && o.cidade !== f.cidade) return false;
+      if (f.bairro && o.bairro !== f.bairro) return false;
+      if (f.zona && o.zona !== f.zona) return false;
+      if (f.faixa && o.faixa_etaria !== f.faixa) return false;
+      if (f.estilo && o.estilo_musical !== f.estilo) return false;
+      if (f.programa && o.programa_locutor !== f.programa) return false;
+      if (f.radio && !radiosDe(o).includes(f.radio)) return false;
+      if (f.comPedido && !comPedido.has(o.id)) return false;
+      if (f.comPromocao && !comPromo.has(o.id)) return false;
+      return true;
+    });
+
+    const mFaixa = new Map<string, number>();
+    const mEstilo = new Map<string, number>();
+    const mPrograma = new Map<string, number>();
+    const mRadio = new Map<string, number>();
+    let comEndereco = 0;
+    let demoNoTotal = 0;
+    for (const o of filtrados) {
+      if (temEnderecoParcial(o)) comEndereco += 1;
+      if (ehDemo(o)) demoNoTotal += 1;
+      const fl = o.faixa_etaria != null ? faixaLabel.get(o.faixa_etaria) : null;
+      if (fl) mFaixa.set(fl, (mFaixa.get(fl) ?? 0) + 1);
+      if (o.estilo_musical)
+        mEstilo.set(o.estilo_musical, (mEstilo.get(o.estilo_musical) ?? 0) + 1);
+      if (o.programa_locutor)
+        mPrograma.set(
+          o.programa_locutor,
+          (mPrograma.get(o.programa_locutor) ?? 0) + 1,
+        );
+      for (const r of radiosDe(o)) mRadio.set(r, (mRadio.get(r) ?? 0) + 1);
+    }
+
+    // A ordem da distribuicao por faixa segue a idade, nao o volume: faixa
+    // etaria e escala, e escala fora de ordem nao se le.
+    const distFaixa = faixas
+      .map((x) => ({ label: x.label, valor: mFaixa.get(x.label) ?? 0 }))
+      .filter((x) => x.valor > 0);
+
+    const lista: AudienciaItem[] = filtrados
+      .slice(0, AUDIENCIA_LISTA_MAX)
+      .map((o) => ({
+        id: o.id,
+        // PRIMEIRO nome apenas. O sobrenome nao vai para o navegador do comercial,
+        // entao nao ha como vazar dele para o anunciante nem por inspecao da rede.
+        primeiroNome: (o.nome ?? "").trim().split(/\s+/)[0] || null,
+        bairro: o.bairro,
+        cidade: o.cidade,
+        faixa:
+          o.faixa_etaria != null
+            ? (faixaLabel.get(o.faixa_etaria) ?? null)
+            : null,
+        telefoneMasc: mascararTelefone(o.telefone),
+        temEndereco: temEnderecoParcial(o),
+      }));
+
+    return {
+      configurado: true,
+      total: filtrados.length,
+      comEndereco,
+      demoNoTotal,
+      distFaixa,
+      distEstilo: ordenarSerie(mEstilo, 8),
+      distPrograma: ordenarSerie(mPrograma, 6),
+      distRadio: ordenarSerie(mRadio, 8),
+      lista,
+      listaTruncadaEm: AUDIENCIA_LISTA_MAX,
+      opcoes: {
+        cidades: ordenar(setCidades),
+        bairros: ordenar(setBairros),
+        zonas: ordenar(setZonas),
+        estilos: ordenar(setEstilos),
+        programas: ordenar(setProgramas),
+        radios: ordenar(setRadios),
+        faixas,
+      },
+    };
+  } catch (e) {
+    console.error("[getAudiencia] falhou:", e);
+    return audienciaVazia;
   }
 }
