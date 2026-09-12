@@ -1,5 +1,13 @@
 import { createClient } from "@supabase/supabase-js";
-import type { SerieItem } from "./mockData";
+import type { SerieItem } from "./tipos";
+import {
+  diaSaoPaulo,
+  diasEntre,
+  addDias,
+  diaMesCurto,
+  janelaUtc as janelaDias,
+  periodoAnterior,
+} from "./periodo";
 
 // Cliente com service role: SO no servidor, nunca exposto ao cliente.
 // A lista de ouvintes tem nome (PII) e RLS bloqueia anon, por isso service role.
@@ -20,6 +28,80 @@ function getServiceClient() {
     auth: { persistSession: false },
     global: { fetch: noStoreFetch },
   });
+}
+
+// ============================================================================
+// O POSTGREST CORTA EM 1000 LINHAS POR REQUISICAO, EM SILENCIO.
+// `db-max-rows=1000` faz `.limit(2000)` devolver 1000 sem erro nem aviso. Este
+// painel mentiu por causa disso: no periodo "Ano" nenhum total passava de 1000,
+// e com o seed de 49 mil ouvintes a mentira chegaria ate a janela de 30 dias.
+// Toda leitura que pode passar de 1000 linhas usa um destes dois caminhos:
+//   - contar(): numero exato calculado no banco (count exact, head), para KPI;
+//   - carregarTudo(): paginacao completa, para quando a linha e necessaria.
+// `.limit()` acima de 1000 nao deve voltar a aparecer neste arquivo.
+// ============================================================================
+
+type RespostaPagina = {
+  data: unknown[] | null;
+  error: unknown;
+  count?: number | null;
+};
+
+// Pagina ate o fim, com as paginas seguintes em paralelo (lotes de 6, para nao
+// despejar dezenas de requisicoes simultaneas no banco). O total vem do count
+// exato da primeira pagina, entao nao ha "pagina incompleta" adivinhando o fim.
+// TETO EXPLICITO: passar dele e ERRO, nunca corte silencioso. A ordenacao da
+// consulta tem que ser por coluna unica (id), senao a paginacao repete ou pula.
+async function carregarTudo<T>(
+  monta: (
+    de: number,
+    ate: number,
+    contar: boolean,
+  ) => PromiseLike<RespostaPagina>,
+  teto = 500_000,
+): Promise<T[]> {
+  const bloco = 1000;
+  const primeira = await monta(0, bloco - 1, true);
+  if (primeira.error) throw primeira.error;
+  const total = primeira.count ?? primeira.data?.length ?? 0;
+  if (total > teto) {
+    throw new Error(`carregarTudo: ${total} linhas passa do teto de ${teto}`);
+  }
+  const out = [...((primeira.data ?? []) as T[])];
+  const inicios: number[] = [];
+  for (let de = bloco; de < total; de += bloco) inicios.push(de);
+  for (let i = 0; i < inicios.length; i += 6) {
+    const lote = await Promise.all(
+      inicios.slice(i, i + 6).map((de) => monta(de, de + bloco - 1, false)),
+    );
+    for (const r of lote) {
+      if (r.error) throw r.error;
+      out.push(...((r.data ?? []) as T[]));
+    }
+  }
+  return out;
+}
+
+async function contar(q: PromiseLike<RespostaPagina>): Promise<number> {
+  const r = await q;
+  if (r.error) throw r.error;
+  return r.count ?? 0;
+}
+
+// `.in("id", ids)` com milhares de ids vira uma URL de centenas de KB e o
+// PostgREST recusa; o catch devolvia vazio e o sorteio ficava sem participante.
+// Em lotes de 150 a URL fica curta e cada resposta cabe nas 1000 linhas.
+async function emLotes<T>(
+  ids: string[],
+  consulta: (lote: string[]) => PromiseLike<RespostaPagina>,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < ids.length; i += 150) {
+    const r = await consulta(ids.slice(i, i + 150));
+    if (r.error) throw r.error;
+    out.push(...((r.data ?? []) as T[]));
+  }
+  return out;
 }
 
 export interface PromocaoRow {
@@ -51,21 +133,12 @@ export interface OuvinteRow {
   temConversa: boolean;
 }
 
-export interface KpisExtra {
-  cadastrados: number;
-  novos: number;
-  total: number;
-}
-
-export interface HotlinkExtra {
-  acessos: number;
-  conversoes: number;
-  taxa: number;
-}
-
+// Dados da tela OUVINTES (interna). KPIs e atribuicao comercial sairam daqui e
+// foram para getVisaoGeral, contados no banco.
 export interface PainelExtra {
   configurado: boolean;
   faixas: { id: number; label: string }[];
+  zonasDisponiveis: string[];
   musicasAmadas: SerieItem[];
   musicasRejeitadas: SerieItem[];
   artistasAmados: SerieItem[];
@@ -75,17 +148,21 @@ export interface PainelExtra {
   bairrosPorZona: Record<string, SerieItem[]>;
   bairrosGeral: SerieItem[];
   radios: SerieItem[];
-  promocoes: PromocaoRow[];
   pedidosDiversos: SerieItem[];
   funilAbandono: SerieItem[];
-  kpis: KpisExtra;
-  hotlink: HotlinkExtra;
   ouvintes: OuvinteRow[];
+  totalOuvintes: number;
 }
+
+// A lista vai para o navegador com nome completo (tela interna). Com o corte em
+// 1000 corrigido ela pode ter dezenas de milhares de linhas, que travariam a
+// pagina; os rankings continuam contando todo mundo, so a lista e limitada.
+const OUVINTES_LISTA_MAX = 500;
 
 const vazio: PainelExtra = {
   configurado: false,
   faixas: [],
+  zonasDisponiveis: [],
   musicasAmadas: [],
   musicasRejeitadas: [],
   artistasAmados: [],
@@ -95,12 +172,10 @@ const vazio: PainelExtra = {
   bairrosPorZona: {},
   bairrosGeral: [],
   radios: [],
-  promocoes: [],
   pedidosDiversos: [],
   funilAbandono: [],
-  kpis: { cadastrados: 0, novos: 0, total: 0 },
-  hotlink: { acessos: 0, conversoes: 0, taxa: 0 },
   ouvintes: [],
+  totalOuvintes: 0,
 };
 
 // Mascara o telefone mantendo DDD/pais e os ultimos 4 digitos (ex: 5511*****7060).
@@ -244,8 +319,9 @@ const PEDIDO_TIPO_LABEL: Record<string, string> = {
   outro: "Outro",
 };
 
-// Busca os dados expandidos (com nome) aplicando filtros de faixa e zona.
-// Tudo derivado de uma unica leitura de ouvintes + embeds.
+// Dados da tela OUVINTES, com filtros de faixa, zona e periodo.
+// Todas as leituras paginam ate o fim (carregarTudo): antes eram `.limit()` de
+// 2000 a 100000, e o PostgREST cortava cada uma em 1000.
 export async function getPainelExtra(
   faixa: number | null,
   zona: string | null,
@@ -274,86 +350,90 @@ export async function getPainelExtra(
       faixas.map((f) => [f.id, f.label] as [number, string]),
     );
 
-    let q = sb
-      .from("ouvintes")
-      .select(
-        "id, nome, telefone, bairro, zona, cidade, estado, idade, data_nascimento, numero, consentimento_em, estilo_musical, faixa_etaria, primeiro_contato_em, participacoes, musicas(sentimento, artista, titulo, nome), radios_concorrentes(nome_radio, nome_canonico)",
-      )
-      .order("primeiro_contato_em", { ascending: false })
-      .limit(2000);
-    if (faixa) q = q.eq("faixa_etaria", faixa);
-    if (zona) q = q.eq("zona", zona);
     // Filtro por data de cadastro: as datas escolhidas sao dias de Brasilia
     // (UTC-03:00 fixo, sem horario de verao). Converte pra UTC antes de consultar.
-    const deUtc = de ? `${de}T03:00:00.000Z` : null;
-    let ateUtc: string | null = null;
-    if (ate) {
-      const fim = new Date(`${ate}T03:00:00.000Z`);
-      fim.setUTCDate(fim.getUTCDate() + 1); // ate < dia seguinte (03:00Z)
-      ateUtc = fim.toISOString();
-    }
-    if (deUtc) q = q.gte("primeiro_contato_em", deUtc);
-    if (ateUtc) q = q.lt("primeiro_contato_em", ateUtc);
+    const { deUtc, ateUtc } = janelaUtc(de, ate);
 
-    // Promocoes: mesma janela de periodo (por criado_em). Agrega participantes distintos.
-    let qPromo = sb
-      .from("promocao_participacoes")
-      .select("promocao_nome, ouvinte_id")
-      .limit(20000);
-    if (radioId) qPromo = qPromo.eq("radio_id", radioId);
-    if (deUtc) qPromo = qPromo.gte("criado_em", deUtc);
-    if (ateUtc) qPromo = qPromo.lt("criado_em", ateUtc);
+    const [rowsRaw, promoRows, convRows, pedidosRows] = await Promise.all([
+      carregarTudo<OuvinteEmbed & { zona: string | null }>((i, f, c) => {
+        let q = sb
+          .from("ouvintes")
+          .select(
+            "id, nome, telefone, bairro, zona, cidade, estado, idade, data_nascimento, numero, consentimento_em, estilo_musical, faixa_etaria, primeiro_contato_em, participacoes, musicas(sentimento, artista, titulo, nome), radios_concorrentes(nome_radio, nome_canonico)",
+            c ? { count: "exact" } : undefined,
+          )
+          .order("id")
+          .range(i, f);
+        if (faixa) q = q.eq("faixa_etaria", faixa);
+        if (zona) q = q.eq("zona", zona);
+        if (deUtc) q = q.gte("primeiro_contato_em", deUtc);
+        if (ateUtc) q = q.lt("primeiro_contato_em", ateUtc);
+        return q;
+      }),
+      carregarTudo<{ promocao_nome: string | null; ouvinte_id: string | null }>(
+        (i, f, c) => {
+          let q = sb
+            .from("promocao_participacoes")
+            .select(
+              "promocao_nome, ouvinte_id",
+              c ? { count: "exact" } : undefined,
+            )
+            .order("id")
+            .range(i, f);
+          if (radioId) q = q.eq("radio_id", radioId);
+          if (deUtc) q = q.gte("criado_em", deUtc);
+          if (ateUtc) q = q.lt("criado_em", ateUtc);
+          return q;
+        },
+      ),
+      // Quem tem conversa: a contagem de mensagens vem agregada por conversa
+      // (mensagens(count)), em vez de baixar todas as mensagens so para saber
+      // quais conversas tem alguma.
+      carregarTudo<{
+        ouvinte_id: string | null;
+        mensagens: { count: number }[] | null;
+      }>((i, f, c) => {
+        let q = sb
+          .from("conversas")
+          .select(
+            "ouvinte_id, mensagens(count)",
+            c ? { count: "exact" } : undefined,
+          )
+          .order("id")
+          .range(i, f);
+        if (radioId) q = q.eq("radio_id", radioId);
+        return q;
+      }),
+      carregarTudo<{ tipo: string | null }>((i, f, c) => {
+        let q = sb
+          .from("pedidos")
+          .select("tipo", c ? { count: "exact" } : undefined)
+          .order("id")
+          .range(i, f);
+        if (radioId) q = q.eq("radio_id", radioId);
+        if (deUtc) q = q.gte("criado_em", deUtc);
+        if (ateUtc) q = q.lt("criado_em", ateUtc);
+        return q;
+      }),
+    ]);
 
-    // Pedidos diversos (v82): abraco/beijo/alo/camiseta/premio/outro registrados pelo bot
-    // apos cadastro completo. Card por tipo, respeitando radio_id + a mesma janela de periodo.
-    let qPedidos = sb.from("pedidos").select("tipo").limit(50000);
-    if (radioId) qPedidos = qPedidos.eq("radio_id", radioId);
-    if (deUtc) qPedidos = qPedidos.gte("criado_em", deUtc);
-    if (ateUtc) qPedidos = qPedidos.lt("criado_em", ateUtc);
+    // A lista aparece do cadastro mais recente para o mais antigo; a paginacao
+    // e por id (unico), entao a ordem de exibicao e aplicada aqui.
+    const rows = rowsRaw.sort((a, b) =>
+      (b.primeiro_contato_em ?? "").localeCompare(a.primeiro_contato_em ?? ""),
+    );
 
-    // Hotlink: cliques na mesma janela (a view painel_hotlink nao filtra data).
-    let qHot = sb.from("hotlink_cliques").select("convertido").limit(100000);
-    if (deUtc) qHot = qHot.gte("criado_em", deUtc);
-    if (ateUtc) qHot = qHot.lt("criado_em", ateUtc);
-
-    // Ouvintes com conversa: em vez de um embed reverso (mensagens ->
-    // conversas(ouvinte_id)), que dava falso-negativo para quem tem varias
-    // conversas, buscamos as duas tabelas e mapeamos conversa_id -> ouvinte_id.
-    let qMsgConv = sb.from("mensagens").select("conversa_id").limit(50000);
-    if (radioId) qMsgConv = qMsgConv.eq("radio_id", radioId);
-    let qConvOwner = sb.from("conversas").select("id, ouvinte_id").limit(50000);
-    if (radioId) qConvOwner = qConvOwner.eq("radio_id", radioId);
-
-    const [
-      { data, error },
-      promoRes,
-      msgRes,
-      convOwnerRes,
-      pedidosRes,
-      hotRes,
-    ] = await Promise.all([q, qPromo, qMsgConv, qConvOwner, qPedidos, qHot]);
-    if (error) throw error;
-    const rows = (data ?? []) as unknown as OuvinteEmbed[];
-
-    // Ouvintes que tem ao menos uma mensagem registrada (via conversa).
-    const conversasComMensagem = new Set<string>();
-    for (const m of (msgRes.data ?? []) as { conversa_id: string | null }[]) {
-      if (m.conversa_id) conversasComMensagem.add(m.conversa_id);
-    }
     const comConversa = new Set<string>();
-    for (const c of (convOwnerRes.data ?? []) as {
-      id: string;
-      ouvinte_id: string | null;
-    }[]) {
-      if (c.ouvinte_id && conversasComMensagem.has(c.id)) {
+    for (const c of convRows) {
+      if (c.ouvinte_id && (c.mensagens?.[0]?.count ?? 0) > 0) {
         comConversa.add(c.ouvinte_id);
       }
     }
 
     // Promocoes: agrupa variacoes parecidas (Levenshtein) sob o nome canonico.
-    const partsRaw: ParticipacaoRaw[] = (promoRes.data ?? []).map((p) => ({
-      ouvinteId: (p as { ouvinte_id: string | null }).ouvinte_id ?? "",
-      raw: (p as { promocao_nome: string | null }).promocao_nome ?? "",
+    const partsRaw: ParticipacaoRaw[] = promoRows.map((p) => ({
+      ouvinteId: p.ouvinte_id ?? "",
+      raw: p.promocao_nome ?? "",
       criadoEm: null,
     }));
     const gruposPromo = agruparPromocoes(partsRaw);
@@ -366,13 +446,6 @@ export async function getPainelExtra(
         promoPorOuvinte.set(oid, lista);
       }
     }
-    const promocoes: PromocaoRow[] = gruposPromo.map((g) => ({
-      slug: g.slug,
-      label: g.label,
-      variacoes: g.variacoes,
-      participantes: g.ouvintes.size,
-      participacoes: g.participacoes,
-    }));
 
     const amaMus: string[] = [];
     const rejMus: string[] = [];
@@ -383,8 +456,10 @@ export async function getPainelExtra(
     const bairrosAll: string[] = [];
     const bairrosPorZonaMap = new Map<string, string[]>();
     const faixaCount = new Map<number, number>();
+    const zonasDisponiveis = new Set<string>();
 
     const ouvintes: OuvinteRow[] = rows.map((o) => {
+      if (o.zona) zonasDisponiveis.add(o.zona);
       // v82: metricas/rankings/zonas/faixas contam SO cadastros completos. As listas
       // ama/rejeita/radios do PROPRIO ouvinte (usadas no ModalOuvinte) seguem sempre;
       // os acumuladores globais (amaMus, zonasAll, faixaCount, etc.) so recebem se completo.
@@ -458,19 +533,9 @@ export async function getPainelExtra(
       bairrosPorZona[z] = ranking(lista);
     });
 
-    // KPIs no periodo (v82): total = BRUTO (todos que encostaram no bot na janela);
-    // cadastrados e novos = SO cadastros completos (regua ouvinteCompleto), coerente com
-    // as views painel_* do SQL. Base ja filtrada por primeiro_contato_em.
-    const completosCount = rows.filter((o) => ouvinteCompleto(o)).length;
-    const kpis: KpisExtra = {
-      cadastrados: completosCount,
-      novos: completosCount,
-      total: rows.length,
-    };
-
     // Pedidos diversos por tipo (rotulo pt-BR). Ranking desc para o card.
     const pedidoCount = new Map<string, number>();
-    for (const p of (pedidosRes.data ?? []) as { tipo: string | null }[]) {
+    for (const p of pedidosRows) {
       const label =
         PEDIDO_TIPO_LABEL[(p.tipo ?? "").toLowerCase()] ??
         PEDIDO_TIPO_LABEL.outro;
@@ -500,21 +565,12 @@ export async function getPainelExtra(
       .filter((e) => funilCount.has(e))
       .map((e) => ({ label: e, valor: funilCount.get(e) ?? 0 }));
 
-    // Hotlink no periodo: conta cliques e conversoes na janela.
-    const cliques = (hotRes.data ?? []) as unknown as {
-      convertido: boolean | null;
-    }[];
-    const acessos = cliques.length;
-    const conversoes = cliques.filter((h) => h.convertido).length;
-    const hotlink: HotlinkExtra = {
-      acessos,
-      conversoes,
-      taxa: acessos > 0 ? Math.round((1000 * conversoes) / acessos) / 10 : 0,
-    };
-
     return {
       configurado: true,
       faixas,
+      zonasDisponiveis: Array.from(zonasDisponiveis).sort((a, b) =>
+        a.localeCompare(b, "pt-BR"),
+      ),
       musicasAmadas: ranking(amaMus),
       musicasRejeitadas: ranking(rejMus),
       artistasAmados: ranking(amaArt),
@@ -526,14 +582,13 @@ export async function getPainelExtra(
       bairrosPorZona,
       bairrosGeral: ranking(bairrosAll),
       radios: ranking(radiosAll),
-      promocoes,
       pedidosDiversos,
       funilAbandono,
-      kpis,
-      hotlink,
-      ouvintes,
+      ouvintes: ouvintes.slice(0, OUVINTES_LISTA_MAX),
+      totalOuvintes: ouvintes.length,
     };
-  } catch {
+  } catch (e) {
+    console.error("[getPainelExtra] falhou:", e);
     return vazio;
   }
 }
@@ -558,14 +613,19 @@ export async function getConversa(ouvinteId: string): Promise<MensagemChat[]> {
       .eq("ouvinte_id", ouvinteId);
     const ids = (convs ?? []).map((c) => c.id as string);
     if (ids.length === 0) return [];
-    const { data, error } = await sb
-      .from("mensagens")
-      .select("id, direcao, tipo, conteudo, criado_em")
-      .in("conversa_id", ids)
-      .order("criado_em", { ascending: true })
-      .limit(2000);
-    if (error) throw error;
-    return (data ?? []).map((m) => ({
+    const data = await carregarTudo<Record<string, unknown>>((i, f, c) =>
+      sb
+        .from("mensagens")
+        .select(
+          "id, direcao, tipo, conteudo, criado_em",
+          c ? { count: "exact" } : undefined,
+        )
+        .in("conversa_id", ids)
+        .order("criado_em", { ascending: true })
+        .order("id")
+        .range(i, f),
+    );
+    return data.map((m) => ({
       id: m.id as string,
       direcao: (m.direcao === "enviada" ? "enviada" : "recebida") as
         "recebida" | "enviada",
@@ -737,6 +797,55 @@ function janelaUtc(
   return { deUtc, ateUtc };
 }
 
+// Lista da tela PROMOCOES: grupos canonicos com participantes no periodo. Era
+// um pedaco do getPainelExtra; ganhou funcao propria para a tela nao carregar
+// ouvintes, musicas e conversas so para listar promocoes.
+export async function getPromocoes(
+  de: string | null,
+  ate: string | null,
+): Promise<{ configurado: boolean; promocoes: PromocaoRow[] }> {
+  const sb = getServiceClient();
+  if (!sb) return { configurado: false, promocoes: [] };
+  try {
+    const radioId = await resolverRadioId(sb);
+    const { deUtc, ateUtc } = janelaUtc(de, ate);
+    const rows = await carregarTudo<{
+      promocao_nome: string | null;
+      ouvinte_id: string | null;
+    }>((i, f, c) => {
+      let q = sb
+        .from("promocao_participacoes")
+        .select("promocao_nome, ouvinte_id", c ? { count: "exact" } : undefined)
+        .order("id")
+        .range(i, f);
+      if (radioId) q = q.eq("radio_id", radioId);
+      if (deUtc) q = q.gte("criado_em", deUtc);
+      if (ateUtc) q = q.lt("criado_em", ateUtc);
+      return q;
+    });
+    const grupos = agruparPromocoes(
+      rows.map((r) => ({
+        ouvinteId: r.ouvinte_id ?? "",
+        raw: r.promocao_nome ?? "",
+        criadoEm: null,
+      })),
+    );
+    return {
+      configurado: true,
+      promocoes: grupos.map((g) => ({
+        slug: g.slug,
+        label: g.label,
+        variacoes: g.variacoes,
+        participantes: g.ouvintes.size,
+        participacoes: g.participacoes,
+      })),
+    };
+  } catch (e) {
+    console.error("[getPromocoes] falhou:", e);
+    return { configurado: false, promocoes: [] };
+  }
+}
+
 export interface PromoVitoria {
   promocao: string;
   data: string | null;
@@ -796,16 +905,24 @@ export async function getPromocaoDetalhe(
     const radioId = await resolverRadioId(sb);
     const { deUtc, ateUtc } = janelaUtc(de, ate);
 
-    let qParts = sb
-      .from("promocao_participacoes")
-      .select("promocao_nome, ouvinte_id, criado_em")
-      .limit(20000);
-    if (radioId) qParts = qParts.eq("radio_id", radioId);
-    if (deUtc) qParts = qParts.gte("criado_em", deUtc);
-    if (ateUtc) qParts = qParts.lt("criado_em", ateUtc);
-    const { data: partsData } = await qParts;
+    // Paginado ate o fim: com `.limit(20000)` o PostgREST devolvia 1000, e quem
+    // estava depois do corte nunca podia ser sorteado.
+    const partsData = await carregarTudo<Record<string, unknown>>((i, f, c) => {
+      let q = sb
+        .from("promocao_participacoes")
+        .select(
+          "promocao_nome, ouvinte_id, criado_em",
+          c ? { count: "exact" } : undefined,
+        )
+        .order("id")
+        .range(i, f);
+      if (radioId) q = q.eq("radio_id", radioId);
+      if (deUtc) q = q.gte("criado_em", deUtc);
+      if (ateUtc) q = q.lt("criado_em", ateUtc);
+      return q;
+    });
 
-    const parts: ParticipacaoRaw[] = (partsData ?? []).map((p) => ({
+    const parts: ParticipacaoRaw[] = partsData.map((p) => ({
       ouvinteId: (p.ouvinte_id as string) ?? "",
       raw: (p.promocao_nome as string) ?? "",
       criadoEm: (p.criado_em as string) ?? null,
@@ -857,26 +974,31 @@ export async function getPromocaoDetalhe(
     }
 
     // Dados dos ouvintes (por id) e historico COMPLETO de vitorias (sem periodo).
-    let qVit = sb
-      .from("promocao_ganhadores")
-      .select("ouvinte_id, promocao_nome, confirmado_em")
-      .in("ouvinte_id", ids);
-    if (radioId) qVit = qVit.eq("radio_id", radioId);
-    const [{ data: ouvData }, { data: vitData }] = await Promise.all([
-      sb
-        .from("ouvintes")
-        .select("id, nome, telefone, bairro, zona, cidade, estado")
-        .in("id", ids),
-      qVit,
+    // Em lotes: `.in` com milhares de ids estoura a URL e a consulta falhava.
+    const [ouvData, vitData] = await Promise.all([
+      emLotes<Record<string, unknown>>(ids, (lote) =>
+        sb
+          .from("ouvintes")
+          .select("id, nome, telefone, bairro, zona, cidade, estado")
+          .in("id", lote),
+      ),
+      emLotes<Record<string, unknown>>(ids, (lote) => {
+        let q = sb
+          .from("promocao_ganhadores")
+          .select("ouvinte_id, promocao_nome, confirmado_em")
+          .in("ouvinte_id", lote);
+        if (radioId) q = q.eq("radio_id", radioId);
+        return q;
+      }),
     ]);
 
     const ouvMap = new Map(
-      (ouvData ?? []).map(
+      ouvData.map(
         (o) => [o.id as string, o] as [string, Record<string, unknown>],
       ),
     );
     const vitPorOuvinte = new Map<string, PromoVitoria[]>();
-    for (const v of vitData ?? []) {
+    for (const v of vitData) {
       const oid = v.ouvinte_id as string;
       const lista = vitPorOuvinte.get(oid) ?? [];
       lista.push({
@@ -923,14 +1045,11 @@ export async function getPromocaoDetalhe(
     );
     let ganOuvMap = new Map<string, Record<string, unknown>>();
     if (ganIds.length) {
-      const { data: go } = await sb
-        .from("ouvintes")
-        .select("id, nome, telefone, bairro")
-        .in("id", ganIds);
+      const go = await emLotes<Record<string, unknown>>(ganIds, (lote) =>
+        sb.from("ouvintes").select("id, nome, telefone, bairro").in("id", lote),
+      );
       ganOuvMap = new Map(
-        (go ?? []).map(
-          (o) => [o.id as string, o] as [string, Record<string, unknown>],
-        ),
+        go.map((o) => [o.id as string, o] as [string, Record<string, unknown>]),
       );
     }
     const ganhadores: PromoGanhador[] = (ganData ?? []).map((g) => {
@@ -1080,15 +1199,39 @@ const AUDIENCIA_LISTA_MAX = 120;
 // O PostgREST corta em db-max-rows=1000 por requisicao, entao `.limit(2000)`
 // devolve 1000 calado. Numero apresentado a anunciante nao pode ser truncado em
 // silencio, entao aqui se busca em blocos ate a pagina vir incompleta.
+//
+// O TETO QUEBRA VISIVEL, NUNCA CORTA CALADO. Ate 12/09/2026 o teto era 50.000 e o
+// laco simplesmente parava ao chegar nele: com o seed a base com consentimento
+// passa a 50.151, e a tela Comercial perderia 151 ouvintes sem aviso nenhum. O
+// teto subiu para 500.000 e, se algum dia for alcancado com linha sobrando, a
+// funcao lanca erro. getAudiencia captura, registra no log e a tela diz que nao
+// conseguiu carregar. Melhor quebrar visivel do que mostrar numero incompleto.
+//
+// ERRO DE PAGINA TAMBEM QUEBRA. A versao anterior nao olhava `error`: uma pagina
+// que falhasse no meio voltava com data nulo, contava como pagina vazia e
+// encerrava a leitura com a lista pela metade. O mesmo erro, por outra porta.
+//
+// O `.range()` e o laco pagina a pagina ficam exatamente como estavam.
 async function carregarTodos<T>(
-  monta: (de: number, ate: number) => PromiseLike<{ data: T[] | null }>,
+  monta: (
+    de: number,
+    ate: number,
+  ) => PromiseLike<{ data: T[] | null; error?: unknown }>,
   bloco = 1000,
-  tetoAbsoluto = 50000,
+  tetoAbsoluto = 500_000,
 ): Promise<T[]> {
   const out: T[] = [];
-  for (let de = 0; de < tetoAbsoluto; de += bloco) {
-    const { data } = await monta(de, de + bloco - 1);
+  for (let de = 0; ; de += bloco) {
+    const { data, error } = await monta(de, de + bloco - 1);
+    if (error) throw error;
     const linhas = data ?? [];
+    // So e estouro se AINDA HA linha depois do teto. Uma base com exatamente o
+    // teto de linhas le a pagina seguinte vazia e termina normalmente.
+    if (de >= tetoAbsoluto && linhas.length > 0) {
+      throw new Error(
+        `carregarTodos: mais de ${tetoAbsoluto} linhas; a lista estaria incompleta`,
+      );
+    }
     out.push(...linhas);
     if (linhas.length < bloco) break;
   }
@@ -1193,35 +1336,56 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
       return Array.from(new Set(brutos));
     };
 
-    // OPCOES saem do universo inteiro (sem filtro), senao escolher um bairro
-    // apagaria os outros bairros da lista e o comercial nao conseguiria trocar.
-    const setCidades = new Set<string>();
-    const setBairros = new Set<string>();
-    const setZonas = new Set<string>();
-    const setEstilos = new Set<string>();
-    const setProgramas = new Set<string>();
-    for (const o of ouvintes) {
-      if (o.cidade) setCidades.add(o.cidade);
-      if (o.bairro) setBairros.add(o.bairro);
-      if (o.zona) setZonas.add(o.zona);
-      if (o.estilo_musical) setEstilos.add(o.estilo_musical);
-      if (o.programa_locutor) setProgramas.add(o.programa_locutor);
-    }
-    const ordenar = (s: Set<string>) =>
-      Array.from(s).sort((a, b) => a.localeCompare(b, "pt-BR"));
-
-    const filtrados = ouvintes.filter((o) => {
+    // FILTROS EM CASCATA: CADA LISTA RESPEITA TODOS OS OUTROS FILTROS, MENOS ELA.
+    // Filtros independentes geravam contradicao na frente do cliente: escolhida
+    // a cidade Guarulhos, o filtro de zona seguia oferecendo as zonas de Sao
+    // Paulo e o de bairro oferecia Alphaville. Agora a cidade restringe as zonas,
+    // a zona restringe os bairros, e o bairro restringe o resto.
+    // O "MENOS ELA" e o que evita travar: se o filtro de bairro obedecesse ao
+    // proprio bairro escolhido, escolher Tatuape apagaria os outros bairros da
+    // lista e ninguem conseguiria trocar de bairro sem limpar tudo.
+    // O interruptor de demonstracao vale para todas as listas: com a demo
+    // desligada, bairro que so existe no seed nao aparece e nao devolve zero.
+    type Dim = "cidade" | "bairro" | "zona" | "faixa" | "estilo" | "programa";
+    const passa = (o: OuvinteAud, ignorar?: Dim): boolean => {
       if (!f.incluirDemo && ehDemo(o)) return false;
-      if (f.cidade && o.cidade !== f.cidade) return false;
-      if (f.bairro && o.bairro !== f.bairro) return false;
-      if (f.zona && o.zona !== f.zona) return false;
-      if (f.faixa && o.faixa_etaria !== f.faixa) return false;
-      if (f.estilo && o.estilo_musical !== f.estilo) return false;
-      if (f.programa && o.programa_locutor !== f.programa) return false;
+      if (ignorar !== "cidade" && f.cidade && o.cidade !== f.cidade)
+        return false;
+      if (ignorar !== "bairro" && f.bairro && o.bairro !== f.bairro)
+        return false;
+      if (ignorar !== "zona" && f.zona && o.zona !== f.zona) return false;
+      if (ignorar !== "faixa" && f.faixa && o.faixa_etaria !== f.faixa)
+        return false;
+      if (ignorar !== "estilo" && f.estilo && o.estilo_musical !== f.estilo)
+        return false;
+      if (
+        ignorar !== "programa" &&
+        f.programa &&
+        o.programa_locutor !== f.programa
+      )
+        return false;
       if (f.comPedido && !comPedido.has(o.id)) return false;
       if (f.comPromocao && !comPromo.has(o.id)) return false;
       return true;
-    });
+    };
+    const ordenar = (s: Set<string>) =>
+      Array.from(s).sort((a, b) => a.localeCompare(b, "pt-BR"));
+    const opcoesDe = (d: Dim, valor: (o: OuvinteAud) => string | null) => {
+      const set = new Set<string>();
+      for (const o of ouvintes) {
+        if (!passa(o, d)) continue;
+        const v = valor(o);
+        if (v) set.add(v);
+      }
+      return ordenar(set);
+    };
+    const faixasPresentes = new Set(
+      opcoesDe("faixa", (o) =>
+        o.faixa_etaria != null ? String(o.faixa_etaria) : null,
+      ),
+    );
+
+    const filtrados = ouvintes.filter((o) => passa(o));
 
     const mFaixa = new Map<string, number>();
     const mEstilo = new Map<string, number>();
@@ -1279,16 +1443,484 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
       lista,
       listaTruncadaEm: AUDIENCIA_LISTA_MAX,
       opcoes: {
-        cidades: ordenar(setCidades),
-        bairros: ordenar(setBairros),
-        zonas: ordenar(setZonas),
-        estilos: ordenar(setEstilos),
-        programas: ordenar(setProgramas),
-        faixas,
+        cidades: opcoesDe("cidade", (o) => o.cidade),
+        bairros: opcoesDe("bairro", (o) => o.bairro),
+        zonas: opcoesDe("zona", (o) => o.zona),
+        estilos: opcoesDe("estilo", (o) => o.estilo_musical),
+        programas: opcoesDe("programa", (o) => o.programa_locutor),
+        // Faixa segue a ordem das idades, nao a alfabetica.
+        faixas: faixas.filter((x) => faixasPresentes.has(String(x.id))),
       },
     };
   } catch (e) {
     console.error("[getAudiencia] falhou:", e);
     return audienciaVazia;
+  }
+}
+
+// ============================================================================
+// VISAO GERAL: seis secoes em sequencia de leitura.
+//
+// SECAO 01, AS TRES MEDIDAS SAO ANINHADAS E TODAS SO COM CONSENTIMENTO.
+//  - base: quem consentiu e chegou ate o fim do periodo (acumulado);
+//  - completos: os da base que passam na regua de cadastro completo;
+//  - novos: os da base cujo primeiro contato caiu dentro do periodo.
+// Completos e novos sao subconjuntos da base, entao nenhum cartao contradiz
+// outro. Antes existiam dois cartoes com a MESMA variavel
+// (`cadastrados: completosCount, novos: completosCount`) e um total que incluia
+// quem nao consentiu, contados sobre uma lista cortada em 1000.
+// Quem nao consentiu nao e audiencia utilizavel, e a tela Comercial ja contava
+// assim: os dois lugares agora dizem a mesma coisa.
+//
+// A REGUA NAO E COPIADA. `ouvinte_completo=is.true` usa a funcao SQL
+// public.ouvinte_completo(ouvintes) como coluna calculada do PostgREST, e as
+// secoes 03 a 06 usam ouvinteCompleto() deste arquivo. As tres reguas (bot,
+// SQL, este arquivo) continuam sendo as mesmas tres.
+//
+// SECOES 03 A 06 contam os CADASTROS COMPLETOS QUE CHEGARAM NO PERIODO, que e a
+// decisao da v82 para rankings e distribuicoes, mantida sem alteracao.
+// ============================================================================
+
+export type Granularidade = "hora" | "dia" | "semana";
+
+export interface PontoSerie {
+  rotulo: string;
+  atual: number;
+  anterior: number;
+}
+
+export interface ItemMusica {
+  label: string;
+  sub: string | null;
+  valor: number;
+}
+
+export interface VisaoGeral {
+  configurado: boolean;
+  de: string;
+  ate: string;
+  geradoEm: string;
+  base: number;
+  baseInicio: number;
+  completos: number;
+  novos: number;
+  novosAnterior: number;
+  dias: number;
+  serie: {
+    granularidade: Granularidade;
+    pontos: PontoSerie[];
+    melhor: { rotulo: string; valor: number } | null;
+  };
+  completosNoPeriodo: number;
+  faixa: {
+    distribuicao: SerieItem[];
+    concentracao: { rotulo: string; pct: number } | null;
+    idadeMedia: number | null;
+    maisComum: string | null;
+  };
+  zonas: SerieItem[];
+  bairros: SerieItem[];
+  cidades: SerieItem[];
+  estilos: SerieItem[];
+  artistas: SerieItem[];
+  musicas: ItemMusica[];
+  programas: SerieItem[];
+  promocao: {
+    participantes: number;
+    promocoes: number;
+    maiorAdesao: { label: string; participantes: number } | null;
+  };
+  pedidos: { musica: number; recados: number; porTipo: SerieItem[] };
+  ativosSemana: number;
+  hotlink: { acessos: number; conversoes: number; taxa: number };
+}
+
+const TIPOS_RECADO = ["beijo", "abraco", "alo"];
+
+function visaoVazia(de: string, ate: string): VisaoGeral {
+  return {
+    configurado: false,
+    de,
+    ate,
+    geradoEm: new Date().toISOString(),
+    base: 0,
+    baseInicio: 0,
+    completos: 0,
+    novos: 0,
+    novosAnterior: 0,
+    dias: diasEntre(de, ate) + 1,
+    serie: { granularidade: "dia", pontos: [], melhor: null },
+    completosNoPeriodo: 0,
+    faixa: {
+      distribuicao: [],
+      concentracao: null,
+      idadeMedia: null,
+      maisComum: null,
+    },
+    zonas: [],
+    bairros: [],
+    cidades: [],
+    estilos: [],
+    artistas: [],
+    musicas: [],
+    programas: [],
+    promocao: { participantes: 0, promocoes: 0, maiorAdesao: null },
+    pedidos: { musica: 0, recados: 0, porTipo: [] },
+    ativosSemana: 0,
+    hotlink: { acessos: 0, conversoes: 0, taxa: 0 },
+  };
+}
+
+const fmtHoraSp = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "America/Sao_Paulo",
+  hour: "2-digit",
+  hour12: false,
+});
+
+// Serie do periodo atual contra o anterior, alinhada por posicao: o 1o dia do
+// atual contra o 1o dia do anterior. Um dia vira 24 horas; ate 62 dias, um ponto
+// por dia; acima disso, um ponto por semana (365 barras nao se leem).
+function montarSerie(
+  timestamps: string[],
+  de: string,
+  ate: string,
+  deAnt: string,
+): VisaoGeral["serie"] {
+  const dias = diasEntre(de, ate) + 1;
+  const gran: Granularidade =
+    dias === 1 ? "hora" : dias <= 62 ? "dia" : "semana";
+  const n = gran === "hora" ? 24 : gran === "dia" ? dias : Math.ceil(dias / 7);
+  const atual = new Array<number>(n).fill(0);
+  const anterior = new Array<number>(n).fill(0);
+  for (const ts of timestamps) {
+    const dia = diaSaoPaulo(ts);
+    const ehAtual = dia >= de && dia <= ate;
+    const inicio = ehAtual ? de : deAnt;
+    let idx: number;
+    if (gran === "hora") idx = Number(fmtHoraSp.format(new Date(ts))) % 24;
+    else if (gran === "dia") idx = diasEntre(inicio, dia);
+    else idx = Math.floor(diasEntre(inicio, dia) / 7);
+    if (idx < 0 || idx >= n) continue;
+    if (ehAtual) atual[idx] += 1;
+    else anterior[idx] += 1;
+  }
+  const rotulo = (i: number) =>
+    gran === "hora"
+      ? `${String(i).padStart(2, "0")}h`
+      : diaMesCurto(addDias(de, gran === "dia" ? i : i * 7));
+  const pontos = atual.map((v, i) => ({
+    rotulo: rotulo(i),
+    atual: v,
+    anterior: anterior[i],
+  }));
+  let melhor: { rotulo: string; valor: number } | null = null;
+  for (const p of pontos) {
+    if (p.atual > 0 && (!melhor || p.atual > melhor.valor)) {
+      melhor = { rotulo: p.rotulo, valor: p.atual };
+    }
+  }
+  return { granularidade: gran, pontos, melhor };
+}
+
+// Janela de 4 faixas consecutivas (20 anos) com mais gente. E o "publico que a
+// radio vende melhor" do arquivo de referencia, calculado e nao escrito a mao.
+function concentracaoFaixas(
+  dist: { label: string; valor: number }[],
+  total: number,
+): { rotulo: string; pct: number } | null {
+  if (dist.length < 4 || total <= 0) return null;
+  let melhor = -1;
+  let ini = 0;
+  for (let i = 0; i + 4 <= dist.length; i++) {
+    const soma = dist.slice(i, i + 4).reduce((a, x) => a + x.valor, 0);
+    if (soma > melhor) {
+      melhor = soma;
+      ini = i;
+    }
+  }
+  const nums = (t: string) => (t.match(/\d+/g) ?? []).map(Number);
+  const a = nums(dist[ini].label)[0];
+  const ultimo = dist[ini + 3].label;
+  const b = nums(ultimo);
+  const rotulo =
+    /mais/i.test(ultimo) || b.length < 2
+      ? `${a} anos ou mais`
+      : `${a} a ${b[1]} anos`;
+  return { rotulo, pct: Math.round((melhor / total) * 100) };
+}
+
+export async function getVisaoGeral(
+  de: string,
+  ate: string,
+): Promise<VisaoGeral> {
+  const sb = getServiceClient();
+  if (!sb) return visaoVazia(de, ate);
+
+  try {
+    const ant = periodoAnterior(de, ate);
+    const { deUtc, ateUtc } = janelaDias(de, ate);
+    const { deUtc: deAntUtc } = janelaDias(ant.de, ant.ate);
+    const semanaUtc = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    const radioId = await resolverRadioId(sb);
+
+    const cont = () =>
+      sb
+        .from("ouvintes")
+        .select("id", { count: "exact", head: true })
+        .not("consentimento_em", "is", null);
+
+    const [
+      { data: faixasRows },
+      base,
+      baseInicio,
+      completos,
+      novos,
+      novosAnterior,
+      ativosSemana,
+      acessos,
+      conversoes,
+      pedidosMusica,
+      porTipoContagens,
+      timestamps,
+      periodoRows,
+      promoRows,
+    ] = await Promise.all([
+      sb
+        .from("faixas_etarias")
+        .select("id, label, idade_min")
+        .gte("idade_min", 10)
+        .order("id"),
+      contar(cont().lt("primeiro_contato_em", ateUtc)),
+      contar(cont().lt("primeiro_contato_em", deUtc)),
+      contar(
+        cont().lt("primeiro_contato_em", ateUtc).is("ouvinte_completo", true),
+      ),
+      contar(
+        cont()
+          .gte("primeiro_contato_em", deUtc)
+          .lt("primeiro_contato_em", ateUtc),
+      ),
+      contar(
+        cont()
+          .gte("primeiro_contato_em", deAntUtc)
+          .lt("primeiro_contato_em", deUtc),
+      ),
+      contar(cont().gte("ultimo_contato_em", semanaUtc)),
+      contar(
+        sb
+          .from("hotlink_cliques")
+          .select("id", { count: "exact", head: true })
+          .gte("criado_em", deUtc)
+          .lt("criado_em", ateUtc),
+      ),
+      contar(
+        sb
+          .from("hotlink_cliques")
+          .select("id", { count: "exact", head: true })
+          .gte("criado_em", deUtc)
+          .lt("criado_em", ateUtc)
+          .eq("convertido", true),
+      ),
+      // PEDIDO DE MUSICA vem de `musicas` (sentimento "ama" com titulo), que e
+      // onde o bot grava; o bot nao grava musica em `pedidos`.
+      (() => {
+        let q = sb
+          .from("musicas")
+          .select("id", { count: "exact", head: true })
+          .eq("sentimento", "ama")
+          .not("titulo", "is", null)
+          .gte("criado_em", deUtc)
+          .lt("criado_em", ateUtc);
+        if (radioId) q = q.eq("radio_id", radioId);
+        return contar(q);
+      })(),
+      Promise.all(
+        Object.keys(PEDIDO_TIPO_LABEL).map(async (tipo) => {
+          let q = sb
+            .from("pedidos")
+            .select("id", { count: "exact", head: true })
+            .eq("tipo", tipo)
+            .gte("criado_em", deUtc)
+            .lt("criado_em", ateUtc);
+          if (radioId) q = q.eq("radio_id", radioId);
+          return [tipo, await contar(q)] as [string, number];
+        }),
+      ),
+      carregarTudo<{ primeiro_contato_em: string }>((i, f, c) =>
+        sb
+          .from("ouvintes")
+          .select("primeiro_contato_em", c ? { count: "exact" } : undefined)
+          .not("consentimento_em", "is", null)
+          .gte("primeiro_contato_em", deAntUtc)
+          .lt("primeiro_contato_em", ateUtc)
+          .order("id")
+          .range(i, f),
+      ),
+      carregarTudo<OuvinteEmbed & { programa_locutor: string | null }>(
+        (i, f, c) =>
+          sb
+            .from("ouvintes")
+            .select(
+              "id, nome, bairro, zona, cidade, estado, idade, data_nascimento, numero, consentimento_em, estilo_musical, programa_locutor, faixa_etaria, primeiro_contato_em, musicas(sentimento, artista, titulo, nome)",
+              c ? { count: "exact" } : undefined,
+            )
+            .not("consentimento_em", "is", null)
+            .gte("primeiro_contato_em", deUtc)
+            .lt("primeiro_contato_em", ateUtc)
+            .order("id")
+            .range(i, f),
+      ),
+      carregarTudo<{ promocao_nome: string | null; ouvinte_id: string | null }>(
+        (i, f, c) => {
+          let q = sb
+            .from("promocao_participacoes")
+            .select(
+              "promocao_nome, ouvinte_id",
+              c ? { count: "exact" } : undefined,
+            )
+            .gte("criado_em", deUtc)
+            .lt("criado_em", ateUtc)
+            .order("id")
+            .range(i, f);
+          if (radioId) q = q.eq("radio_id", radioId);
+          return q;
+        },
+      ),
+    ]);
+
+    const faixas = (faixasRows ?? []).map((x) => ({
+      id: x.id as number,
+      label: x.label as string,
+    }));
+
+    // Secoes 03 a 06: cadastros completos que chegaram no periodo.
+    const completosPer = periodoRows.filter((o) => ouvinteCompleto(o));
+    const faixaCount = new Map<number, number>();
+    const zonasL: string[] = [];
+    const bairrosL: string[] = [];
+    const cidadesL: string[] = [];
+    const estilosL: string[] = [];
+    const artistasL: string[] = [];
+    const programasL: string[] = [];
+    const musicasMap = new Map<string, ItemMusica>();
+    let somaIdade = 0;
+    let comIdade = 0;
+    for (const o of completosPer) {
+      if (o.faixa_etaria != null) {
+        faixaCount.set(
+          o.faixa_etaria,
+          (faixaCount.get(o.faixa_etaria) ?? 0) + 1,
+        );
+      }
+      if (o.idade != null) {
+        somaIdade += o.idade;
+        comIdade += 1;
+      }
+      if (o.zona) zonasL.push(o.zona);
+      if (o.bairro) bairrosL.push(o.bairro);
+      if (o.cidade) cidadesL.push(o.cidade);
+      if (o.estilo_musical) estilosL.push(o.estilo_musical);
+      if (o.programa_locutor) programasL.push(o.programa_locutor);
+      for (const m of o.musicas ?? []) {
+        if (m.sentimento !== "ama") continue;
+        if (m.artista) artistasL.push(m.artista);
+        if (m.titulo) {
+          const chave = `${m.titulo}|${m.artista ?? ""}`
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[̀-ͯ]/g, "");
+          const cur = musicasMap.get(chave);
+          if (cur) cur.valor += 1;
+          else
+            musicasMap.set(chave, {
+              label: m.titulo,
+              sub: m.artista,
+              valor: 1,
+            });
+        }
+      }
+    }
+    const distribuicao = faixas
+      .map((x) => ({ label: x.label, valor: faixaCount.get(x.id) ?? 0 }))
+      .filter((x) => x.valor > 0);
+    const totalFaixa = distribuicao.reduce((a, x) => a + x.valor, 0);
+    const maisComum =
+      distribuicao.length > 0
+        ? distribuicao.reduce((a, x) => (x.valor > a.valor ? x : a)).label
+        : null;
+
+    const grupos = agruparPromocoes(
+      promoRows.map((r) => ({
+        ouvinteId: r.ouvinte_id ?? "",
+        raw: r.promocao_nome ?? "",
+        criadoEm: null,
+      })),
+    );
+    const participantes = new Set(
+      promoRows.map((r) => r.ouvinte_id).filter(Boolean),
+    ).size;
+
+    const porTipo = porTipoContagens
+      .filter(([, n]) => n > 0)
+      .map(([tipo, n]) => ({
+        label: PEDIDO_TIPO_LABEL[tipo] ?? tipo,
+        valor: n,
+      }))
+      .sort((a, b) => b.valor - a.valor);
+    const recados = porTipoContagens
+      .filter(([tipo]) => TIPOS_RECADO.includes(tipo))
+      .reduce((a, [, n]) => a + n, 0);
+
+    return {
+      configurado: true,
+      de,
+      ate,
+      geradoEm: new Date().toISOString(),
+      base,
+      baseInicio,
+      completos,
+      novos,
+      novosAnterior,
+      dias: diasEntre(de, ate) + 1,
+      serie: montarSerie(
+        timestamps.map((t) => t.primeiro_contato_em),
+        de,
+        ate,
+        ant.de,
+      ),
+      completosNoPeriodo: completosPer.length,
+      faixa: {
+        distribuicao,
+        concentracao: concentracaoFaixas(distribuicao, totalFaixa),
+        idadeMedia: comIdade > 0 ? Math.round(somaIdade / comIdade) : null,
+        maisComum,
+      },
+      zonas: ranking(zonasL, 6),
+      bairros: ranking(bairrosL, 6),
+      cidades: ranking(cidadesL, 5),
+      estilos: ranking(estilosL, 6),
+      artistas: ranking(artistasL, 6),
+      musicas: Array.from(musicasMap.values())
+        .sort((a, b) => b.valor - a.valor)
+        .slice(0, 6),
+      programas: ranking(programasL, 5),
+      promocao: {
+        participantes,
+        promocoes: grupos.length,
+        maiorAdesao: grupos[0]
+          ? { label: grupos[0].label, participantes: grupos[0].ouvintes.size }
+          : null,
+      },
+      pedidos: { musica: pedidosMusica, recados, porTipo },
+      ativosSemana,
+      hotlink: {
+        acessos,
+        conversoes,
+        taxa: acessos > 0 ? Math.round((1000 * conversoes) / acessos) / 10 : 0,
+      },
+    };
+  } catch (e) {
+    console.error("[getVisaoGeral] falhou:", e);
+    return visaoVazia(de, ate);
   }
 }

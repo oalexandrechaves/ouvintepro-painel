@@ -5,12 +5,35 @@
 :root {
   --font-clash: "Clash Display", system-ui, sans-serif;
   --font-dm-sans: "DM Sans", system-ui, sans-serif;
+  --font-dm-mono: "DM Mono", ui-monospace, monospace;
 }
 
 @layer base {
+  /* FUNDO DA APLICACAO, conforme o arquivo de referencia: gradiente quase
+     imperceptivel, dois brilhos radiais a 5% e uma textura de linhas a 1,7%.
+     No tema claro leveza vem de espaco e borda de 1px, nao de orb animado. */
   body {
-    @apply bg-ink-950 text-mist-100 font-sans antialiased;
+    @apply font-sans text-texto-titulo antialiased;
     min-height: 100vh;
+    background-color: #f5f5f8;
+    background-image:
+      radial-gradient(
+        900px 520px at 88% -8%,
+        rgba(216, 27, 96, 0.055),
+        transparent 70%
+      ),
+      radial-gradient(
+        800px 500px at 2% 4%,
+        rgba(124, 58, 237, 0.045),
+        transparent 68%
+      ),
+      linear-gradient(180deg, #fafafc 0%, #f4f4f7 55%, #f2f2f6 100%),
+      repeating-linear-gradient(
+        0deg,
+        rgba(20, 22, 26, 0.017) 0 1px,
+        transparent 1px 4px
+      );
+    background-attachment: fixed;
   }
 
   h1,
@@ -19,132 +42,128 @@
   h4 {
     @apply font-display;
   }
+
+  a {
+    color: #c2185b;
+  }
+  a:hover {
+    color: #8e1043;
+  }
+
+  /* FOCO VISIVEL em todo campo e botao. Sem isso, quem navega por teclado nao
+     sabe onde esta. So em :focus-visible, para o clique de mouse nao acender. */
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  button:focus-visible,
+  a:focus-visible,
+  [tabindex]:focus-visible {
+    outline: none;
+    border-color: #d81b60;
+    box-shadow: 0 0 0 3px rgba(216, 27, 96, 0.12);
+  }
 }
 
 @layer components {
-  /* Cartao de vidro */
-  .glass {
-    @apply relative rounded-2xl border border-white/5 bg-ink-900/60 backdrop-blur-xl;
-    box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
-      0 20px 50px -20px rgba(0, 0, 0, 0.6);
-    transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1),
-      box-shadow 0.35s ease, border-color 0.35s ease;
+  /* Cartao do tema claro: branco, borda de 1px, sombra quase invisivel. O
+     hover sobe 2px e troca para a sombra de hover, com as curvas do arquivo. */
+  .cartao {
+    @apply rounded-2xl border border-borda-cartao bg-fundo-cartao shadow-repouso;
+    transition:
+      box-shadow 0.28s ease,
+      border-color 0.28s ease,
+      transform 0.28s cubic-bezier(0.22, 0.8, 0.3, 1);
+  }
+  .cartao-interativo:hover {
+    @apply border-borda-hover shadow-hover;
+    transform: translateY(-2px);
   }
 
-  .glass:hover {
-    transform: translateY(-6px);
-    border-color: rgba(168, 85, 247, 0.35);
-    box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.06) inset,
-      0 30px 70px -25px rgba(168, 85, 247, 0.35),
-      0 0 40px -10px rgba(255, 61, 129, 0.25);
-  }
-
-  /* Texto gradiente animado */
+  /* Numero de destaque em gradiente de marca. Estatico: no tema claro o
+     gradiente animado do tema escuro chamava atencao demais. */
   .text-gradient {
-    background: linear-gradient(
-      100deg,
-      #ff3d81 0%,
-      #a855f7 45%,
-      #22d3ee 100%
-    );
-    background-size: 200% auto;
+    background: linear-gradient(100deg, #d81b60, #7c3aed);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
-    animation: gradientShift 8s ease infinite;
   }
 
-  /* Barra com gradiente e glow */
-  .bar-fill {
-    background: linear-gradient(90deg, #ff3d81, #a855f7);
-    box-shadow: 0 0 18px -4px rgba(168, 85, 247, 0.7);
+  .barra-h {
+    background: linear-gradient(90deg, #7c3aed, #d81b60);
     border-radius: 9999px;
-    transition: width 0.9s cubic-bezier(0.2, 0.8, 0.2, 1);
+    transition: width 0.85s cubic-bezier(0.22, 0.8, 0.3, 1);
+  }
+  .barra-alerta {
+    background: linear-gradient(90deg, #b45309, #d81b60);
+    border-radius: 9999px;
+    transition: width 0.9s cubic-bezier(0.22, 0.8, 0.3, 1);
+  }
+
+  /* Rotulo em caixa alta e numeracao de secao: DM Mono. */
+  .rotulo-mono {
+    @apply font-mono uppercase text-texto-rotulo;
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+  }
+
+  /* Esqueleto de carregamento animado por shimmer. */
+  .esqueleto {
+    background: linear-gradient(90deg, #f1f1f5 25%, #e9e9ef 37%, #f1f1f5 63%);
+    background-size: 420px 100%;
+    @apply animate-shimmer;
+  }
+
+  .campo {
+    @apply w-full min-w-0 rounded-[9px] border border-borda-campo bg-fundo-cartao px-3 py-2 text-sm text-texto-titulo outline-none;
+    transition:
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+  .campo:hover {
+    border-color: #d0d0d8;
+  }
+
+  .botao {
+    @apply inline-flex items-center justify-center gap-2 rounded-[9px] px-4 py-2 text-[13px] font-medium;
+    transition:
+      background-color 0.2s ease,
+      border-color 0.2s ease,
+      color 0.2s ease;
+  }
+  .botao-primario {
+    @apply botao bg-magenta text-white hover:bg-magenta-escuro disabled:opacity-50;
+  }
+  .botao-secundario {
+    @apply botao border border-borda-campo bg-fundo-cartao text-texto-titulo hover:border-magenta hover:text-magenta disabled:opacity-50;
   }
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
-}
-
-/* Fundo: grid pattern */
-.bg-grid {
-  background-image: linear-gradient(
-      to right,
-      rgba(255, 255, 255, 0.03) 1px,
-      transparent 1px
-    ),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-  background-size: 56px 56px;
-}
-
-/* Orbs desfocados com parallax */
-.orb {
-  position: fixed;
-  border-radius: 9999px;
-  filter: blur(90px);
-  opacity: 0.5;
-  pointer-events: none;
-  z-index: 0;
-  will-change: transform;
-  transition: transform 0.5s ease-out;
-}
-
-.orb-pink {
-  width: 480px;
-  height: 480px;
-  background: radial-gradient(circle, #ff3d81, transparent 70%);
-  top: -120px;
-  left: -100px;
-}
-
-.orb-violet {
-  width: 520px;
-  height: 520px;
-  background: radial-gradient(circle, #a855f7, transparent 70%);
-  bottom: -160px;
-  right: -120px;
-}
-
-.orb-cyan {
-  width: 380px;
-  height: 380px;
-  background: radial-gradient(circle, #22d3ee, transparent 70%);
-  top: 40%;
-  left: 55%;
-  opacity: 0.32;
-}
-
-/* Noise overlay */
-.noise {
-  position: fixed;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-  opacity: 0.04;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-
-/* Scrollbar custom */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
-
-::-webkit-scrollbar-track {
-  background: #0e0e18;
-}
-
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(#a855f7, #ff3d81);
-  border-radius: 9999px;
-  border: 2px solid #0e0e18;
+  background: #dcdce2;
+  border-radius: 8px;
+  border: 3px solid #f6f6f8;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(#ff3d81, #22d3ee);
+/* MOVIMENTO REDUZIDO. Quem pede menos movimento no sistema nao recebe entrada
+   por rolagem, cartao subindo no hover, barra crescendo nem shimmer. Os
+   componentes que animam por JS (Revelar, CountUp, barras) leem a mesma
+   preferencia; isto cobre o que e so CSS. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .cartao-interativo:hover {
+    transform: none;
+  }
 }
 
 /* IMPRESSAO DA PECA DE CAMPANHA.
@@ -153,6 +172,9 @@
    baixar, sem dependencia nova e sem problema de acentuacao por fonte
    embutida. `visibility` em vez de `display` preserva o layout do que fica. */
 @media print {
+  body {
+    background: #ffffff !important;
+  }
   body * {
     visibility: hidden;
   }
@@ -169,10 +191,6 @@
     border-radius: 0 !important;
   }
   .no-print {
-    display: none !important;
-  }
-  .orb,
-  .noise {
     display: none !important;
   }
 }

@@ -4,17 +4,21 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
-// NAVEGACAO LATERAL DO PAINEL.
+// NAVEGACAO LATERAL DO AtendentePRO.
 // Vive dentro do route group (painel), entao NAO aparece no /login: mostrar
 // navegacao de painel para quem ainda nao autenticou e o erro classico de quem
 // poe a barra no layout raiz.
 //
-// Dois itens de proposito. "Ouvintes" nao existe como visao separada hoje (o
-// que existe e o ModalOuvinte, que abre de dentro do dashboard), e item de menu
-// que aponta para pagina inventada e pior do que menu curto.
-const ITENS: { href: string; label: string; desc: string }[] = [
-  { href: "/", label: "Dashboard", desc: "Visão geral dos ouvintes" },
-  { href: "/audiencia", label: "Audiência", desc: "Público para anunciantes" },
+// "Em breve" e item que existe no produto e ainda nao tem tela: aparece, nao
+// navega e diz por que. Atendimentos ainda nao existe. Painel de Controle chega
+// no PR C, junto com usuarios e permissoes.
+const ITENS: { href: string; rotulo: string; emBreve?: boolean }[] = [
+  { href: "/", rotulo: "Visão geral" },
+  { href: "/atendimentos", rotulo: "Atendimentos", emBreve: true },
+  { href: "/ouvintes", rotulo: "Ouvintes" },
+  { href: "/comercial", rotulo: "Comercial" },
+  { href: "/promocoes", rotulo: "Promoções" },
+  { href: "/painel-de-controle", rotulo: "Painel de Controle", emBreve: true },
 ];
 
 function itemAtivo(pathname: string, href: string): boolean {
@@ -22,15 +26,25 @@ function itemAtivo(pathname: string, href: string): boolean {
   return href === "/" ? pathname === "/" : pathname.startsWith(href);
 }
 
+function iniciais(nome: string | null): string {
+  const partes = (nome ?? "")
+    .trim()
+    .split(/[\s._-]+/)
+    .filter(Boolean);
+  if (!partes.length) return "?";
+  return (
+    partes[0][0] + (partes.length > 1 ? partes[partes.length - 1][0] : "")
+  ).toUpperCase();
+}
+
 export default function Sidebar({ usuario }: { usuario: string | null }) {
   const pathname = usePathname();
   const router = useRouter();
   const [aberto, setAberto] = useState(false);
   const [saindo, setSaindo] = useState(false);
-  // SO PARA ACESSIBILIDADE. Quem decide a visibilidade continua sendo o Tailwind
-  // (lg:hidden e lg:flex). Isto existe porque display:none esconde da tela mas os
-  // DOIS blocos de navegacao coexistem no DOM: querySelectorAll("nav a") devolvia
-  // 4 links e um leitor de tela anunciava Dashboard e Audiencia duas vezes.
+  // SO PARA ACESSIBILIDADE. Quem decide a visibilidade e o Tailwind (lg:hidden e
+  // lg:flex); isto existe porque display:none esconde da tela mas os DOIS blocos
+  // de navegacao coexistem no DOM, e leitor de tela anunciava tudo duas vezes.
   // Comeca false para o HTML do servidor bater com o do cliente na hidratacao.
   const [ehDesktop, setEhDesktop] = useState(false);
   useEffect(() => {
@@ -52,9 +66,34 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
     }
   }
 
+  const marca = (
+    <div>
+      <div className="font-display text-[23px] leading-none tracking-[-0.02em]">
+        <span className="font-medium text-texto-titulo">Atendente</span>
+        <span className="font-bold text-magenta">PRO</span>
+      </div>
+      <div className="rotulo-mono mt-2 tracking-[0.14em]">Rádio Liverpool</div>
+    </div>
+  );
+
   const navItens = (
-    <nav className="flex flex-col gap-1">
+    <nav className="flex flex-col gap-0.5">
       {ITENS.map((it) => {
+        if (it.emBreve) {
+          return (
+            <div
+              key={it.href}
+              aria-disabled="true"
+              className="flex cursor-default select-none items-center gap-[11px] rounded-[9px] px-3 py-2.5 text-sm text-texto-off"
+            >
+              <span className="inline-block h-1.5 w-1.5 rounded-[2px] bg-[#E4E4EA]" />
+              <span className="flex-1">{it.rotulo}</span>
+              <span className="rounded-md bg-fundo-trilho px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.08em] text-texto-rotulo">
+                em breve
+              </span>
+            </div>
+          );
+        }
         const ativo = itemAtivo(pathname, it.href);
         return (
           <Link
@@ -62,20 +101,18 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
             href={it.href}
             onClick={() => setAberto(false)}
             aria-current={ativo ? "page" : undefined}
-            className={`group flex flex-col gap-0.5 rounded-xl border px-3.5 py-2.5 transition-colors ${
+            className={`flex items-center gap-[11px] rounded-[9px] px-3 py-2.5 text-sm transition-colors ${
               ativo
-                ? "border-neon-violet/40 bg-gradient-to-r from-neon-pink/15 to-neon-violet/15"
-                : "border-transparent hover:border-white/10 hover:bg-white/5"
+                ? "bg-magenta-claro font-semibold text-magenta-escuro shadow-[inset_2px_0_0_#D81B60]"
+                : "text-texto-forte hover:bg-fundo-hover hover:text-texto-titulo"
             }`}
           >
             <span
-              className={`text-sm font-semibold ${
-                ativo ? "text-mist-50" : "text-mist-100"
+              className={`inline-block h-1.5 w-1.5 rounded-[2px] transition-colors ${
+                ativo ? "bg-magenta" : "bg-[#D2D2DA]"
               }`}
-            >
-              {it.label}
-            </span>
-            <span className="text-[11px] text-mist-400">{it.desc}</span>
+            />
+            <span>{it.rotulo}</span>
           </Link>
         );
       })}
@@ -83,37 +120,26 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
   );
 
   const rodape = (
-    <div className="flex flex-col gap-2 border-t border-white/5 pt-4">
-      <div className="flex items-center gap-2.5 px-1">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-neon-pink to-neon-violet text-xs font-bold text-white">
-          {(usuario ?? "?").slice(0, 1).toUpperCase()}
-        </span>
-        <div className="flex min-w-0 flex-col">
-          <span className="truncate text-xs font-semibold text-mist-100">
-            {usuario ?? "Sessão"}
-          </span>
-          <span className="text-[10px] text-mist-400">Rádio Liverpool</span>
+    <div className="flex items-center gap-2.5">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-magenta-claro text-[13px] font-bold text-magenta">
+        {iniciais(usuario)}
+      </div>
+      <div className="min-w-0 flex-1 leading-[1.3]">
+        {/* Perfil chega no PR C, com os usuarios no banco. Ate la a sessao so
+            conhece o login. */}
+        <div className="truncate text-[13px] font-medium">
+          {usuario ?? "Sessão"}
         </div>
+        <div className="text-[11.5px] text-texto-rotulo">Rádio Liverpool</div>
       </div>
       <button
+        type="button"
         onClick={sair}
         disabled={saindo}
-        className="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-mist-300 transition-colors hover:border-neon-pink/40 hover:text-mist-50 disabled:opacity-50"
+        className="shrink-0 rounded-lg border border-borda-campo px-2.5 py-1.5 text-xs text-texto-corpo transition-colors hover:border-magenta hover:text-magenta disabled:opacity-50"
       >
-        {saindo ? "Saindo..." : "Sair"}
+        {saindo ? "Saindo" : "Sair"}
       </button>
-    </div>
-  );
-
-  const marca = (
-    <div className="flex flex-col gap-0.5">
-      <span className="font-display text-xl font-black italic tracking-tight">
-        <span className="text-mist-50">Ouvinte</span>
-        <span className="text-gradient">PRO</span>
-      </span>
-      <span className="text-[10px] uppercase tracking-widest text-mist-400">
-        Painel
-      </span>
     </div>
   );
 
@@ -122,14 +148,15 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
       {/* Barra superior: abaixo de lg. Sem biblioteca, so estado e classes. */}
       <div
         aria-hidden={ehDesktop}
-        className="sticky top-0 z-40 flex items-center justify-between border-b border-white/5 bg-ink-950/80 px-5 py-3 backdrop-blur-xl lg:hidden"
+        className="sticky top-0 z-40 flex items-center justify-between border-b border-borda-cartao bg-fundo-cartao/95 px-5 py-3 backdrop-blur-[8px] lg:hidden"
       >
         {marca}
         <button
+          type="button"
           onClick={() => setAberto((v) => !v)}
           aria-expanded={aberto}
           aria-label={aberto ? "Fechar menu" : "Abrir menu"}
-          className="rounded-lg border border-white/10 px-3 py-1.5 text-sm text-mist-200"
+          className="rounded-[9px] border border-borda-campo px-3 py-1.5 text-sm text-texto-forte"
         >
           {aberto ? "Fechar" : "Menu"}
         </button>
@@ -137,23 +164,25 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
       {aberto ? (
         <div
           aria-hidden={ehDesktop}
-          className="sticky top-[57px] z-30 flex flex-col gap-4 border-b border-white/5 bg-ink-950/95 px-5 py-4 backdrop-blur-xl lg:hidden"
+          className="sticky top-[65px] z-30 flex animate-fadeIn flex-col gap-4 border-b border-borda-cartao bg-fundo-cartao px-4 py-4 shadow-hover lg:hidden"
         >
           {navItens}
-          {rodape}
+          <div className="border-t border-borda-divisor pt-4">{rodape}</div>
         </div>
       ) : null}
 
       {/* Coluna fixa: a partir de lg. */}
       <aside
         aria-hidden={!ehDesktop}
-        className="sticky top-0 z-30 hidden h-screen w-60 shrink-0 flex-col justify-between border-r border-white/5 bg-ink-900/50 px-4 py-6 backdrop-blur-xl lg:flex"
+        className="sticky top-0 z-30 hidden h-screen w-[250px] shrink-0 flex-col border-r border-borda-cartao bg-fundo-cartao lg:flex"
       >
-        <div className="flex flex-col gap-7">
+        <div className="border-b border-borda-divisor px-[22px] pb-[22px] pt-[26px]">
           {marca}
-          {navItens}
         </div>
-        {rodape}
+        <div className="px-3 py-3.5">{navItens}</div>
+        <div className="mt-auto border-t border-borda-divisor px-[22px] pb-[22px] pt-[18px]">
+          {rodape}
+        </div>
       </aside>
     </>
   );

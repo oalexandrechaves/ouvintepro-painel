@@ -1,15 +1,7 @@
-import Audiencia from "@/components/Audiencia";
-import { getAudiencia } from "@/lib/serverData";
+import { redirect } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
-export const metadata = {
-  title: "Audiência · OuvintePro",
-};
-
-export default async function AudienciaPage() {
-  // Carga inicial no servidor, sem filtro: a tela ja abre com numero na tela e
-  // com as opcoes preenchidas. Dali em diante quem responde e /api/audiencia.
-  const inicial = await getAudiencia({ incluirDemo: true });
-  return <Audiencia inicial={inicial} />;
+// A tela Audiencia virou Comercial. O endereco antigo redireciona para nao
+// quebrar link salvo em favorito ou mandado por mensagem.
+export default function AudienciaAntiga() {
+  redirect("/comercial");
 }
