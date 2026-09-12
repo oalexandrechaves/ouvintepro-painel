@@ -1199,15 +1199,39 @@ const AUDIENCIA_LISTA_MAX = 120;
 // O PostgREST corta em db-max-rows=1000 por requisicao, entao `.limit(2000)`
 // devolve 1000 calado. Numero apresentado a anunciante nao pode ser truncado em
 // silencio, entao aqui se busca em blocos ate a pagina vir incompleta.
+//
+// O TETO QUEBRA VISIVEL, NUNCA CORTA CALADO. Ate 12/09/2026 o teto era 50.000 e o
+// laco simplesmente parava ao chegar nele: com o seed a base com consentimento
+// passa a 50.151, e a tela Comercial perderia 151 ouvintes sem aviso nenhum. O
+// teto subiu para 500.000 e, se algum dia for alcancado com linha sobrando, a
+// funcao lanca erro. getAudiencia captura, registra no log e a tela diz que nao
+// conseguiu carregar. Melhor quebrar visivel do que mostrar numero incompleto.
+//
+// ERRO DE PAGINA TAMBEM QUEBRA. A versao anterior nao olhava `error`: uma pagina
+// que falhasse no meio voltava com data nulo, contava como pagina vazia e
+// encerrava a leitura com a lista pela metade. O mesmo erro, por outra porta.
+//
+// O `.range()` e o laco pagina a pagina ficam exatamente como estavam.
 async function carregarTodos<T>(
-  monta: (de: number, ate: number) => PromiseLike<{ data: T[] | null }>,
+  monta: (
+    de: number,
+    ate: number,
+  ) => PromiseLike<{ data: T[] | null; error?: unknown }>,
   bloco = 1000,
-  tetoAbsoluto = 50000,
+  tetoAbsoluto = 500_000,
 ): Promise<T[]> {
   const out: T[] = [];
-  for (let de = 0; de < tetoAbsoluto; de += bloco) {
-    const { data } = await monta(de, de + bloco - 1);
+  for (let de = 0; ; de += bloco) {
+    const { data, error } = await monta(de, de + bloco - 1);
+    if (error) throw error;
     const linhas = data ?? [];
+    // So e estouro se AINDA HA linha depois do teto. Uma base com exatamente o
+    // teto de linhas le a pagina seguinte vazia e termina normalmente.
+    if (de >= tetoAbsoluto && linhas.length > 0) {
+      throw new Error(
+        `carregarTodos: mais de ${tetoAbsoluto} linhas; a lista estaria incompleta`,
+      );
+    }
     out.push(...linhas);
     if (linhas.length < bloco) break;
   }
