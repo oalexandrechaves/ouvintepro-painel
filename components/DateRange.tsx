@@ -9,8 +9,18 @@ interface DateRangeProps {
 }
 
 const MESES = [
-  "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
-  "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+  "Janeiro",
+  "Fevereiro",
+  "Março",
+  "Abril",
+  "Maio",
+  "Junho",
+  "Julho",
+  "Agosto",
+  "Setembro",
+  "Outubro",
+  "Novembro",
+  "Dezembro",
 ];
 const DIAS = ["D", "S", "T", "Q", "Q", "S", "S"];
 
@@ -33,7 +43,8 @@ export default function DateRange({ inicio, fim, onChange }: DateRangeProps) {
 
   useEffect(() => {
     function fora(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setAberto(false);
+      if (ref.current && !ref.current.contains(e.target as Node))
+        setAberto(false);
     }
     if (aberto) document.addEventListener("mousedown", fora);
     return () => document.removeEventListener("mousedown", fora);
@@ -89,34 +100,38 @@ export default function DateRange({ inicio, fim, onChange }: DateRangeProps) {
     <div className="relative" ref={ref}>
       <button
         onClick={() => setAberto((a) => !a)}
-        className="flex items-center gap-2 rounded-xl border border-white/10 bg-ink-900/60 px-3 py-1.5 text-sm text-mist-50 outline-none transition-colors hover:border-neon-violet/60"
+        className="flex items-center gap-2 rounded-[9px] border border-borda-campo bg-fundo-cartao px-3 py-[7px] text-[13px] text-texto-titulo transition-colors hover:border-[#D0D0D8]"
       >
-        <span className="text-mist-400">Período</span>
-        <span className={inicio ? "text-mist-50" : "text-mist-400"}>{texto}</span>
+        <span className="text-texto-rotulo">Datas</span>
+        <span className={inicio ? "text-texto-titulo" : "text-texto-rotulo"}>
+          {texto}
+        </span>
       </button>
 
       {aberto ? (
-        <div className="absolute right-0 z-30 mt-2 w-72 rounded-2xl border border-white/10 bg-ink-900/95 p-4 shadow-2xl backdrop-blur-xl">
+        <div className="absolute left-0 z-30 mt-2 w-72 animate-pop rounded-2xl border border-borda-cartao bg-fundo-cartao p-4 shadow-modal sm:left-auto sm:right-0">
           <div className="mb-3 flex items-center justify-between">
             <button
               onClick={() => mudarMes(-1)}
-              className="rounded-lg px-2 py-1 text-mist-300 transition-colors hover:bg-ink-850 hover:text-mist-50"
+              className="rounded-lg px-2 py-1 text-texto-corpo transition-colors hover:bg-fundo-hover hover:text-texto-titulo"
             >
               ‹
             </button>
-            <span className="text-sm font-semibold text-mist-50">
+            <span className="text-sm font-semibold text-texto-titulo">
               {MESES[mes]} {ano}
             </span>
             <button
               onClick={() => mudarMes(1)}
-              className="rounded-lg px-2 py-1 text-mist-300 transition-colors hover:bg-ink-850 hover:text-mist-50"
+              className="rounded-lg px-2 py-1 text-texto-corpo transition-colors hover:bg-fundo-hover hover:text-texto-titulo"
             >
               ›
             </button>
           </div>
 
-          <div className="mb-1 grid grid-cols-7 gap-1 text-center text-[10px] uppercase text-mist-400">
-            {DIAS.map((d, i) => <span key={i}>{d}</span>)}
+          <div className="mb-1 grid grid-cols-7 gap-1 text-center font-mono text-[10px] uppercase text-texto-rotulo">
+            {DIAS.map((d, i) => (
+              <span key={i}>{d}</span>
+            ))}
           </div>
 
           <div className="grid grid-cols-7 gap-1">
@@ -125,11 +140,12 @@ export default function DateRange({ inicio, fim, onChange }: DateRangeProps) {
               const est = estadoDia(dia);
               const base =
                 "h-8 rounded-lg text-sm tabular-nums transition-colors";
-              const cor = est === "inicio" || est === "fim"
-                ? "bg-gradient-to-r from-neon-pink to-neon-violet text-white"
-                : est === "meio"
-                ? "bg-neon-violet/20 text-mist-50"
-                : "text-mist-200 hover:bg-ink-850";
+              const cor =
+                est === "inicio" || est === "fim"
+                  ? "bg-magenta text-white"
+                  : est === "meio"
+                    ? "bg-magenta-claro text-magenta-escuro"
+                    : "text-texto-forte hover:bg-fundo-hover";
               return (
                 <button
                   key={i}
@@ -148,13 +164,13 @@ export default function DateRange({ inicio, fim, onChange }: DateRangeProps) {
                 onChange(null, null);
                 setAberto(false);
               }}
-              className="text-xs text-mist-400 transition-colors hover:text-neon-pink"
+              className="text-xs text-texto-rotulo transition-colors hover:text-magenta"
             >
               Limpar
             </button>
             <button
               onClick={() => setAberto(false)}
-              className="rounded-lg bg-ink-850 px-3 py-1 text-xs text-mist-100 transition-colors hover:text-mist-50"
+              className="rounded-lg border border-borda-campo px-3 py-1 text-xs text-texto-forte transition-colors hover:text-texto-titulo"
             >
               Fechar
             </button>

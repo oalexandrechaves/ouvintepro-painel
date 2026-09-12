@@ -32,7 +32,7 @@ export default function DocumentoCampanha({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm sm:p-8"
+      className="fixed inset-0 z-50 flex animate-fadeIn items-start justify-center overflow-y-auto bg-[rgba(20,22,26,0.32)] p-4 backdrop-blur-[3px] sm:p-8"
       onClick={onFechar}
     >
       <div
@@ -40,65 +40,59 @@ export default function DocumentoCampanha({
         onClick={(e) => e.stopPropagation()}
       >
         {/* Controles: no-print, nao vao para o papel */}
-        <div className="no-print glass flex flex-col gap-4 p-5">
+        <div className="no-print flex animate-pop flex-col gap-4 rounded-[18px] border border-borda-cartao bg-fundo-cartao p-5 shadow-modal sm:p-6">
           <div className="flex items-center justify-between">
-            <h3 className="font-display text-lg text-mist-50">
+            <h3 className="m-0 text-xl font-semibold tracking-[-0.01em]">
               Peça de exemplo da campanha
             </h3>
             <button
               onClick={onFechar}
-              className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-mist-300 hover:text-mist-50"
+              className="rounded-lg px-2 py-1 text-lg leading-none text-texto-rotulo hover:text-texto-titulo"
             >
               Fechar
             </button>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="flex flex-col gap-1">
-              <span className="text-[11px] uppercase tracking-wide text-mist-400">
-                Anunciante
-              </span>
+              <span className="rotulo-mono">Anunciante</span>
               <input
                 value={anunciante}
                 onChange={(e) => setAnunciante(e.target.value)}
-                className="rounded-lg border border-white/10 bg-ink-850/60 px-3 py-2 text-sm text-mist-50 outline-none focus:border-neon-violet/50"
+                className="campo"
               />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-[11px] uppercase tracking-wide text-mist-400">
-                Código do cupom
-              </span>
+              <span className="rotulo-mono">Código do cupom</span>
               <input
                 value={cupom}
                 onChange={(e) => setCupom(e.target.value.toUpperCase())}
-                className="rounded-lg border border-white/10 bg-ink-850/60 px-3 py-2 text-sm text-mist-50 outline-none focus:border-neon-violet/50"
+                className="campo"
               />
             </label>
             <label className="flex flex-col gap-1 sm:col-span-2">
-              <span className="text-[11px] uppercase tracking-wide text-mist-400">
-                Texto da oferta
-              </span>
+              <span className="rotulo-mono">Texto da oferta</span>
               <textarea
                 value={oferta}
                 onChange={(e) => setOferta(e.target.value)}
                 rows={2}
-                className="resize-none rounded-lg border border-white/10 bg-ink-850/60 px-3 py-2 text-sm text-mist-50 outline-none focus:border-neon-violet/50"
+                className="campo resize-none"
               />
             </label>
           </div>
           <button
             onClick={() => window.print()}
-            className="self-start rounded-xl bg-gradient-to-r from-neon-pink to-neon-violet px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-neon-violet/20"
+            className="botao-primario self-start"
           >
             Imprimir ou salvar em PDF
           </button>
-          <p className="text-[11px] text-mist-400">
+          <p className="text-[11.5px] text-texto-rotulo">
             No diálogo de impressão, escolha &quot;Salvar como PDF&quot; para
             gerar o arquivo.
           </p>
         </div>
 
         {/* A PECA. Fundo claro de proposito: e papel, não interface. */}
-        <div className="print-area rounded-2xl bg-[#FBFAF7] p-8 text-[#1A1A1A] shadow-2xl sm:p-12">
+        <div className="print-area animate-pop rounded-2xl border border-borda-cartao bg-[#FBFAF7] p-6 text-[#1A1A1A] shadow-modal sm:p-12">
           <div className="flex flex-col gap-3 border-b border-[#D32029]/30 pb-5 sm:flex-row sm:items-start sm:justify-between sm:gap-0">
             <div className="flex flex-col">
               <span className="font-display text-2xl font-black italic tracking-tight">
@@ -160,7 +154,7 @@ export default function DocumentoCampanha({
           </div>
         </div>
 
-        <p className="no-print text-center text-[11px] text-mist-400">
+        <p className="no-print text-center text-[11.5px] text-white/90">
           Peça de exemplo. O público selecionado hoje é de{" "}
           {totalPublico.toLocaleString("pt-BR")} ouvintes.
         </p>

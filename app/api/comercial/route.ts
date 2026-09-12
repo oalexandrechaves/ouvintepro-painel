@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAudiencia, type AudienciaFiltros } from "@/lib/serverData";
 
-// Rota da tela de Audiencia. Nasce PROTEGIDA sem ninguem fazer nada: o matcher
+// Rota da tela Comercial (antes Audiencia). Nasce PROTEGIDA sem ninguem fazer nada: o matcher
 // do middleware e generico e rotaPublica() e uma lista branca de 4 entradas, e
 // esta nao esta la. Por isso o middleware nao precisou ser tocado.
 export const dynamic = "force-dynamic";
+// Leitura completa, sem o corte de 1000 linhas: com o seed de ~50 mil ouvintes
+// ela pode passar dos 10 s padrao de funcao da Vercel. 60 s e o teto do plano.
+export const maxDuration = 60;
 
 function texto(v: string | null): string | null {
   const t = (v ?? "").trim();

@@ -25,6 +25,11 @@ export default function CountUp({
   const rafRef = useRef<number | null>(null);
 
   useEffect(() => {
+    // Movimento reduzido: o numero aparece pronto, sem contagem.
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setDisplay(value);
+      return;
+    }
     const start = performance.now();
 
     const tick = (now: number) => {

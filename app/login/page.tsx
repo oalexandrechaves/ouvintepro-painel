@@ -1,9 +1,7 @@
 "use client";
 
-import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import Background from "@/components/Background";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -27,42 +25,34 @@ export default function LoginPage() {
         router.refresh();
       } else {
         const data = await res.json().catch(() => ({}));
-        setErro(data.erro ?? "Usuario ou senha incorretos");
+        setErro(data.erro ?? "Usuário ou senha incorretos");
         setLoading(false);
       }
     } catch {
-      setErro("Nao foi possivel conectar. Tente de novo.");
+      setErro("Não foi possível conectar. Tente de novo.");
       setLoading(false);
     }
   }
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center bg-grid px-5 py-10">
-      <Background />
-
-      <main className="relative z-10 w-full max-w-sm">
-        <div className="glass p-7 sm:p-8">
-          <div className="flex flex-col items-center text-center">
-            <div className="relative h-14 w-14 overflow-hidden rounded-2xl border border-white/10 bg-ink-850">
-              <Image
-                src="/ouvintepro.PNG"
-                alt="Logo OuvintePro"
-                fill
-                sizes="56px"
-                className="object-contain p-2"
-                priority
-              />
+    <div className="flex min-h-screen items-center justify-center px-5 py-10">
+      <main className="w-full max-w-sm animate-pop">
+        <div className="cartao p-7 sm:p-8">
+          {/* Marca tipografica, como no arquivo de referencia: nao e imagem. */}
+          <div className="text-center">
+            <div className="font-display text-[30px] leading-none tracking-[-0.02em]">
+              <span className="font-medium text-texto-titulo">Atendente</span>
+              <span className="font-bold text-magenta">PRO</span>
             </div>
-            <h1 className="mt-4 font-display text-3xl font-bold">
-              <span className="text-gradient">OuvintePro</span>
-            </h1>
-            <p className="mt-1 text-sm text-mist-300">Dados e Conexao na Radio</p>
+            <div className="rotulo-mono mt-2.5 tracking-[0.14em]">
+              Rádio Liverpool
+            </div>
           </div>
 
-          <form onSubmit={handleSubmit} className="mt-7 flex flex-col gap-4">
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="user" className="text-xs text-mist-300">
-                Usuario
+          <form onSubmit={handleSubmit} className="mt-8 flex flex-col gap-4">
+            <div className="flex flex-col gap-[7px]">
+              <label htmlFor="user" className="rotulo-mono">
+                Usuário
               </label>
               <input
                 id="user"
@@ -71,13 +61,13 @@ export default function LoginPage() {
                 value={user}
                 onChange={(e) => setUser(e.target.value)}
                 required
-                className="rounded-xl border border-white/10 bg-ink-900/60 px-4 py-2.5 text-sm text-mist-50 outline-none transition-colors placeholder:text-mist-400 focus:border-neon-violet/60"
-                placeholder="seu usuario"
+                className="campo px-3.5 py-2.5 placeholder:text-texto-off"
+                placeholder="seu usuário"
               />
             </div>
 
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="password" className="text-xs text-mist-300">
+            <div className="flex flex-col gap-[7px]">
+              <label htmlFor="password" className="rotulo-mono">
                 Senha
               </label>
               <input
@@ -87,27 +77,32 @@ export default function LoginPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                className="rounded-xl border border-white/10 bg-ink-900/60 px-4 py-2.5 text-sm text-mist-50 outline-none transition-colors placeholder:text-mist-400 focus:border-neon-violet/60"
+                className="campo px-3.5 py-2.5 placeholder:text-texto-off"
                 placeholder="sua senha"
               />
             </div>
 
             {erro ? (
-              <p className="text-sm text-neon-pink">{erro}</p>
+              <p
+                role="alert"
+                className="animate-fadeIn text-[13px] text-magenta"
+              >
+                {erro}
+              </p>
             ) : null}
 
             <button
               type="submit"
               disabled={loading}
-              className="mt-1 rounded-xl bg-gradient-to-r from-neon-pink to-neon-violet px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-neon-violet/20 transition-opacity hover:opacity-90 disabled:opacity-60"
+              className="botao-primario mt-1 py-2.5 text-sm"
             >
               {loading ? "Entrando..." : "Entrar"}
             </button>
           </form>
         </div>
 
-        <p className="mt-6 text-center text-xs text-mist-400">
-          OuvintePro · Dados e Conexao na Radio
+        <p className="mt-6 text-center text-xs text-texto-rotulo">
+          AtendentePRO · Rádio Liverpool
         </p>
       </main>
     </div>
