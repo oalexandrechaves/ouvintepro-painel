@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { formatValue, somaSerie } from "@/lib/tipos";
 import type { DisplayMode, SerieItem } from "@/lib/tipos";
 
@@ -114,16 +114,34 @@ export function Cartao({
   );
 }
 
-// As barras nascem em 0 e crescem no primeiro quadro depois de montar, em
-// cascata de 55 ms, como no arquivo. Com movimento reduzido o CSS zera a
-// transicao e elas ja aparecem cheias.
-function useCrescer(): boolean {
-  const [cheio, setCheio] = useState(false);
-  useEffect(() => {
+const useLayoutIsomorfico =
+  typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
+// ANIMACAO DE ENTRADA QUE NUNCA DEIXA NUMERO EM ZERO.
+// Barras e contadores nasciam em 0 e cresciam por requestAnimationFrame. Em aba
+// em segundo plano o navegador pausa o rAF, e o painel ficou mostrando 0 nos
+// tres numeros da secao 01 com os dados certos na tela (conferido em producao em
+// 12/09/2026: visibilityState "hidden", rAF parado, barras em 0%).
+// Agora o estado INICIAL e o valor final, entao o HTML ja nasce certo. So anima
+// se a aba estiver visivel e sem pedido de menos movimento; e um temporizador de
+// seguranca completa o valor se o rAF parar no meio.
+export function useEntradaAnimada(): boolean {
+  const [cheio, setCheio] = useState(true);
+  useLayoutIsomorfico(() => {
+    if (
+      document.visibilityState !== "visible" ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    )
+      return;
+    setCheio(false);
     const id = requestAnimationFrame(() =>
       requestAnimationFrame(() => setCheio(true)),
     );
-    return () => cancelAnimationFrame(id);
+    const seguro = window.setTimeout(() => setCheio(true), 400);
+    return () => {
+      cancelAnimationFrame(id);
+      window.clearTimeout(seguro);
+    };
   }, []);
   return cheio;
 }
@@ -141,7 +159,7 @@ export function Barras({
   vazio?: string;
   gradiente?: string;
 }) {
-  const cheio = useCrescer();
+  const cheio = useEntradaAnimada();
   if (!serie.length) return <EstadoVazio texto={vazio} />;
   const soma = total ?? somaSerie(serie);
   const max = Math.max(1, ...serie.map((s) => s.valor));
