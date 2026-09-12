@@ -9,16 +9,38 @@ import { useEffect, useState } from "react";
 // navegacao de painel para quem ainda nao autenticou e o erro classico de quem
 // poe a barra no layout raiz.
 //
-// "Em breve" e item que existe no produto e ainda nao tem tela: aparece, nao
-// navega e diz por que. Atendimentos ainda nao existe. Painel de Controle chega
-// no PR C, junto com usuarios e permissoes.
-const ITENS: { href: string; rotulo: string; emBreve?: boolean }[] = [
+// ITENS SEM TELA SAO DE DOIS TIPOS, E NAO SAO A MESMA SITUACAO.
+// Os dois aparecem, nao navegam e dizem por que; o que muda e a promessa.
+//  - "proximo": a tela ja tem escopo aprovado e fila de entrega. Etiqueta
+//    violeta "em breve". E o Painel de Controle, que chega no PR C (usuarios e
+//    grupos de acesso), o proximo depois do PR B.
+//  - "futuro": ninguem construiu, e nao ha data. Etiqueta neutra "futuro". E
+//    Atendimentos. Dizer "em breve" aqui seria prometer o que nao esta marcado.
+// Quem mudar um item de "futuro" para "proximo" precisa ter a entrega na fila;
+// quem liberar a rota, apaga o `pendente` e o item passa a navegar.
+type Pendente = { tipo: "proximo" | "futuro"; motivo: string };
+
+const ITENS: { href: string; rotulo: string; pendente?: Pendente }[] = [
   { href: "/", rotulo: "Visão geral" },
-  { href: "/atendimentos", rotulo: "Atendimentos", emBreve: true },
+  {
+    href: "/atendimentos",
+    rotulo: "Atendimentos",
+    pendente: {
+      tipo: "futuro",
+      motivo: "Tela ainda não construída, sem data prevista.",
+    },
+  },
   { href: "/ouvintes", rotulo: "Ouvintes" },
   { href: "/comercial", rotulo: "Comercial" },
   { href: "/promocoes", rotulo: "Promoções" },
-  { href: "/painel-de-controle", rotulo: "Painel de Controle", emBreve: true },
+  {
+    href: "/painel-de-controle",
+    rotulo: "Painel de Controle",
+    pendente: {
+      tipo: "proximo",
+      motivo: "Chega com usuários e grupos de acesso, na próxima entrega.",
+    },
+  },
 ];
 
 function itemAtivo(pathname: string, href: string): boolean {
@@ -79,18 +101,27 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
   const navItens = (
     <nav className="flex flex-col gap-0.5">
       {ITENS.map((it) => {
-        if (it.emBreve) {
+        if (it.pendente) {
+          const proximo = it.pendente.tipo === "proximo";
           return (
             <div
               key={it.href}
               aria-disabled="true"
+              title={it.pendente.motivo}
               className="flex cursor-default select-none items-center gap-[11px] rounded-[9px] px-3 py-2.5 text-sm text-texto-off"
             >
               <span className="inline-block h-1.5 w-1.5 rounded-[2px] bg-[#E4E4EA]" />
               <span className="flex-1">{it.rotulo}</span>
-              <span className="rounded-md bg-fundo-trilho px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.08em] text-texto-rotulo">
-                em breve
+              <span
+                className={`rounded-md px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-[0.08em] ${
+                  proximo
+                    ? "bg-violeta-claro text-violeta-escuro"
+                    : "bg-fundo-trilho text-texto-rotulo"
+                }`}
+              >
+                {proximo ? "em breve" : "futuro"}
               </span>
+              <span className="sr-only">. {it.pendente.motivo}</span>
             </div>
           );
         }

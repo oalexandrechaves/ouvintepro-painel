@@ -16,6 +16,7 @@ import {
   Etiqueta,
   ListaRanking,
   Secao,
+  useEntradaAnimada,
 } from "./ui";
 
 // VISAO GERAL: seis secoes numeradas em sequencia de leitura. Cada uma responde
@@ -433,13 +434,7 @@ function BarraCheia({
   pct: number;
   classe?: string;
 }) {
-  const [cheio, setCheio] = useState(false);
-  useEffect(() => {
-    const id = requestAnimationFrame(() =>
-      requestAnimationFrame(() => setCheio(true)),
-    );
-    return () => cancelAnimationFrame(id);
-  }, []);
+  const cheio = useEntradaAnimada();
   return (
     <div
       className={`${classe} h-full`}
@@ -453,13 +448,7 @@ function BarraCheia({
 
 function Grafico({ dados }: { dados: Dados }) {
   const [foco, setFoco] = useState<number | null>(null);
-  const [cheio, setCheio] = useState(false);
-  useEffect(() => {
-    const id = requestAnimationFrame(() =>
-      requestAnimationFrame(() => setCheio(true)),
-    );
-    return () => cancelAnimationFrame(id);
-  }, []);
+  const cheio = useEntradaAnimada();
 
   const pontos = dados.serie.pontos;
   const max = Math.max(1, ...pontos.map((p) => Math.max(p.atual, p.anterior)));
