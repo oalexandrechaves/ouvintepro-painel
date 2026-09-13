@@ -1,10 +1,10 @@
 import { NextRequest } from "next/server";
 import { getAudiencia, type AudienciaFiltros } from "@/lib/serverData";
 import { responderJson } from "@/lib/rotas";
+import { exigirAcesso } from "@/lib/acesso/servidor";
 
-// Rota da tela Comercial (antes Audiencia). Nasce PROTEGIDA sem ninguem fazer nada: o matcher
-// do middleware e generico e rotaPublica() e uma lista branca de 4 entradas, e
-// esta nao esta la. Por isso o middleware nao precisou ser tocado.
+// Rota da tela Comercial (antes Audiencia). Exige Visualizacao em Comercial: no
+// mapa do middleware (lib/acesso/rotas.ts) e de novo aqui, pela sessao conferida.
 export const dynamic = "force-dynamic";
 // Leitura completa, sem o corte de 1000 linhas: com o seed de ~50 mil ouvintes
 // ela pode passar dos 10 s padrao de funcao da Vercel. 60 s e o teto do plano.
@@ -37,5 +37,7 @@ export async function GET(req: NextRequest) {
     // radio nasce vazia e so recebe dado real, entao la ele nao muda nada.
     incluirDemo: p.get("incluirDemo") !== "0",
   };
-  return responderJson(() => getAudiencia(filtros));
+  return responderJson(async () =>
+    getAudiencia(await exigirAcesso("comercial", "visualizacao"), filtros),
+  );
 }

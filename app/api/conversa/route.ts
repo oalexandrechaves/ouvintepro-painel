@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { getConversa } from "@/lib/serverData";
 import { responderJson } from "@/lib/rotas";
+import { exigirAcesso } from "@/lib/acesso/servidor";
 
-// Protegido pelo middleware (exige sessao). Roda no servidor com service role.
+// Exige Visualizacao em Ouvintes (middleware e sessao conferida). Roda no servidor com service role.
 // Busca as mensagens SEMPRE por ouvinte_id (UUID interno), nunca por telefone.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,5 +17,10 @@ export async function GET(req: Request) {
   if (!ouvinte || !uuidRe.test(ouvinte)) {
     return NextResponse.json({ mensagens: [] }, { status: 400 });
   }
-  return responderJson(async () => ({ mensagens: await getConversa(ouvinte) }));
+  return responderJson(async () => ({
+    mensagens: await getConversa(
+      await exigirAcesso("ouvintes", "visualizacao"),
+      ouvinte,
+    ),
+  }));
 }

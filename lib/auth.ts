@@ -1,5 +1,14 @@
 import { SignJWT, jwtVerify } from "jose";
 
+// TOKEN DE SESSAO: SO O ID DO USUARIO.
+// Nome, perfil, grupo, nivel e status NAO vao no token: sao lidos do banco a cada
+// pedido (acesso_sessao). Desativar um usuario ou mudar o grupo dele vale no
+// proximo clique, sem esperar o token vencer. Troca e redefinicao de senha
+// derrubam os tokens emitidos antes (sessoes_validas_desde contra o "iat").
+//
+// Este modulo roda no middleware (edge) e no servidor; nao pode importar
+// next/headers.
+
 export const SESSION_COOKIE = "ouvintepro_session";
 const MAX_AGE = 60 * 60 * 12; // 12 horas
 
@@ -9,28 +18,46 @@ function getSecret(): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
-// Confere usuario e senha contra as variaveis de ambiente.
-export function credenciaisValidas(user: string, password: string): boolean {
-  const u = process.env.PAINEL_USER;
-  const p = process.env.PAINEL_PASSWORD;
-  return Boolean(u && p && user === u && password === p);
-}
-
-export async function criarSessao(user: string): Promise<string> {
-  return new SignJWT({ user })
+// "iat" com milissegundos (o JWT aceita fracao de segundo): e o que ordena o
+// token contra sessoes_validas_desde. `emitidoEmMs` so e passado na troca de
+// senha: vem do banco, 1 ms depois da troca gravada, para o token novo nunca
+// parecer anterior a ela.
+export async function criarSessao(
+  usuarioId: string,
+  emitidoEmMs: number = Date.now(),
+): Promise<string> {
+  return new SignJWT({})
     .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
+    .setSubject(usuarioId)
+    .setIssuedAt(emitidoEmMs / 1000)
     .setExpirationTime("12h")
     .sign(getSecret());
 }
 
-export async function sessaoValida(token: string | undefined): Promise<boolean> {
-  if (!token) return false;
+export interface TokenLido {
+  usuarioId: string;
+  // Milissegundos desde 1970 (o "iat" do JWT vezes 1000).
+  emitidoEmMs: number;
+}
+
+const uuidRe =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Token do login antigo (que carregava {user}) nao tem `sub` e cai aqui como
+// invalido: quem estava logado antes desta versao entra de novo.
+export async function lerToken(
+  token: string | undefined,
+): Promise<TokenLido | null> {
+  if (!token) return null;
   try {
-    await jwtVerify(token, getSecret());
-    return true;
+    const { payload } = await jwtVerify(token, getSecret(), {
+      algorithms: ["HS256"],
+    });
+    if (typeof payload.sub !== "string" || !uuidRe.test(payload.sub)) return null;
+    if (typeof payload.iat !== "number") return null;
+    return { usuarioId: payload.sub, emitidoEmMs: Math.round(payload.iat * 1000) };
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -42,20 +69,4 @@ export const sessionCookieOptions = {
   maxAge: MAX_AGE,
 };
 
-// Nome do usuario logado, para a area de usuario da barra lateral.
-// ADITIVA: nao altera sessaoValida, criarSessao nem credenciaisValidas, que
-// continuam sendo o caminho de autenticacao. Recebe o token em vez de ler o
-// cookie sozinha porque este modulo tambem roda no middleware (edge), onde
-// next/headers nao existe. Quem le o cookie e o layout.
-export async function usuarioDaSessao(
-  token: string | undefined,
-): Promise<string | null> {
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify(token, getSecret());
-    const u = payload.user;
-    return typeof u === "string" && u.trim() ? u.trim() : null;
-  } catch {
-    return null;
-  }
-}
+export const cookieApagado = { ...sessionCookieOptions, maxAge: 0 };

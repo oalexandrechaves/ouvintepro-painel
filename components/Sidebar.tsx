@@ -3,52 +3,39 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { MODULOS, type Modulo } from "@/lib/acesso/modelo";
 
 // NAVEGACAO LATERAL DO AtendentePRO.
 // Vive dentro do route group (painel), entao NAO aparece no /login: mostrar
 // navegacao de painel para quem ainda nao autenticou e o erro classico de quem
 // poe a barra no layout raiz.
 //
+// SO APARECE O MODULO QUE O GRUPO DO USUARIO ABRE (Visualizacao ou mais). E
+// conveniencia, nao protecao: quem protege e o middleware e cada rota.
+//
 // ITENS SEM TELA SAO DE DOIS TIPOS, E NAO SAO A MESMA SITUACAO.
 // Os dois aparecem, nao navegam e dizem por que; o que muda e a promessa.
 //  - "proximo": a tela ja tem escopo aprovado e fila de entrega. Etiqueta
-//    violeta "em breve". E o Painel de Controle, que chega no PR C (usuarios e
-//    grupos de acesso), o proximo depois do PR B.
+//    violeta "em breve". Hoje nenhum.
 //  - "futuro": ninguem construiu, e nao ha data. Etiqueta neutra "futuro". E
 //    Atendimentos. Dizer "em breve" aqui seria prometer o que nao esta marcado.
 // Quem mudar um item de "futuro" para "proximo" precisa ter a entrega na fila;
 // quem liberar a rota, apaga o `pendente` e o item passa a navegar.
 type Pendente = { tipo: "proximo" | "futuro"; motivo: string };
 
-const ITENS: { href: string; rotulo: string; pendente?: Pendente }[] = [
-  { href: "/", rotulo: "Visão geral" },
-  {
-    href: "/atendimentos",
-    rotulo: "Atendimentos",
-    pendente: {
-      tipo: "futuro",
-      motivo: "Tela ainda não construída, sem data prevista.",
-    },
+const PENDENTES: Partial<Record<Modulo, Pendente>> = {
+  atendimentos: {
+    tipo: "futuro",
+    motivo: "Tela ainda não construída, sem data prevista.",
   },
-  { href: "/ouvintes", rotulo: "Ouvintes" },
-  { href: "/comercial", rotulo: "Comercial" },
-  { href: "/promocoes", rotulo: "Promoções" },
-  {
-    href: "/painel-de-controle",
-    rotulo: "Painel de Controle",
-    pendente: {
-      tipo: "proximo",
-      motivo: "Chega com usuários e grupos de acesso, na próxima entrega.",
-    },
-  },
-];
+};
 
 function itemAtivo(pathname: string, href: string): boolean {
   // "/" so casa exato, senao ficaria ativo em toda rota do painel.
   return href === "/" ? pathname === "/" : pathname.startsWith(href);
 }
 
-function iniciais(nome: string | null): string {
+function iniciais(nome: string): string {
   const partes = (nome ?? "")
     .trim()
     .split(/[\s._-]+/)
@@ -59,7 +46,18 @@ function iniciais(nome: string | null): string {
   ).toUpperCase();
 }
 
-export default function Sidebar({ usuario }: { usuario: string | null }) {
+export default function Sidebar({
+  usuario,
+  modulos,
+}: {
+  usuario: { nome: string; perfil: string };
+  modulos: Modulo[];
+}) {
+  const itens = MODULOS.filter((m) => modulos.includes(m.chave)).map((m) => ({
+    href: m.href,
+    rotulo: m.nome,
+    pendente: PENDENTES[m.chave],
+  }));
   const pathname = usePathname();
   const router = useRouter();
   const [aberto, setAberto] = useState(false);
@@ -100,7 +98,12 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
 
   const navItens = (
     <nav className="flex flex-col gap-0.5">
-      {ITENS.map((it) => {
+      {itens.length === 0 ? (
+        <p className="px-3 py-2.5 text-[13px] text-texto-corpo">
+          Seu grupo de acesso não abre nenhum módulo.
+        </p>
+      ) : null}
+      {itens.map((it) => {
         if (it.pendente) {
           const proximo = it.pendente.tipo === "proximo";
           return (
@@ -153,15 +156,19 @@ export default function Sidebar({ usuario }: { usuario: string | null }) {
   const rodape = (
     <div className="flex items-center gap-2.5">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-magenta-claro text-[13px] font-bold text-magenta">
-        {iniciais(usuario)}
+        {iniciais(usuario.nome)}
       </div>
       <div className="min-w-0 flex-1 leading-[1.3]">
-        {/* Perfil chega no PR C, com os usuarios no banco. Ate la a sessao so
-            conhece o login. */}
-        <div className="truncate text-[13px] font-medium">
-          {usuario ?? "Sessão"}
+        <div className="truncate text-[13px] font-medium">{usuario.nome}</div>
+        <div className="truncate text-[11.5px] text-texto-rotulo">
+          {usuario.perfil} ·{" "}
+          <Link
+            href="/trocar-senha"
+            className="text-texto-rotulo underline-offset-2 hover:text-magenta hover:underline"
+          >
+            Trocar senha
+          </Link>
         </div>
-        <div className="text-[11.5px] text-texto-rotulo">Rádio Liverpool</div>
       </div>
       <button
         type="button"

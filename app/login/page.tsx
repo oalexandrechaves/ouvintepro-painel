@@ -5,8 +5,8 @@ import { useState } from "react";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [user, setUser] = useState("");
-  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("");
+  const [senha, setSenha] = useState("");
   const [erro, setErro] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -18,14 +18,20 @@ export default function LoginPage() {
       const res = await fetch("/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user, password }),
+        body: JSON.stringify({ email, senha }),
       });
-      if (res.ok) {
-        router.replace("/");
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && typeof data.destino === "string") {
+        // Primeira tela que o grupo abre, ou a troca da senha temporaria.
+        router.replace(data.destino);
         router.refresh();
       } else {
-        const data = await res.json().catch(() => ({}));
-        setErro(data.erro ?? "Usuário ou senha incorretos");
+        // Falha do servidor tem mensagem propria (503): nunca vira "senha errada".
+        setErro(
+          typeof data.erro === "string"
+            ? data.erro
+            : "Não foi possível entrar agora. Tente de novo em instantes.",
+        );
         setLoading(false);
       }
     } catch {
@@ -51,18 +57,18 @@ export default function LoginPage() {
 
           <form onSubmit={handleSubmit} className="mt-8 flex flex-col gap-4">
             <div className="flex flex-col gap-[7px]">
-              <label htmlFor="user" className="rotulo-mono">
-                Usuário
+              <label htmlFor="email" className="rotulo-mono">
+                E-mail
               </label>
               <input
-                id="user"
-                type="text"
+                id="email"
+                type="email"
                 autoComplete="username"
-                value={user}
-                onChange={(e) => setUser(e.target.value)}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 required
                 className="campo px-3.5 py-2.5 placeholder:text-texto-off"
-                placeholder="seu usuário"
+                placeholder="seu e-mail"
               />
             </div>
 
@@ -74,8 +80,8 @@ export default function LoginPage() {
                 id="password"
                 type="password"
                 autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                value={senha}
+                onChange={(e) => setSenha(e.target.value)}
                 required
                 className="campo px-3.5 py-2.5 placeholder:text-texto-off"
                 placeholder="sua senha"

@@ -1,6 +1,7 @@
 import VisaoGeral from "@/components/VisaoGeral";
 import { getVisaoGeral } from "@/lib/serverData";
 import { rangeDoPeriodo } from "@/lib/periodo";
+import { exigirAcessoPagina } from "@/lib/acesso/servidor";
 
 export const dynamic = "force-dynamic";
 // Leitura completa, sem o corte de 1000 linhas: com o seed de ~50 mil ouvintes
@@ -11,10 +12,12 @@ export const maxDuration = 60;
 // o primeiro olhar ja chega com numero, sem esqueleto. Se a leitura falhar, a
 // tela abre em estado de erro, com "Tentar de novo", e nunca com zeros.
 export default async function Home() {
+  // Fora do try: sem acesso e redirecionamento, nao "falha de leitura".
+  const sessao = await exigirAcessoPagina("visao_geral", "visualizacao");
   const { de, ate } = rangeDoPeriodo("30dias");
   let inicial: Awaited<ReturnType<typeof getVisaoGeral>> | null = null;
   try {
-    inicial = await getVisaoGeral(de, ate);
+    inicial = await getVisaoGeral(sessao, de, ate);
   } catch {
     inicial = null;
   }
