@@ -314,7 +314,7 @@ end;
 $$;
 
 -- O que o painel sabe do usuario a cada pedido. Nulo se o id nao existe.
--- validas_desde vai em segundos inteiros, a mesma unidade do "iat" do token.
+-- validas_desde_ms em milissegundos; a sessao vale com emissao do token MAIOR.
 create function public.acesso_sessao(p_usuario_id uuid)
 returns jsonb
 language sql
@@ -329,7 +329,7 @@ as $$
     'perfil', u.perfil,
     'ativo', u.ativo,
     'deve_trocar_senha', u.deve_trocar_senha,
-    'validas_desde', floor(extract(epoch from u.sessoes_validas_desde))::bigint,
+    'validas_desde_ms', floor(extract(epoch from u.sessoes_validas_desde) * 1000)::bigint,
     'grupo', jsonb_build_object('id', g.id, 'nome', g.nome, 'ativo', g.ativo),
     'permissoes', public.acesso_permissoes_de(u.id)
   )
@@ -340,9 +340,13 @@ $$;
 
 -- Troca da propria senha (obrigatoria no primeiro acesso, ou por vontade).
 -- Invalida as outras sessoes do usuario; o painel emite uma nova para quem trocou.
--- Devolve o novo validas_desde (segundos): o painel usa esse valor como "iat" do
--- token novo, e diferenca de relogio entre o servidor e o banco nao derruba quem
--- acabou de trocar.
+-- Devolve, em MILISSEGUNDOS, o instante de emissao que o painel deve usar no
+-- token novo: 1 ms depois do instante gravado. A sessao so vale com emissao MAIOR
+-- que validas_desde. Assim o token novo vale, os anteriores caem, e a diferenca
+-- de relogio entre o servidor e o banco nao entra na conta.
+-- Por que milissegundo e nao segundo: em segundos inteiros, redefinir a senha no
+-- mesmo segundo de uma troca nao derrubava a sessao antiga (o teste de ponta a
+-- ponta pegou). Em milissegundo, o empate exige dois pedidos no mesmo ms.
 create function public.acesso_trocar_senha(
   p_usuario_id uuid,
   p_senha_atual text,
@@ -377,7 +381,7 @@ begin
       atualizado_em = v_agora
   where id = u.id;
 
-  return floor(extract(epoch from v_agora))::bigint;
+  return floor(extract(epoch from v_agora) * 1000)::bigint + 1;
 end;
 $$;
 

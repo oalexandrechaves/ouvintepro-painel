@@ -10,11 +10,12 @@ Painel + backend de captacao de ouvintes por WhatsApp. "Dados e Conexao na Radio
 
 ## Estrutura
 - `app/` painel (login em `/login`, hotlink publico em `/r/[slug]`), `components/`, `lib/` (auth, supabase, queries, mockData de fallback).
-- `middleware.ts` protege tudo menos `/login`, `/api/login`, `/api/logout`, `/r/...` e estaticos.
+- Acesso: usuarios e grupos no banco (`acesso_*`, migration `20260913100000`). `middleware.ts` confere TODA rota contra o mapa `lib/acesso/rotas.ts` (modulo + nivel) e nega o que nao esta la; so `/login`, `/api/login`, `/api/logout` e `/r/...` sao publicas. Segunda camada: as funcoes de dados recebem a `SessaoVerificada` (`lib/acesso/servidor.ts`).
+- Tela ou rota nova: entra no mapa de rotas e chama `exigirAcessoPagina`/`exigirAcesso`. O `prebuild` (`scripts/conferir-rotas.mjs`) derruba o build se faltar.
 - `supabase/migrations/` schema versionado; `supabase/functions/whatsapp-webhook/index.ts` o bot.
 
 ## Secrets / env (NUNCA no codigo nem no git)
-- Painel (.env.local + Vercel): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `PAINEL_USER`, `PAINEL_PASSWORD`, `SESSION_SECRET`.
+- Painel (.env.local + Vercel): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SESSION_SECRET`. `PAINEL_USER`/`PAINEL_PASSWORD` nao sao mais lidos (login e pelo banco).
 - Edge Function (secrets do Supabase): `ZAPI_INSTANCE_ID`, `ZAPI_TOKEN`, `ZAPI_CLIENT_TOKEN`, `GEMINI_API_KEY`. `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` sao injetados automaticamente.
 - `sendText` PRECISA enviar o header `Client-Token` (lendo `ZAPI_CLIENT_TOKEN`). Nao remover.
 

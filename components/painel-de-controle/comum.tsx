@@ -10,7 +10,7 @@ import { ErroDaBusca } from "@/lib/buscar";
 // Escala aprovada dos niveis: neutro, violeta claro, ambar, verde. As cores do
 // arquivo de referencia (ciano, violeta, magenta) ficaram de fora: magenta ja e a
 // cor de marca e de alerta no painel.
-const COR_NIVEL: Record<Nivel, string> = {
+export const COR_NIVEL: Record<Nivel, string> = {
   sem_acesso: "border-borda-campo bg-fundo-trilho text-texto-corpo",
   visualizacao: "border-[#DCCCFB] bg-violeta-claro text-violeta-escuro",
   edicao: "border-[#FDE68A] bg-ambar-claro text-ambar",
@@ -92,7 +92,7 @@ export function NavPainel({ atual }: { atual: "usuarios" | "grupos" }) {
             {corpo}
           </div>
         ) : (
-          <Link key={c.chave} href={c.href} className="cartao cartao-interativo block px-[22px] py-5">
+          <Link key={c.chave} href={c.href} className="cartao cartao-interativo block px-[22px] py-5 text-texto-titulo hover:text-texto-titulo">
             {corpo}
           </Link>
         );

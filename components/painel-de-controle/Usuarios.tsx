@@ -122,7 +122,7 @@ export default function Usuarios({
                 onChange={(e) => setBusca(e.target.value)}
                 placeholder="Buscar por nome ou e-mail"
                 aria-label="Buscar por nome ou e-mail"
-                className="campo max-w-[280px] flex-1"
+                className="campo w-full sm:w-auto sm:max-w-[280px] sm:flex-1"
               />
               <select
                 value={perfil}

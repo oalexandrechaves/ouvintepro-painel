@@ -18,24 +18,26 @@ function getSecret(): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
-// `emitidoEm` (segundos) so e passado na troca de senha: e o instante que o
-// banco gravou, para o token novo nunca parecer anterior a propria troca.
+// "iat" com milissegundos (o JWT aceita fracao de segundo): e o que ordena o
+// token contra sessoes_validas_desde. `emitidoEmMs` so e passado na troca de
+// senha: vem do banco, 1 ms depois da troca gravada, para o token novo nunca
+// parecer anterior a ela.
 export async function criarSessao(
   usuarioId: string,
-  emitidoEm?: number,
+  emitidoEmMs: number = Date.now(),
 ): Promise<string> {
   return new SignJWT({})
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(usuarioId)
-    .setIssuedAt(emitidoEm)
+    .setIssuedAt(emitidoEmMs / 1000)
     .setExpirationTime("12h")
     .sign(getSecret());
 }
 
 export interface TokenLido {
   usuarioId: string;
-  // Segundos desde 1970, como o "iat" do JWT.
-  emitidoEm: number;
+  // Milissegundos desde 1970 (o "iat" do JWT vezes 1000).
+  emitidoEmMs: number;
 }
 
 const uuidRe =
@@ -53,7 +55,7 @@ export async function lerToken(
     });
     if (typeof payload.sub !== "string" || !uuidRe.test(payload.sub)) return null;
     if (typeof payload.iat !== "number") return null;
-    return { usuarioId: payload.sub, emitidoEm: payload.iat };
+    return { usuarioId: payload.sub, emitidoEmMs: Math.round(payload.iat * 1000) };
   } catch {
     return null;
   }

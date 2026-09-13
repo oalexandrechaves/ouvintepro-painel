@@ -14,6 +14,7 @@ import {
 } from "@/lib/acesso/modelo";
 import type { GrupoAcesso } from "@/lib/acesso/gestao";
 import {
+  COR_NIVEL,
   Campo,
   Interruptor,
   LegendaNiveis,
@@ -277,8 +278,8 @@ function ModalGrupo({
                           onClick={() => setModulos((atual) => ({ ...atual, [m.chave]: n }))}
                           className={`rounded-md border px-2 py-1 text-[12px] transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                             marcado
-                              ? "border-magenta bg-magenta-claro font-semibold text-magenta-escuro"
-                              : "border-borda-campo text-texto-corpo hover:border-[#D0D0D8]"
+                              ? `${COR_NIVEL[n]} font-semibold`
+                              : "border-borda-campo bg-fundo-cartao text-texto-corpo hover:border-[#D0D0D8]"
                           }`}
                         >
                           {NOME_NIVEL[n]}

@@ -59,7 +59,7 @@ export async function middleware(req: NextRequest) {
     console.error("[middleware] acesso_sessao falhou:", e);
     return falhaDeVerificacao(req);
   }
-  if (!sessaoVigente(dados, token.emitidoEm)) return paraLogin(req, true);
+  if (!sessaoVigente(dados, token.emitidoEmMs)) return paraLogin(req, true);
 
   if (!regra) {
     return ehApi(pathname)

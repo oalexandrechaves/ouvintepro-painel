@@ -31,8 +31,8 @@ export async function POST(req: Request) {
       p_senha_nova: nova,
     });
     if (error) throw erroDoBanco("acesso_trocar_senha", error);
-    // O token novo leva como "iat" o sessoes_validas_desde que a funcao acabou de
-    // gravar: igual, entao vale, e as sessoes anteriores (menores) caem.
+    // A funcao devolve a emissao do token novo, em ms: 1 ms depois do
+    // sessoes_validas_desde que acabou de gravar. O novo vale; os anteriores caem.
     if (typeof data !== "number") {
       throw new Error("acesso_trocar_senha: resposta sem validas_desde.");
     }

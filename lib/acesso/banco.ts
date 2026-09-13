@@ -31,8 +31,8 @@ export interface DadosSessao {
   perfil: string;
   ativo: boolean;
   deveTrocarSenha: boolean;
-  // Segundos; token com "iat" anterior nao vale.
-  validasDesde: number;
+  // Milissegundos; so vale token emitido DEPOIS (estritamente).
+  validasDesdeMs: number;
   grupo: { id: string; nome: string; ativo: boolean };
   permissoes: Permissoes;
 }
@@ -51,7 +51,7 @@ function converterSessao(bruto: unknown): DadosSessao | null {
     typeof r.perfil !== "string" ||
     typeof r.ativo !== "boolean" ||
     typeof r.deve_trocar_senha !== "boolean" ||
-    typeof r.validas_desde !== "number" ||
+    typeof r.validas_desde_ms !== "number" ||
     !g ||
     typeof g.id !== "string" ||
     typeof g.nome !== "string" ||
@@ -73,7 +73,7 @@ function converterSessao(bruto: unknown): DadosSessao | null {
     perfil: r.perfil,
     ativo: r.ativo,
     deveTrocarSenha: r.deve_trocar_senha,
-    validasDesde: r.validas_desde,
+    validasDesdeMs: r.validas_desde_ms,
     grupo: { id: g.id, nome: g.nome, ativo: g.ativo },
     permissoes,
   };
@@ -90,13 +90,15 @@ export async function lerSessaoDoBanco(
   return converterSessao(data);
 }
 
-// A sessao vale se o usuario existe, esta ativo e o token e posterior a ultima
-// troca ou redefinicao de senha.
+// A sessao vale se o usuario existe, esta ativo e o token foi emitido DEPOIS da
+// ultima troca ou redefinicao de senha (ou desativacao). Em milissegundos e com
+// comparacao estrita: em segundos inteiros, uma sessao emitida no mesmo segundo,
+// antes da redefinicao, sobrevivia (o teste de ponta a ponta pegou).
 export function sessaoVigente(
   dados: DadosSessao | null,
-  emitidoEm: number,
+  emitidoEmMs: number,
 ): dados is DadosSessao {
-  return Boolean(dados && dados.ativo && emitidoEm >= dados.validasDesde);
+  return Boolean(dados && dados.ativo && emitidoEmMs > dados.validasDesdeMs);
 }
 
 // Erro de funcao acesso_*: codigo AC vira RegraRecusada, com a mensagem do banco

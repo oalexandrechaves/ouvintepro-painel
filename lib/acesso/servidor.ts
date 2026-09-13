@@ -23,7 +23,7 @@ const carregar = cache(async (): Promise<SessaoVerificada | null> => {
   const token = await lerToken(cookies().get(SESSION_COOKIE)?.value);
   if (!token) return null;
   const dados = await lerSessaoDoBanco(token.usuarioId);
-  if (!sessaoVigente(dados, token.emitidoEm)) return null;
+  if (!sessaoVigente(dados, token.emitidoEmMs)) return null;
   return dados as SessaoVerificada;
 });
 
