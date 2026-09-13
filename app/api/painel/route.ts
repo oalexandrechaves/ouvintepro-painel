@@ -1,7 +1,8 @@
 import { getPainelExtra } from "@/lib/serverData";
 import { responderJson } from "@/lib/rotas";
+import { exigirAcesso } from "@/lib/acesso/servidor";
 
-// Protegido pelo middleware (exige sessao). Roda no servidor com service role.
+// Exige Visualizacao em Ouvintes (middleware e sessao conferida). Roda no servidor com service role.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 // Leitura completa, sem o corte de 1000 linhas: com o seed de ~50 mil ouvintes
@@ -22,8 +23,9 @@ export async function GET(req: Request) {
   const de = deParam && dataRe.test(deParam) ? deParam : null;
   const ate = ateParam && dataRe.test(ateParam) ? ateParam : null;
 
-  return responderJson(() =>
+  return responderJson(async () =>
     getPainelExtra(
+      await exigirAcesso("ouvintes", "visualizacao"),
       Number.isFinite(faixa as number) ? faixa : null,
       zona,
       de,

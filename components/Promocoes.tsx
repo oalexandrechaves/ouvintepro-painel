@@ -65,7 +65,9 @@ function dataPtBr(iso: string | null): string {
   return d.toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" });
 }
 
-export default function Promocoes() {
+// podeConfirmar: Edicao em Promocoes. Quem so tem Visualizacao ve e sorteia, mas
+// nao grava ganhador (a rota recusa de novo se alguem tentar direto).
+export default function Promocoes({ podeConfirmar }: { podeConfirmar: boolean }) {
   const [sel, setSel] = useState<SeletorPeriodo>("30dias");
   const [customDe, setCustomDe] = useState<string | null>(null);
   const [customAte, setCustomAte] = useState<string | null>(null);
@@ -162,6 +164,7 @@ export default function Promocoes() {
           promo={promoAberta}
           periodoDe={de}
           periodoAte={ate}
+          podeConfirmar={podeConfirmar}
           onClose={() => setPromoAberta(null)}
         />
       ) : null}
@@ -233,11 +236,13 @@ function ModalPromocao({
   promo,
   periodoDe,
   periodoAte,
+  podeConfirmar,
   onClose,
 }: {
   promo: PromocaoRow;
   periodoDe: string | null;
   periodoAte: string | null;
+  podeConfirmar: boolean;
   onClose: () => void;
 }) {
   const [detalhe, setDetalhe] = useState<PromocaoDetalhe | null>(null);
@@ -311,8 +316,16 @@ function ModalPromocao({
       });
       const d = (await r.json().catch(() => ({ ok: false }))) as {
         ok?: boolean;
+        erro?: string;
       };
-      if (d?.ok) {
+      if (r.status === 401) {
+        window.location.assign("/login");
+        return;
+      }
+      if (r.status === 403) {
+        // Sem Edicao (o grupo pode ter mudado com a tela aberta): diz o motivo.
+        setAviso(d?.erro ?? "Seu grupo de acesso não permite confirmar ganhador.");
+      } else if (d?.ok) {
         setAviso(`${sorteado.nome ?? "Ganhador"} confirmado!`);
         setSorteado(null);
         await carregar();
@@ -401,15 +414,17 @@ function ModalPromocao({
                   .filter(Boolean)
                   .join(" · ") || "-"}
               </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={confirmar}
-                  disabled={confirmando || erro}
-                  className="botao bg-verde text-white hover:opacity-90 disabled:opacity-50"
-                >
-                  {confirmando ? "Confirmando..." : "Confirmar ganhador"}
-                </button>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {podeConfirmar ? (
+                  <button
+                    type="button"
+                    onClick={confirmar}
+                    disabled={confirmando || erro}
+                    className="botao bg-verde text-white hover:opacity-90 disabled:opacity-50"
+                  >
+                    {confirmando ? "Confirmando..." : "Confirmar ganhador"}
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={sortear}
@@ -418,6 +433,12 @@ function ModalPromocao({
                 >
                   Sortear novamente
                 </button>
+                {podeConfirmar ? null : (
+                  <p className="w-full text-[12.5px] text-texto-corpo">
+                    Seu grupo tem Visualização em Promoções: dá para sortear,
+                    mas confirmar ganhador exige Edição.
+                  </p>
+                )}
               </div>
             </div>
           ) : null}

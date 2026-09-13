@@ -1,7 +1,8 @@
 import { getPromocoes } from "@/lib/serverData";
 import { responderJson } from "@/lib/rotas";
+import { exigirAcesso } from "@/lib/acesso/servidor";
 
-// Protegido pelo middleware (exige sessao). Service role no servidor.
+// Exige Visualizacao em Promocoes (middleware e sessao conferida). Service role no servidor.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 // Leitura completa, sem o corte de 1000 linhas: com o seed de ~50 mil ouvintes
@@ -16,5 +17,7 @@ export async function GET(req: Request) {
   const ateP = searchParams.get("ate");
   const de = deP && dataRe.test(deP) ? deP : null;
   const ate = ateP && dataRe.test(ateP) ? ateP : null;
-  return responderJson(() => getPromocoes(de, ate));
+  return responderJson(async () =>
+    getPromocoes(await exigirAcesso("promocoes", "visualizacao"), de, ate),
+  );
 }

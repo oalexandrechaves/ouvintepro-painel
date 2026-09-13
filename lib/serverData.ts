@@ -8,6 +8,12 @@ import {
   janelaUtc as janelaDias,
   periodoAnterior,
 } from "./periodo";
+import { garantirAcesso, type SessaoVerificada } from "./acesso/servidor";
+
+// ACESSO: toda funcao exportada que le ou grava dado recebe a SessaoVerificada e
+// chama garantirAcesso na primeira linha, antes de abrir o cliente. E a segunda
+// camada (a primeira e o middleware): rota que esquecer de conferir a sessao nao
+// compila. agruparPromocoes nao entra porque so transforma o que ja foi lido.
 
 // Cliente com service role: SO no servidor, nunca exposto ao cliente.
 // A lista de ouvintes tem nome (PII) e RLS bloqueia anon, por isso service role.
@@ -340,11 +346,13 @@ const PEDIDO_TIPO_LABEL: Record<string, string> = {
 // Todas as leituras paginam ate o fim (carregarTudo): antes eram `.limit()` de
 // 2000 a 100000, e o PostgREST cortava cada uma em 1000.
 export async function getPainelExtra(
+  sessao: SessaoVerificada,
   faixa: number | null,
   zona: string | null,
   de: string | null = null,
   ate: string | null = null,
 ): Promise<PainelExtra> {
+  garantirAcesso(sessao, "ouvintes", "visualizacao");
   const sb = exigirCliente();
 
   try {
@@ -633,7 +641,11 @@ export interface MensagemChat {
 
 // Busca o historico de conversa de UM ouvinte, sempre pelo ouvinte_id (UUID interno),
 // nunca pelo telefone. Ordem cronologica (mais antiga primeiro). Service role.
-export async function getConversa(ouvinteId: string): Promise<MensagemChat[]> {
+export async function getConversa(
+  sessao: SessaoVerificada,
+  ouvinteId: string,
+): Promise<MensagemChat[]> {
+  garantirAcesso(sessao, "ouvintes", "visualizacao");
   const sb = exigirCliente();
   try {
     const convs = exigirDados(
@@ -833,9 +845,11 @@ function janelaUtc(
 // um pedaco do getPainelExtra; ganhou funcao propria para a tela nao carregar
 // ouvintes, musicas e conversas so para listar promocoes.
 export async function getPromocoes(
+  sessao: SessaoVerificada,
   de: string | null,
   ate: string | null,
 ): Promise<{ promocoes: PromocaoRow[] }> {
+  garantirAcesso(sessao, "promocoes", "visualizacao");
   const sb = exigirCliente();
   try {
     const radioId = await resolverRadioId(sb);
@@ -925,10 +939,12 @@ const detalheVazio = (slug: string): PromocaoDetalhe => ({
 // A checagem de "ja ganhou" ignora o periodo (olha todo o historico da radio) e
 // inclui vitorias na propria promocao. Sempre por ouvinte_id; telefone mascarado.
 export async function getPromocaoDetalhe(
+  sessao: SessaoVerificada,
   slug: string,
   de: string | null = null,
   ate: string | null = null,
 ): Promise<PromocaoDetalhe> {
+  garantirAcesso(sessao, "promocoes", "visualizacao");
   const sb = exigirCliente();
   try {
     const radioId = await resolverRadioId(sb);
@@ -1109,11 +1125,17 @@ export async function getPromocaoDetalhe(
 }
 
 // Registra um ganhador confirmado. Retorna true em sucesso. Sempre por ouvinte_id.
-export async function registrarGanhador(input: {
-  ouvinteId: string;
-  promocaoNome: string;
-  variacaoDigitada?: string | null;
-}): Promise<boolean> {
+// Grava: exige Edicao em Promocoes. Sem sessao com esse nivel, LANCA
+// AcessoNegado antes de tocar no banco (nao devolve false, que seria "falhou").
+export async function registrarGanhador(
+  sessao: SessaoVerificada,
+  input: {
+    ouvinteId: string;
+    promocaoNome: string;
+    variacaoDigitada?: string | null;
+  },
+): Promise<boolean> {
+  garantirAcesso(sessao, "promocoes", "edicao");
   const sb = getServiceClient();
   if (!sb) return false;
   try {
@@ -1350,7 +1372,11 @@ function ordenarSerie(
   return { itens: arr.slice(0, limite), total, distintos: arr.length };
 }
 
-export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
+export async function getAudiencia(
+  sessao: SessaoVerificada,
+  f: AudienciaFiltros,
+): Promise<Audiencia> {
+  garantirAcesso(sessao, "comercial", "visualizacao");
   const sb = exigirCliente();
 
   try {
@@ -1718,9 +1744,11 @@ function concentracaoFaixas(
 }
 
 export async function getVisaoGeral(
+  sessao: SessaoVerificada,
   de: string,
   ate: string,
 ): Promise<VisaoGeral> {
+  garantirAcesso(sessao, "visao_geral", "visualizacao");
   const sb = exigirCliente();
 
   try {

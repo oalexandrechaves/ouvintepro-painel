@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { getPromocaoDetalhe } from "@/lib/serverData";
 import { responderJson } from "@/lib/rotas";
+import { exigirAcesso } from "@/lib/acesso/servidor";
 
-// Protegido pelo middleware (exige sessao). Roda no servidor com service role.
+// Exige Visualizacao em Promocoes (middleware e sessao conferida). Roda no servidor com service role.
 // Detalhe de uma promocao (participantes, ganhadores, historico de vitorias).
 // Sempre por ouvinte_id (UUID); telefone mascarado no serverData.
 export const runtime = "nodejs";
@@ -20,6 +21,11 @@ export async function GET(req: Request) {
   const de = deParam && dataRe.test(deParam) ? deParam : null;
   const ate = ateParam && dataRe.test(ateParam) ? ateParam : null;
   return responderJson(async () => ({
-    detalhe: await getPromocaoDetalhe(slug, de, ate),
+    detalhe: await getPromocaoDetalhe(
+      await exigirAcesso("promocoes", "visualizacao"),
+      slug,
+      de,
+      ate,
+    ),
   }));
 }

@@ -1,8 +1,9 @@
 import { getVisaoGeral } from "@/lib/serverData";
 import { responderJson } from "@/lib/rotas";
+import { exigirAcesso } from "@/lib/acesso/servidor";
 import { hojeSaoPaulo } from "@/lib/periodo";
 
-// Protegido pelo middleware (exige sessao). Service role no servidor.
+// Exige Visualizacao em Visao geral (middleware e sessao conferida). Service role no servidor.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 // Leitura completa, sem o corte de 1000 linhas: com o seed de ~50 mil ouvintes
@@ -20,5 +21,7 @@ export async function GET(req: Request) {
   let ate = ateP && dataRe.test(ateP) ? ateP : hoje;
   if (ate > hoje) ate = hoje;
   if (de > ate) de = ate;
-  return responderJson(() => getVisaoGeral(de, ate));
+  return responderJson(async () =>
+    getVisaoGeral(await exigirAcesso("visao_geral", "visualizacao"), de, ate),
+  );
 }
