@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
 import { getVisaoGeral } from "@/lib/serverData";
+import { responderJson } from "@/lib/rotas";
 import { hojeSaoPaulo } from "@/lib/periodo";
 
 // Protegido pelo middleware (exige sessao). Service role no servidor.
@@ -20,5 +20,5 @@ export async function GET(req: Request) {
   let ate = ateP && dataRe.test(ateP) ? ateP : hoje;
   if (ate > hoje) ate = hoje;
   if (de > ate) de = ate;
-  return NextResponse.json(await getVisaoGeral(de, ate));
+  return responderJson(() => getVisaoGeral(de, ate));
 }

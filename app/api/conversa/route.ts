@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getConversa } from "@/lib/serverData";
+import { responderJson } from "@/lib/rotas";
 
 // Protegido pelo middleware (exige sessao). Roda no servidor com service role.
 // Busca as mensagens SEMPRE por ouvinte_id (UUID interno), nunca por telefone.
@@ -15,6 +16,5 @@ export async function GET(req: Request) {
   if (!ouvinte || !uuidRe.test(ouvinte)) {
     return NextResponse.json({ mensagens: [] }, { status: 400 });
   }
-  const mensagens = await getConversa(ouvinte);
-  return NextResponse.json({ mensagens });
+  return responderJson(async () => ({ mensagens: await getConversa(ouvinte) }));
 }

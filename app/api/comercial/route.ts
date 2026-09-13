@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { getAudiencia, type AudienciaFiltros } from "@/lib/serverData";
+import { responderJson } from "@/lib/rotas";
 
 // Rota da tela Comercial (antes Audiencia). Nasce PROTEGIDA sem ninguem fazer nada: o matcher
 // do middleware e generico e rotaPublica() e uma lista branca de 4 entradas, e
@@ -26,9 +27,10 @@ export async function GET(req: NextRequest) {
     programa: texto(p.get("programa")),
     comPedido: p.get("comPedido") === "1",
     comPromocao: p.get("comPromocao") === "1",
-    // Demo LIGADO por padrao: a base real ainda e pequena e a tela existe para
-    // demonstrar. Quem desliga ve so cadastro de gente de verdade.
+    // Demo LIGADO por padrao: esta instancia e a peca de venda e existe para
+    // demonstrar. O interruptor e ARTEFATO DESTA INSTANCIA: a instancia de cada
+    // radio nasce vazia e so recebe dado real, entao la ele nao muda nada.
     incluirDemo: p.get("incluirDemo") !== "0",
   };
-  return NextResponse.json(await getAudiencia(filtros));
+  return responderJson(() => getAudiencia(filtros));
 }

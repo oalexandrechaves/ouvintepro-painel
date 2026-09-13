@@ -8,8 +8,15 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 // Carga inicial no servidor para "30 dias", que e o periodo com que a tela abre:
-// o primeiro olhar ja chega com numero, sem esqueleto.
+// o primeiro olhar ja chega com numero, sem esqueleto. Se a leitura falhar, a
+// tela abre em estado de erro, com "Tentar de novo", e nunca com zeros.
 export default async function Home() {
   const { de, ate } = rangeDoPeriodo("30dias");
-  return <VisaoGeral inicial={await getVisaoGeral(de, ate)} />;
+  let inicial: Awaited<ReturnType<typeof getVisaoGeral>> | null = null;
+  try {
+    inicial = await getVisaoGeral(de, ate);
+  } catch {
+    inicial = null;
+  }
+  return <VisaoGeral inicial={inicial} />;
 }

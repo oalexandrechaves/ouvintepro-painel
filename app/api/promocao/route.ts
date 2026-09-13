@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getPromocaoDetalhe } from "@/lib/serverData";
+import { responderJson } from "@/lib/rotas";
 
 // Protegido pelo middleware (exige sessao). Roda no servidor com service role.
 // Detalhe de uma promocao (participantes, ganhadores, historico de vitorias).
@@ -18,6 +19,7 @@ export async function GET(req: Request) {
   const ateParam = searchParams.get("ate");
   const de = deParam && dataRe.test(deParam) ? deParam : null;
   const ate = ateParam && dataRe.test(ateParam) ? ateParam : null;
-  const detalhe = await getPromocaoDetalhe(slug, de, ate);
-  return NextResponse.json({ detalhe });
+  return responderJson(async () => ({
+    detalhe: await getPromocaoDetalhe(slug, de, ate),
+  }));
 }

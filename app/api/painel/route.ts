@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
 import { getPainelExtra } from "@/lib/serverData";
+import { responderJson } from "@/lib/rotas";
 
 // Protegido pelo middleware (exige sessao). Roda no servidor com service role.
 export const runtime = "nodejs";
@@ -22,11 +22,12 @@ export async function GET(req: Request) {
   const de = deParam && dataRe.test(deParam) ? deParam : null;
   const ate = ateParam && dataRe.test(ateParam) ? ateParam : null;
 
-  const data = await getPainelExtra(
-    Number.isFinite(faixa as number) ? faixa : null,
-    zona,
-    de,
-    ate,
+  return responderJson(() =>
+    getPainelExtra(
+      Number.isFinite(faixa as number) ? faixa : null,
+      zona,
+      de,
+      ate,
+    ),
   );
-  return NextResponse.json(data);
 }

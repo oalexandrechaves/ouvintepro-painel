@@ -11,6 +11,20 @@ export interface SerieItem {
   valor: number;
 }
 
+// RANKING COM O TOTAL REAL, E NAO A SOMA DO QUE APARECE.
+// Os rankings chegam cortados em 5 ou 6 itens. A porcentagem calculada sobre a
+// soma dos exibidos dava Grajaú com 21,1% quando o real era 9,5% (572 de 6.033):
+// numero errado com cara de exato. Por isso o total viaja junto, calculado no
+// servidor sobre o universo inteiro do cartao, e Barras/ListaRanking EXIGEM este
+// tipo: quem esquecer o total nao compila.
+//  - total: o denominador da porcentagem (quem o cartao conta, nao quem aparece);
+//  - distintos: quantos valores existiam antes do corte, para dizer "6 de 27".
+export interface Ranking<T extends SerieItem = SerieItem> {
+  itens: T[];
+  total: number;
+  distintos: number;
+}
+
 const nf = new Intl.NumberFormat("pt-BR");
 
 export function numeroBr(n: number): string {
@@ -34,10 +48,6 @@ export function formatValue(
   if (mode === "numero") return numero;
   if (mode === "percentual") return `${pct}%`;
   return `${numero} · ${pct}%`;
-}
-
-export function somaSerie(serie: SerieItem[]): number {
-  return serie.reduce((acc, item) => acc + item.valor, 0);
 }
 
 // Variacao percentual assinada, com uma casa: "+8,4%", "-2,0%". Sem base

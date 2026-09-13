@@ -5,6 +5,7 @@ import type { VisaoGeral as Dados } from "@/lib/serverData";
 import type { DisplayMode, SeletorPeriodo } from "@/lib/tipos";
 import { numeroBr, variacaoPct } from "@/lib/tipos";
 import { diaBr, rangeCustom, rangeDoPeriodo } from "@/lib/periodo";
+import { buscarJson } from "@/lib/buscar";
 import Cabecalho from "./Cabecalho";
 import CountUp from "./CountUp";
 import FiltroPeriodo from "./FiltroPeriodo";
@@ -12,6 +13,7 @@ import {
   Barras,
   Cartao,
   EsqueletoCartoes,
+  ErroCarregamento,
   EsqueletoLista,
   Etiqueta,
   ListaRanking,
@@ -23,13 +25,17 @@ import {
 // a pergunta que a anterior levanta, e o peso visual cai da 01 para a 06.
 //   01 quantos sao · 02 esta crescendo · 03 quem sao
 //   04 onde estao  · 05 do que gostam  · 06 como se envolvem
-export default function VisaoGeral({ inicial }: { inicial: Dados }) {
+// `inicial` nulo quer dizer que a leitura do servidor falhou: a tela tenta de
+// novo ao abrir e, se falhar outra vez, mostra o erro.
+export default function VisaoGeral({ inicial }: { inicial: Dados | null }) {
   const [sel, setSel] = useState<SeletorPeriodo>("30dias");
   const [customDe, setCustomDe] = useState<string | null>(null);
   const [customAte, setCustomAte] = useState<string | null>(null);
   const [modo, setModo] = useState<DisplayMode>("combinado");
-  const [dados, setDados] = useState<Dados>(inicial);
-  const [carregando, setCarregando] = useState(false);
+  const [dados, setDados] = useState<Dados | null>(inicial);
+  const [erro, setErro] = useState(false);
+  const [carregando, setCarregando] = useState(inicial === null);
+  const [tentativa, setTentativa] = useState(0);
 
   const { de, ate } = useMemo(
     () =>
@@ -37,14 +43,23 @@ export default function VisaoGeral({ inicial }: { inicial: Dados }) {
     [sel, customDe, customAte],
   );
 
+  // PERIODO NOVO, NUMERO VELHO NUNCA. Quando a busca falhava, os numeros do
+  // periodo anterior ficavam na tela sob o rotulo do periodo novo. Agora a falha
+  // tira os dados e mostra o erro; o rotulo do periodo continua o escolhido.
   useEffect(() => {
-    if (de === dados.de && ate === dados.ate) return;
+    if (dados && dados.de === de && dados.ate === ate) return;
     let ativo = true;
     setCarregando(true);
-    fetch(`/api/visao-geral?de=${de}&ate=${ate}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: Dados | null) => {
-        if (ativo && d) setDados(d);
+    setErro(false);
+    buscarJson<Dados>(`/api/visao-geral?de=${de}&ate=${ate}`)
+      .then((d) => {
+        if (ativo) setDados(d);
+      })
+      .catch(() => {
+        if (ativo) {
+          setDados(null);
+          setErro(true);
+        }
       })
       .finally(() => {
         if (ativo) setCarregando(false);
@@ -52,10 +67,10 @@ export default function VisaoGeral({ inicial }: { inicial: Dados }) {
     return () => {
       ativo = false;
     };
-    // dados.de/ate de proposito fora das dependencias: a resposta nao pode
-    // disparar outra busca.
+    // `dados` de proposito fora das dependencias: a resposta nao pode disparar
+    // outra busca. `tentativa` e o "Tentar de novo".
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [de, ate]);
+  }, [de, ate, tentativa]);
 
   return (
     <>
@@ -76,18 +91,18 @@ export default function VisaoGeral({ inicial }: { inicial: Dados }) {
           ate={ate}
           modo={modo}
           onModo={setModo}
-          atualizadoEm={carregando ? null : dados.geradoEm}
+          atualizadoEm={carregando || !dados ? null : dados.geradoEm}
         />
       </Cabecalho>
 
       <div className="max-w-[1240px] pt-8">
         {carregando ? (
           <Esqueleto />
-        ) : !dados.configurado ? (
-          <div className="cartao p-8 text-center text-sm text-texto-corpo">
-            Não foi possível carregar os dados agora. Tente de novo em
-            instantes.
-          </div>
+        ) : erro || !dados ? (
+          <ErroCarregamento
+            detalhe="Os números deste período não foram carregados. Nada foi mostrado no lugar deles."
+            onTentar={() => setTentativa((t) => t + 1)}
+          />
         ) : (
           <Conteudo dados={dados} modo={modo} />
         )}
@@ -211,7 +226,8 @@ function Conteudo({ dados, modo }: { dados: Dados; modo: DisplayMode }) {
         <div className="cartao cartao-interativo p-[22px] sm:p-7">
           <div className="grid grid-cols-1 gap-8 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             <Barras
-              serie={dados.faixa.distribuicao}
+              ranking={dados.faixa.distribuicao}
+              unidade="faixas"
               mode={modo}
               vazio="Nenhum cadastro completo neste período."
             />
@@ -257,13 +273,13 @@ function Conteudo({ dados, modo }: { dados: Dados; modo: DisplayMode }) {
       <Secao numero="04" titulo="Onde estão" descricao="Zona, bairro e cidade">
         <div className="grid grid-cols-1 gap-[18px] md:grid-cols-2 lg:grid-cols-3">
           <Cartao titulo="Zonas">
-            <Barras serie={dados.zonas} mode={modo} />
+            <Barras ranking={dados.zonas} unidade="zonas" mode={modo} />
           </Cartao>
           <Cartao titulo="Bairros">
-            <ListaRanking itens={dados.bairros} mode={modo} />
+            <ListaRanking ranking={dados.bairros} unidade="bairros" mode={modo} />
           </Cartao>
           <Cartao titulo="Cidades">
-            <ListaRanking itens={dados.cidades} mode={modo} />
+            <ListaRanking ranking={dados.cidades} unidade="cidades" mode={modo} />
           </Cartao>
         </div>
       </Secao>
@@ -276,13 +292,21 @@ function Conteudo({ dados, modo }: { dados: Dados; modo: DisplayMode }) {
       >
         <div className="grid grid-cols-1 gap-[18px] md:grid-cols-2 lg:grid-cols-3">
           <Cartao titulo="Estilos musicais">
-            <Barras serie={dados.estilos} mode={modo} />
+            <Barras ranking={dados.estilos} unidade="estilos" mode={modo} />
           </Cartao>
           <Cartao titulo="Artistas mais pedidos">
-            <ListaRanking itens={dados.artistas} mode={modo} />
+            <ListaRanking
+              ranking={dados.artistas}
+              unidade="artistas"
+              mode={modo}
+            />
           </Cartao>
           <Cartao titulo="Músicas mais pedidas">
-            <ListaRanking itens={dados.musicas} mode={modo} />
+            <ListaRanking
+              ranking={dados.musicas}
+              unidade="músicas"
+              mode={modo}
+            />
           </Cartao>
         </div>
       </Secao>
@@ -292,7 +316,8 @@ function Conteudo({ dados, modo }: { dados: Dados; modo: DisplayMode }) {
         <div className="grid grid-cols-1 gap-[18px] md:grid-cols-2 lg:grid-cols-3">
           <Cartao titulo="Programas mais citados">
             <Barras
-              serie={dados.programas}
+              ranking={dados.programas}
+              unidade="programas"
               mode={modo}
               gradiente="barra-alerta"
             />

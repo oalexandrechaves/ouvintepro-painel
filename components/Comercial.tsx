@@ -1,12 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Audiencia as Dados, AudienciaFiltros } from "@/lib/serverData";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  Audiencia as Dados,
+  AudienciaFiltros,
+  AudienciaOpcoes,
+} from "@/lib/serverData";
 import { numeroBr } from "@/lib/tipos";
+import { buscarJson } from "@/lib/buscar";
 import Cabecalho from "./Cabecalho";
 import CountUp from "./CountUp";
 import DocumentoCampanha from "./DocumentoCampanha";
-import { Barras, Cartao, EstadoVazioGrande } from "./ui";
+import {
+  Barras,
+  Cartao,
+  ErroCarregamento,
+  EsqueletoCartoes,
+  EstadoVazioGrande,
+} from "./ui";
 
 // COMERCIAL (antes Audiencia): publico segmentado para a equipe comercial provar
 // alcance ao anunciante. Esta tela vai para a frente de um TERCEIRO, e isso
@@ -25,8 +36,29 @@ const FILTROS_VAZIOS: AudienciaFiltros = {
   programa: null,
   comPedido: false,
   comPromocao: false,
+  // INTERRUPTOR DE DEMONSTRACAO: ARTEFATO DESTA INSTANCIA. Este painel e a peca
+  // de venda, e aqui quase toda a base e demonstracao. A instancia de cada radio
+  // nasce vazia e so recebe dado real da operacao dela; la nao existe linha
+  // [DEMO], e o interruptor sera inutil. Nao vale replicar a ideia para as
+  // outras telas.
   incluirDemo: true,
 };
+
+const OPCOES_VAZIAS: AudienciaOpcoes = {
+  cidades: [],
+  bairros: [],
+  zonas: [],
+  estilos: [],
+  programas: [],
+  faixas: [],
+};
+
+// A RESPOSTA NA TELA CARREGA OS FILTROS DE QUE ELA E.
+// Os numeros vinham da ultima resposta e o texto do argumento vinha do filtro
+// escolhido agora. Enquanto a busca corria, e para sempre quando ela falhava,
+// saia "50.151 ouvintes em Sapopemba" na frente do anunciante. Agora numero,
+// regiao do argumento e peca da campanha leem a mesma resposta.
+type Resposta = { dados: Dados; filtros: AudienciaFiltros; chave: string };
 
 type Dim = "cidade" | "zona" | "bairro" | "faixa" | "estilo" | "programa";
 const NOME_DIM: Record<Dim, string> = {
@@ -70,22 +102,37 @@ function Select({
   );
 }
 
-export default function Comercial({ inicial }: { inicial: Dados }) {
+// `inicial` nulo quer dizer que a leitura do servidor falhou: a tela tenta de
+// novo ao abrir e, se falhar outra vez, mostra o erro.
+export default function Comercial({ inicial }: { inicial: Dados | null }) {
   const [filtros, setFiltros] = useState<AudienciaFiltros>(FILTROS_VAZIOS);
-  const [dados, setDados] = useState<Dados>(inicial);
-  const [chaveResposta, setChaveResposta] = useState(
-    JSON.stringify(FILTROS_VAZIOS),
+  const [resposta, setResposta] = useState<Resposta | null>(
+    inicial
+      ? {
+          dados: inicial,
+          filtros: FILTROS_VAZIOS,
+          chave: JSON.stringify(FILTROS_VAZIOS),
+        }
+      : null,
   );
-  const [carregando, setCarregando] = useState(false);
+  const [erro, setErro] = useState(false);
+  const [carregando, setCarregando] = useState(inicial === null);
+  const [tentativa, setTentativa] = useState(0);
   const [aviso, setAviso] = useState<string | null>(null);
   const [custo, setCusto] = useState("1,00");
   const [docAberto, setDocAberto] = useState(false);
+  // Numero da busca mais recente: resposta atrasada de um filtro antigo nao
+  // sobrescreve a do filtro atual.
+  const ultimaBusca = useRef(0);
 
   // AS OPCOES VEM DA RESPOSTA ATUAL, NAO DA CARGA INICIAL. Na versao anterior
   // elas eram lidas da carga inicial e nunca mudavam, entao nem o interruptor de
   // demonstracao nem filtro nenhum chegavam as listas. O servidor calcula cada
   // lista respeitando todos os outros filtros menos ela mesma (cascata).
-  const opcoes = dados.opcoes;
+  // Numa falha elas ficam as da ultima resposta boa, para os filtros seguirem
+  // utilizaveis enquanto o erro aparece no lugar dos numeros.
+  const dados = resposta?.dados ?? null;
+  const opcoes = dados?.opcoes ?? OPCOES_VAZIAS;
 
   const set = <K extends keyof AudienciaFiltros>(
     k: K,
@@ -106,19 +153,20 @@ export default function Comercial({ inicial }: { inicial: Dados }) {
     if (f.comPedido) p.set("comPedido", "1");
     if (f.comPromocao) p.set("comPromocao", "1");
     if (!f.incluirDemo) p.set("incluirDemo", "0");
+    const minha = ++ultimaBusca.current;
     setCarregando(true);
+    setErro(false);
     try {
-      const res = await fetch(`/api/comercial?${p.toString()}`, {
-        cache: "no-store",
-      });
-      if (res.ok) {
-        setDados(await res.json());
-        setChaveResposta(chave);
-      }
+      const d = await buscarJson<Dados>(`/api/comercial?${p.toString()}`);
+      if (minha !== ultimaBusca.current) return;
+      setResposta({ dados: d, filtros: f, chave });
     } catch {
-      /* mantem o resultado anterior na tela em vez de zerar o numero */
+      // FALHA E ERRO NA TELA, com "Tentar de novo". Antes o catch mantinha o
+      // resultado anterior, e o numero velho ficava sob o filtro novo.
+      if (minha !== ultimaBusca.current) return;
+      setErro(true);
     } finally {
-      setCarregando(false);
+      if (minha === ultimaBusca.current) setCarregando(false);
     }
   }, []);
 
@@ -126,23 +174,31 @@ export default function Comercial({ inicial }: { inicial: Dados }) {
   // cliente, e uma requisicao por clique deixaria o numero piscando.
   const chave = JSON.stringify(filtros);
   useEffect(() => {
-    if (chave === chaveResposta) return;
+    if (!erro && resposta?.chave === chave) {
+      // Voltou para o recorte que ja esta na tela: descarta busca em andamento.
+      ultimaBusca.current += 1;
+      setCarregando(false);
+      return;
+    }
     const t = setTimeout(
       () => buscar(JSON.parse(chave) as AudienciaFiltros, chave),
       180,
     );
     return () => clearTimeout(t);
-    // chaveResposta fora de proposito: a resposta nao dispara nova busca.
+    // resposta e erro fora de proposito: a resposta nao dispara nova busca, e um
+    // erro nao pode virar laco de tentativas. `tentativa` e o "Tentar de novo".
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chave, buscar]);
+  }, [chave, tentativa, buscar]);
 
   // CASCATA, LADO DO CLIENTE: escolhido o Tatuape, trocar a cidade para
   // Guarulhos deixa o bairro escolhido sem existir no novo recorte. Em vez de
   // mostrar zero na frente do cliente, o filtro que ficou orfao sai sozinho, com
   // aviso. So reconcilia quando a resposta e da combinacao de filtros atual,
   // senao uma resposta atrasada limparia um filtro que acabou de ser escolhido.
+  // E SO COM RESPOSTA BOA: quando o servidor falhava, as listas vinham vazias e
+  // todos os filtros saiam com "não existe no recorte", o que era mentira.
   useEffect(() => {
-    if (chaveResposta !== JSON.stringify(filtros)) return;
+    if (erro || !resposta || resposta.chave !== JSON.stringify(filtros)) return;
     const orfaos: Dim[] = [];
     const tem = (lista: string[], v: string | null | undefined) =>
       !v || lista.includes(v);
@@ -167,7 +223,7 @@ export default function Comercial({ inicial }: { inicial: Dados }) {
       for (const d of orfaos) novo[d] = null;
       return novo;
     });
-  }, [dados, chaveResposta, filtros, opcoes]);
+  }, [resposta, erro, filtros, opcoes]);
 
   const custoNum = useMemo(() => {
     const n = Number(custo.replace(/\./g, "").replace(",", "."));
@@ -176,11 +232,12 @@ export default function Comercial({ inicial }: { inicial: Dados }) {
   const brl = (n: number) =>
     n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 
+  const total = dados?.total ?? 0;
   const pctExclusivo =
-    dados.total > 0 ? Math.round((dados.exclusivos / dados.total) * 100) : 0;
-  const custoTotal = dados.comEndereco * custoNum;
+    dados && total > 0 ? Math.round((dados.exclusivos / total) * 100) : 0;
+  const custoTotal = (dados?.comEndereco ?? 0) * custoNum;
   const custoPorAlcancado =
-    dados.comEndereco > 0 ? custoTotal / dados.comEndereco : 0;
+    dados && dados.comEndereco > 0 ? custoTotal / dados.comEndereco : 0;
 
   const ativos = [
     filtros.cidade,
@@ -193,7 +250,9 @@ export default function Comercial({ inicial }: { inicial: Dados }) {
     filtros.comPromocao || null,
   ].filter(Boolean).length;
 
-  const regiaoLabel = filtros.bairro ?? filtros.zona ?? filtros.cidade ?? null;
+  // Regiao da RESPOSTA exibida, nunca do filtro que ainda esta carregando.
+  const vistos = resposta?.filtros ?? FILTROS_VAZIOS;
+  const regiaoLabel = vistos.bairro ?? vistos.zona ?? vistos.cidade ?? null;
   const lista = (xs: string[]) => xs.map((x) => ({ valor: x, rotulo: x }));
 
   return (
@@ -204,13 +263,6 @@ export default function Comercial({ inicial }: { inicial: Dados }) {
       />
 
       <div className="max-w-[1240px] pt-8">
-        {!dados.configurado ? (
-          <div className="cartao mb-6 p-8 text-center text-sm text-texto-corpo">
-            Não foi possível carregar os dados agora. Tente de novo em
-            instantes.
-          </div>
-        ) : null}
-
         {/* RECORTE DO PUBLICO */}
         <div className="cartao px-5 py-[22px] sm:px-[26px]">
           <div className="flex flex-wrap items-baseline justify-between gap-4">
@@ -317,256 +369,275 @@ export default function Comercial({ inicial }: { inicial: Dados }) {
           ) : null}
         </div>
 
-        {/* NUMEROS DO RECORTE */}
-        <div
-          className={`mt-[26px] grid grid-cols-1 gap-[18px] transition-opacity sm:grid-cols-2 lg:grid-cols-3 ${carregando ? "opacity-60" : ""}`}
-        >
-          <div className="cartao cartao-interativo min-w-0 p-[26px]">
-            <div className="text-[12.5px] text-texto-corpo">
-              Alcance do recorte
-            </div>
-            <div className="text-gradient mt-2.5 font-display text-[44px] font-semibold leading-[1.05] tracking-[-0.03em] tabular-nums sm:text-[52px]">
-              <CountUp value={dados.total} duration={900} />
-            </div>
-            <div className="mt-2.5 text-[12.5px] text-texto-rotulo">
-              Somente quem deu consentimento.
-              {dados.demoNoTotal > 0
-                ? ` Inclui ${numeroBr(dados.demoNoTotal)} de demonstração.`
-                : ""}
-            </div>
-          </div>
-          <div className="cartao cartao-interativo min-w-0 p-[26px]">
-            <div className="text-[12.5px] text-texto-corpo">
-              Com bairro e número
-            </div>
-            <div className="mt-2.5 font-display text-[44px] font-semibold leading-[1.05] tracking-[-0.03em] tabular-nums sm:text-[52px]">
-              <CountUp value={dados.comEndereco} duration={900} />
-            </div>
-            {/* A RESSALVA FICA JUNTO DO NUMERO. `ouvintes` nao guarda logradouro nem
-                CEP; chamar isto de endereco utilizavel faria o comercial prometer
-                carta que os Correios nao entregam. */}
-            <div className="mt-2.5 text-[12.5px] text-ambar">
-              Falta o logradouro para postagem: o cadastro guarda bairro e
-              número, não a rua nem o CEP.
-            </div>
-          </div>
-          <div className="cartao cartao-interativo min-w-0 p-[26px] sm:col-span-2 lg:col-span-1">
-            <div className="text-[12.5px] text-texto-corpo">
-              Não ouvem outra rádio
-            </div>
-            <div className="mt-2.5 font-display text-[44px] font-semibold leading-[1.05] tracking-[-0.03em] text-magenta tabular-nums sm:text-[52px]">
-              <CountUp value={dados.exclusivos} duration={900} />
-            </div>
-            <div className="mt-2.5 text-[12.5px] text-texto-rotulo">
-              {pctExclusivo}% do recorte
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-[18px] grid grid-cols-1 gap-[18px] lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
-          {/* ARGUMENTO DE VENDA: EXCLUSIVIDADE. A comparacao com a concorrencia
-              saiu de proposito e nao volta nesta tela. */}
-          <div className="cartao cartao-interativo min-w-0 px-5 py-6 sm:px-[26px]">
-            <div className="mb-1.5 text-[13px] font-medium">
-              Argumento de venda
-            </div>
-            <div className="mb-[18px] text-[12.5px] text-texto-rotulo">
-              Público que o anunciante só alcança pela Rádio Liverpool
-            </div>
-            <div className="rounded-[11px] border border-borda-divisor bg-fundo-claro p-[18px] text-[15px] leading-relaxed text-[#2A2D34]">
-              <span className="font-display text-[28px] font-semibold text-texto-titulo">
-                {numeroBr(dados.total)}
-              </span>{" "}
-              {dados.total === 1 ? "ouvinte" : "ouvintes"}
-              {regiaoLabel ? ` em ${regiaoLabel}` : ""},{" "}
-              <span className="text-gradient font-display text-[28px] font-semibold">
-                {numeroBr(dados.exclusivos)}
-              </span>{" "}
-              {dados.exclusivos === 1 ? "dele" : "deles"} não{" "}
-              {dados.exclusivos === 1 ? "ouve" : "ouvem"} nenhuma outra rádio.
-            </div>
-            <div className="mt-3 text-xs text-texto-rotulo">
-              {pctExclusivo}% do recorte. Essas pessoas o anunciante só alcança
-              aqui.
-            </div>
-          </div>
-
-          <Cartao titulo="Composição do recorte: faixa etária">
-            <Barras
-              serie={dados.distFaixa}
-              mode="combinado"
-              vazio="Sem dados para este recorte."
-            />
-          </Cartao>
-        </div>
-
-        <div className="mt-[18px] grid grid-cols-1 gap-[18px] md:grid-cols-2">
-          <Cartao titulo="Estilos mais comuns">
-            <Barras
-              serie={dados.distEstilo}
-              mode="numero"
-              vazio="Sem dados para este recorte."
-            />
-          </Cartao>
-          <Cartao titulo="Programas mais citados">
-            <Barras
-              serie={dados.distPrograma}
-              mode="numero"
-              gradiente="barra-alerta"
-              vazio="Sem dados para este recorte."
-            />
-          </Cartao>
-        </div>
-
-        {/* SIMULADOR DE MALA DIRETA */}
-        <div className="cartao mt-[18px] px-5 py-6 sm:px-[26px]">
-          <div className="text-[13px] font-medium">
-            Simulador de mala direta
-          </div>
-          <div className="mt-[18px] grid min-w-0 grid-cols-1 gap-[18px] sm:grid-cols-2 lg:grid-cols-4">
-            <label className="flex min-w-0 flex-col gap-[9px]">
-              <span className="rotulo-mono">Custo por correspondência</span>
-              <input
-                value={custo}
-                onChange={(e) => setCusto(e.target.value)}
-                inputMode="decimal"
-                className="campo"
-              />
-            </label>
-            <Numero
-              rotulo="Correspondências possíveis"
-              valor={numeroBr(dados.comEndereco)}
-            />
-            <Numero rotulo="Custo total" valor={brl(custoTotal)} />
-            <Numero
-              rotulo="Custo por pessoa alcançada"
-              valor={brl(custoPorAlcancado)}
+        {erro ? (
+          <div className="mt-[26px]">
+            <ErroCarregamento
+              texto="Não foi possível atualizar o recorte agora."
+              detalhe="Os filtros continuam como você escolheu. Os números deste recorte não foram carregados, e nada foi mostrado no lugar deles."
+              onTentar={() => setTentativa((t) => t + 1)}
             />
           </div>
-          <button
-            type="button"
-            onClick={() => setDocAberto(true)}
-            className="botao-primario mt-5"
-          >
-            Gerar peça da campanha
-          </button>
-        </div>
-
-        {/* LISTA MASCARADA */}
-        <div className="cartao mt-[18px] overflow-hidden">
-          <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-borda-divisor px-5 py-[18px] sm:px-6">
-            <div className="text-[13px] font-medium">
-              Ouvintes deste público
-            </div>
-            <span className="text-xs text-texto-rotulo">
-              {carregando
-                ? "atualizando..."
-                : `mostrando ${dados.lista.length} de ${numeroBr(dados.total)}`}
-            </span>
+        ) : !dados ? (
+          <div className="mt-[26px]" aria-busy="true" aria-label="Carregando">
+            <EsqueletoCartoes />
           </div>
-
-          {/* A NOTA FICA ACIMA DA LISTA, e nao em rodape: ela protege a radio e e
-              argumento de venda, entao precisa ser lida junto com os dados. */}
-          <p className="mx-5 mt-4 rounded-[11px] border border-violeta-claro bg-[#F7F3FF] px-4 py-3 text-xs leading-relaxed text-violeta-escuro sm:mx-6">
-            Os dados completos ficam com a Rádio Liverpool. Aqui aparecem apenas
-            primeiro nome, região, faixa etária e telefone parcial. A entrega da
-            campanha é feita pela própria rádio: o anunciante não recebe a base.
-          </p>
-
-          {dados.lista.length === 0 ? (
-            <EstadoVazioGrande
-              titulo="Nenhum ouvinte neste recorte"
-              texto="Nenhum ouvinte com consentimento bate com estes filtros. Afrouxe algum ou limpe o recorte."
-            />
-          ) : (
-            <>
-              {/* CARTOES ABAIXO DE sm, TABELA DE sm PARA CIMA. Em 390px a tabela so
-                  mostrava Nome, Bairro e Cidade e escondia o telefone, que e a
-                  prova de que sao pessoas reais. Nos cartoes ele vem na primeira
-                  linha, ao lado do nome. */}
-              <ul className="flex flex-col gap-2 px-5 py-4 sm:hidden">
-                {dados.lista.map((o) => (
-                  <li
-                    key={o.id}
-                    className="flex flex-col gap-1.5 rounded-xl border border-borda-divisor bg-fundo-claro px-3.5 py-3"
-                  >
-                    <div className="flex items-baseline justify-between gap-3">
-                      <span className="truncate font-medium">
-                        {o.primeiroNome ?? "—"}
-                      </span>
-                      <span className="shrink-0 font-mono text-[13px] font-medium tabular-nums text-texto-titulo">
-                        {o.telefoneMasc ?? "—"}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-texto-corpo">
-                      <span className="truncate">{o.bairro ?? "—"}</span>
-                      <span className="text-texto-off">·</span>
-                      <span className="truncate">{o.cidade ?? "—"}</span>
-                      <span className="text-texto-off">·</span>
-                      <span>{o.faixa ?? "—"}</span>
-                      <SeloEndereco tem={o.temEndereco} />
-                    </div>
-                  </li>
-                ))}
-              </ul>
-
-              <div className="hidden overflow-x-auto sm:block">
-                <table className="w-full min-w-[560px] text-left text-sm">
-                  <thead>
-                    <tr className="rotulo-mono border-b border-borda-divisor bg-fundo-claro">
-                      <th className="px-6 py-3 font-normal">Nome</th>
-                      <th className="py-3 pr-4 font-normal">Bairro</th>
-                      <th className="py-3 pr-4 font-normal">Cidade</th>
-                      <th className="py-3 pr-4 font-normal">Faixa</th>
-                      <th className="py-3 pr-4 font-normal">Telefone</th>
-                      <th className="py-3 pr-6 font-normal">Endereço</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dados.lista.map((o) => (
-                      <tr
-                        key={o.id}
-                        className="border-b border-[#F4F4F7] transition-colors hover:bg-[#FBFAFC]"
-                      >
-                        <td className="px-6 py-3 font-medium">
-                          {o.primeiroNome ?? "—"}
-                        </td>
-                        <td className="py-3 pr-4 text-texto-forte">
-                          {o.bairro ?? "—"}
-                        </td>
-                        <td className="py-3 pr-4 text-texto-forte">
-                          {o.cidade ?? "—"}
-                        </td>
-                        <td className="py-3 pr-4 text-texto-forte">
-                          {o.faixa ?? "—"}
-                        </td>
-                        <td className="py-3 pr-4 font-mono text-xs tabular-nums text-texto-corpo">
-                          {o.telefoneMasc ?? "—"}
-                        </td>
-                        <td className="py-3 pr-6">
-                          <SeloEndereco tem={o.temEndereco} />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+        ) : (
+          <>
+            {/* NUMEROS DO RECORTE */}
+            <div
+              className={`mt-[26px] grid grid-cols-1 gap-[18px] transition-opacity sm:grid-cols-2 lg:grid-cols-3 ${carregando ? "opacity-60" : ""}`}
+            >
+              <div className="cartao cartao-interativo min-w-0 p-[26px]">
+                <div className="text-[12.5px] text-texto-corpo">
+                  Alcance do recorte
+                </div>
+                <div className="text-gradient mt-2.5 font-display text-[44px] font-semibold leading-[1.05] tracking-[-0.03em] tabular-nums sm:text-[52px]">
+                  <CountUp value={dados.total} duration={900} />
+                </div>
+                <div className="mt-2.5 text-[12.5px] text-texto-rotulo">
+                  Somente quem deu consentimento.
+                  {dados.demoNoTotal > 0
+                    ? ` Inclui ${numeroBr(dados.demoNoTotal)} de demonstração.`
+                    : ""}
+                </div>
               </div>
-              {dados.total > dados.lista.length ? (
-                <p className="px-5 pb-4 text-[11.5px] text-texto-rotulo sm:px-6 sm:pt-3">
-                  A lista mostra no máximo {dados.listaTruncadaEm} pessoas. O
-                  alcance acima conta o recorte inteiro.
-                </p>
-              ) : null}
-            </>
-          )}
-        </div>
+              <div className="cartao cartao-interativo min-w-0 p-[26px]">
+                <div className="text-[12.5px] text-texto-corpo">
+                  Com bairro e número
+                </div>
+                <div className="mt-2.5 font-display text-[44px] font-semibold leading-[1.05] tracking-[-0.03em] tabular-nums sm:text-[52px]">
+                  <CountUp value={dados.comEndereco} duration={900} />
+                </div>
+                {/* A RESSALVA FICA JUNTO DO NUMERO. `ouvintes` nao guarda logradouro nem
+                    CEP; chamar isto de endereco utilizavel faria o comercial prometer
+                    carta que os Correios nao entregam. */}
+                <div className="mt-2.5 text-[12.5px] text-ambar">
+                  Falta o logradouro para postagem: o cadastro guarda bairro e
+                  número, não a rua nem o CEP.
+                </div>
+              </div>
+              <div className="cartao cartao-interativo min-w-0 p-[26px] sm:col-span-2 lg:col-span-1">
+                <div className="text-[12.5px] text-texto-corpo">
+                  Não ouvem outra rádio
+                </div>
+                <div className="mt-2.5 font-display text-[44px] font-semibold leading-[1.05] tracking-[-0.03em] text-magenta tabular-nums sm:text-[52px]">
+                  <CountUp value={dados.exclusivos} duration={900} />
+                </div>
+                <div className="mt-2.5 text-[12.5px] text-texto-rotulo">
+                  {pctExclusivo}% do recorte
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-[18px] grid grid-cols-1 gap-[18px] lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+              {/* ARGUMENTO DE VENDA: EXCLUSIVIDADE. A comparacao com a concorrencia
+                  saiu de proposito e nao volta nesta tela. */}
+              <div className="cartao cartao-interativo min-w-0 px-5 py-6 sm:px-[26px]">
+                <div className="mb-1.5 text-[13px] font-medium">
+                  Argumento de venda
+                </div>
+                <div className="mb-[18px] text-[12.5px] text-texto-rotulo">
+                  Público que o anunciante só alcança pela Rádio Liverpool
+                </div>
+                <div className="rounded-[11px] border border-borda-divisor bg-fundo-claro p-[18px] text-[15px] leading-relaxed text-[#2A2D34]">
+                  <span className="font-display text-[28px] font-semibold text-texto-titulo">
+                    {numeroBr(dados.total)}
+                  </span>{" "}
+                  {dados.total === 1 ? "ouvinte" : "ouvintes"}
+                  {regiaoLabel ? ` em ${regiaoLabel}` : ""},{" "}
+                  <span className="text-gradient font-display text-[28px] font-semibold">
+                    {numeroBr(dados.exclusivos)}
+                  </span>{" "}
+                  {dados.exclusivos === 1 ? "dele" : "deles"} não{" "}
+                  {dados.exclusivos === 1 ? "ouve" : "ouvem"} nenhuma outra rádio.
+                </div>
+                <div className="mt-3 text-xs text-texto-rotulo">
+                  {pctExclusivo}% do recorte. Essas pessoas o anunciante só alcança
+                  aqui.
+                </div>
+              </div>
+
+              <Cartao titulo="Composição do recorte: faixa etária">
+                <Barras
+                  ranking={dados.distFaixa}
+                  unidade="faixas"
+                  mode="combinado"
+                  vazio="Sem dados para este recorte."
+                />
+              </Cartao>
+            </div>
+
+            <div className="mt-[18px] grid grid-cols-1 gap-[18px] md:grid-cols-2">
+              <Cartao titulo="Estilos mais comuns">
+                <Barras
+                  ranking={dados.distEstilo}
+                  unidade="estilos"
+                  mode="numero"
+                  vazio="Sem dados para este recorte."
+                />
+              </Cartao>
+              <Cartao titulo="Programas mais citados">
+                <Barras
+                  ranking={dados.distPrograma}
+                  unidade="programas"
+                  mode="numero"
+                  gradiente="barra-alerta"
+                  vazio="Sem dados para este recorte."
+                />
+              </Cartao>
+            </div>
+
+            {/* SIMULADOR DE MALA DIRETA */}
+            <div className="cartao mt-[18px] px-5 py-6 sm:px-[26px]">
+              <div className="text-[13px] font-medium">
+                Simulador de mala direta
+              </div>
+              <div className="mt-[18px] grid min-w-0 grid-cols-1 gap-[18px] sm:grid-cols-2 lg:grid-cols-4">
+                <label className="flex min-w-0 flex-col gap-[9px]">
+                  <span className="rotulo-mono">Custo por correspondência</span>
+                  <input
+                    value={custo}
+                    onChange={(e) => setCusto(e.target.value)}
+                    inputMode="decimal"
+                    className="campo"
+                  />
+                </label>
+                <Numero
+                  rotulo="Correspondências possíveis"
+                  valor={numeroBr(dados.comEndereco)}
+                />
+                <Numero rotulo="Custo total" valor={brl(custoTotal)} />
+                <Numero
+                  rotulo="Custo por pessoa alcançada"
+                  valor={brl(custoPorAlcancado)}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setDocAberto(true)}
+                className="botao-primario mt-5"
+              >
+                Gerar peça da campanha
+              </button>
+            </div>
+
+            {/* LISTA MASCARADA */}
+            <div className="cartao mt-[18px] overflow-hidden">
+              <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-borda-divisor px-5 py-[18px] sm:px-6">
+                <div className="text-[13px] font-medium">
+                  Ouvintes deste público
+                </div>
+                <span className="text-xs text-texto-rotulo">
+                  {carregando
+                    ? "atualizando..."
+                    : `mostrando ${dados.lista.length} de ${numeroBr(dados.total)}`}
+                </span>
+              </div>
+
+              {/* A NOTA FICA ACIMA DA LISTA, e nao em rodape: ela protege a radio e e
+                  argumento de venda, entao precisa ser lida junto com os dados. */}
+              <p className="mx-5 mt-4 rounded-[11px] border border-violeta-claro bg-[#F7F3FF] px-4 py-3 text-xs leading-relaxed text-violeta-escuro sm:mx-6">
+                Os dados completos ficam com a Rádio Liverpool. Aqui aparecem apenas
+                primeiro nome, região, faixa etária e telefone parcial. A entrega da
+                campanha é feita pela própria rádio: o anunciante não recebe a base.
+              </p>
+
+              {dados.lista.length === 0 ? (
+                <EstadoVazioGrande
+                  titulo="Nenhum ouvinte neste recorte"
+                  texto="Nenhum ouvinte com consentimento bate com estes filtros. Afrouxe algum ou limpe o recorte."
+                />
+              ) : (
+                <>
+                  {/* CARTOES ABAIXO DE sm, TABELA DE sm PARA CIMA. Em 390px a tabela so
+                      mostrava Nome, Bairro e Cidade e escondia o telefone, que e a
+                      prova de que sao pessoas reais. Nos cartoes ele vem na primeira
+                      linha, ao lado do nome. */}
+                  <ul className="flex flex-col gap-2 px-5 py-4 sm:hidden">
+                    {dados.lista.map((o) => (
+                      <li
+                        key={o.id}
+                        className="flex flex-col gap-1.5 rounded-xl border border-borda-divisor bg-fundo-claro px-3.5 py-3"
+                      >
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className="truncate font-medium">
+                            {o.primeiroNome ?? "—"}
+                          </span>
+                          <span className="shrink-0 font-mono text-[13px] font-medium tabular-nums text-texto-titulo">
+                            {o.telefoneMasc ?? "—"}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-texto-corpo">
+                          <span className="truncate">{o.bairro ?? "—"}</span>
+                          <span className="text-texto-off">·</span>
+                          <span className="truncate">{o.cidade ?? "—"}</span>
+                          <span className="text-texto-off">·</span>
+                          <span>{o.faixa ?? "—"}</span>
+                          <SeloEndereco tem={o.temEndereco} />
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+
+                  <div className="hidden overflow-x-auto sm:block">
+                    <table className="w-full min-w-[560px] text-left text-sm">
+                      <thead>
+                        <tr className="rotulo-mono border-b border-borda-divisor bg-fundo-claro">
+                          <th className="px-6 py-3 font-normal">Nome</th>
+                          <th className="py-3 pr-4 font-normal">Bairro</th>
+                          <th className="py-3 pr-4 font-normal">Cidade</th>
+                          <th className="py-3 pr-4 font-normal">Faixa</th>
+                          <th className="py-3 pr-4 font-normal">Telefone</th>
+                          <th className="py-3 pr-6 font-normal">Endereço</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {dados.lista.map((o) => (
+                          <tr
+                            key={o.id}
+                            className="border-b border-[#F4F4F7] transition-colors hover:bg-[#FBFAFC]"
+                          >
+                            <td className="px-6 py-3 font-medium">
+                              {o.primeiroNome ?? "—"}
+                            </td>
+                            <td className="py-3 pr-4 text-texto-forte">
+                              {o.bairro ?? "—"}
+                            </td>
+                            <td className="py-3 pr-4 text-texto-forte">
+                              {o.cidade ?? "—"}
+                            </td>
+                            <td className="py-3 pr-4 text-texto-forte">
+                              {o.faixa ?? "—"}
+                            </td>
+                            <td className="py-3 pr-4 font-mono text-xs tabular-nums text-texto-corpo">
+                              {o.telefoneMasc ?? "—"}
+                            </td>
+                            <td className="py-3 pr-6">
+                              <SeloEndereco tem={o.temEndereco} />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {dados.total > dados.lista.length ? (
+                    <p className="px-5 pb-4 text-[11.5px] text-texto-rotulo sm:px-6 sm:pt-3">
+                      A lista mostra no máximo {dados.listaTruncadaEm} pessoas. O
+                      alcance acima conta o recorte inteiro.
+                    </p>
+                  ) : null}
+                </>
+              )}
+            </div>
+          </>
+        )}
 
         <footer className="mt-12 border-t border-borda-divisor pt-6 text-center text-xs text-texto-rotulo">
           Rádio Liverpool · AtendentePRO
         </footer>
       </div>
 
-      {docAberto ? (
+      {docAberto && dados ? (
         <DocumentoCampanha
           bairro={regiaoLabel}
           totalPublico={dados.total}

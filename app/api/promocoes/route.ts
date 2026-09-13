@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
 import { getPromocoes } from "@/lib/serverData";
+import { responderJson } from "@/lib/rotas";
 
 // Protegido pelo middleware (exige sessao). Service role no servidor.
 export const runtime = "nodejs";
@@ -16,5 +16,5 @@ export async function GET(req: Request) {
   const ateP = searchParams.get("ate");
   const de = deP && dataRe.test(deP) ? deP : null;
   const ate = ateP && dataRe.test(ateP) ? ateP : null;
-  return NextResponse.json(await getPromocoes(de, ate));
+  return responderJson(() => getPromocoes(de, ate));
 }
