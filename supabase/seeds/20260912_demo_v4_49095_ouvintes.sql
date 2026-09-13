@@ -59,9 +59,9 @@
 -- supabase/migrations/20260912230000_indices_por_ouvinte.sql
 -- ###########################################################################
 begin;
-create index if not exists idx_conversas_ouvinte on public.conversas (ouvinte_id);
-create index if not exists idx_radios_concorrentes_ouvinte on public.radios_concorrentes (ouvinte_id);
-create index if not exists idx_musicas_ouvinte on public.musicas (ouvinte_id);
+create index if not exists idx_conversas_ouvinte_id on public.conversas (ouvinte_id);
+create index if not exists idx_radios_concorrentes_ouvinte_id on public.radios_concorrentes (ouvinte_id);
+create index if not exists idx_musicas_ouvinte_id on public.musicas (ouvinte_id);
 commit;
 
 

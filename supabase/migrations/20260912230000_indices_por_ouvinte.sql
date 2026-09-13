@@ -21,12 +21,17 @@
 --
 -- Banco compartilhado com outros produtos: estes indices so tocam tabelas do
 -- OuvintePro.
+--
+-- Os tres indices ja existem no banco: foram criados pelo conector em
+-- 12/09/2026, antes do seed, com estes nomes (sufixo _id). Os nomes aqui seguem
+-- o banco de proposito. Com outro nome, `if not exists` nao reconhece o indice
+-- e cria um segundo, duplicado, na mesma coluna.
 
-create index if not exists idx_conversas_ouvinte
+create index if not exists idx_conversas_ouvinte_id
   on public.conversas (ouvinte_id);
 
-create index if not exists idx_radios_concorrentes_ouvinte
+create index if not exists idx_radios_concorrentes_ouvinte_id
   on public.radios_concorrentes (ouvinte_id);
 
-create index if not exists idx_musicas_ouvinte
+create index if not exists idx_musicas_ouvinte_id
   on public.musicas (ouvinte_id);
