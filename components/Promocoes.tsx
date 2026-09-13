@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { SeletorPeriodo } from "@/lib/tipos";
 import { rangeCustom, rangeDoPeriodo } from "@/lib/periodo";
+import { buscarJson } from "@/lib/buscar";
 import Cabecalho from "./Cabecalho";
 import FiltroPeriodo from "./FiltroPeriodo";
-import { EsqueletoLista } from "./ui";
+import { ErroCarregamento, EsqueletoLista } from "./ui";
 
 // PROMOCOES: lista de promocoes com participacao e o sorteio com ganhadores.
 // Era um card dentro do dashboard e virou tela no redesign; o sorteio e uma
@@ -69,7 +70,8 @@ export default function Promocoes() {
   const [customDe, setCustomDe] = useState<string | null>(null);
   const [customAte, setCustomAte] = useState<string | null>(null);
   const [promocoes, setPromocoes] = useState<PromocaoRow[] | null>(null);
-  const [configurado, setConfigurado] = useState(true);
+  const [erro, setErro] = useState(false);
+  const [tentativa, setTentativa] = useState(0);
   const [carregando, setCarregando] = useState(true);
   const [atualizadoEm, setAtualizadoEm] = useState<string | null>(null);
   const [promoAberta, setPromoAberta] = useState<PromocaoRow | null>(null);
@@ -80,16 +82,24 @@ export default function Promocoes() {
     [sel, customDe, customAte],
   );
 
+  // Falha de rede ou do servidor aparece como erro. Antes virava lista vazia e a
+  // tela dizia "Nenhuma promoção ativa ainda".
   useEffect(() => {
     let ativo = true;
     setCarregando(true);
-    fetch(`/api/promocoes?de=${de}&ate=${ate}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: { configurado: boolean; promocoes: PromocaoRow[] } | null) => {
+    setErro(false);
+    buscarJson<{ promocoes: PromocaoRow[] }>(
+      `/api/promocoes?de=${de}&ate=${ate}`,
+    )
+      .then((d) => {
         if (!ativo) return;
-        setConfigurado(!!d?.configurado);
-        setPromocoes(d?.promocoes ?? []);
+        setPromocoes(d.promocoes ?? []);
         setAtualizadoEm(new Date().toISOString());
+      })
+      .catch(() => {
+        if (!ativo) return;
+        setPromocoes(null);
+        setErro(true);
       })
       .finally(() => {
         if (ativo) setCarregando(false);
@@ -97,7 +107,7 @@ export default function Promocoes() {
     return () => {
       ativo = false;
     };
-  }, [de, ate]);
+  }, [de, ate, tentativa]);
 
   return (
     <>
@@ -124,11 +134,12 @@ export default function Promocoes() {
         <div className="cartao p-[22px] sm:p-7">
           {carregando && promocoes === null ? (
             <EsqueletoLista linhas={6} />
-          ) : !configurado ? (
-            <p className="text-center text-sm text-texto-corpo">
-              Não foi possível carregar os dados agora. Tente de novo em
-              instantes.
-            </p>
+          ) : erro || promocoes === null ? (
+            <ErroCarregamento
+              compacto
+              detalhe="A lista de promoções deste período não foi carregada."
+              onTentar={() => setTentativa((t) => t + 1)}
+            />
           ) : (
             <div
               className={
@@ -230,20 +241,29 @@ function ModalPromocao({
   onClose: () => void;
 }) {
   const [detalhe, setDetalhe] = useState<PromocaoDetalhe | null>(null);
+  const [erro, setErro] = useState(false);
   const [carregando, setCarregando] = useState(true);
   const [sorteado, setSorteado] = useState<PromoParticipante | null>(null);
   const [confirmando, setConfirmando] = useState(false);
   const [aviso, setAviso] = useState<string | null>(null);
 
+  // FALHA NAO VIRA "NENHUM PARTICIPANTE" NEM "NENHUM GANHADOR". Com a lista de
+  // ganhadores vazia por erro, o operador podia premiar a mesma pessoa de novo.
+  // Em erro, participantes e ganhadores saem da tela e Sortear fica desligado.
   const carregar = useCallback(() => {
     setCarregando(true);
+    setErro(false);
     const params = new URLSearchParams({ slug: promo.slug });
     if (periodoDe) params.set("de", periodoDe);
     if (periodoAte) params.set("ate", periodoAte);
-    return fetch(`/api/promocao?${params.toString()}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : { detalhe: null }))
-      .then((d) => setDetalhe((d?.detalhe ?? null) as PromocaoDetalhe | null))
-      .catch(() => setDetalhe(null))
+    return buscarJson<{ detalhe: PromocaoDetalhe | null }>(
+      `/api/promocao?${params.toString()}`,
+    )
+      .then((d) => setDetalhe(d.detalhe ?? null))
+      .catch(() => {
+        setDetalhe(null);
+        setErro(true);
+      })
       .finally(() => setCarregando(false));
   }, [promo.slug, periodoDe, periodoAte]);
 
@@ -266,7 +286,7 @@ function ModalPromocao({
 
   function sortear() {
     setAviso(null);
-    if (participantes.length === 0) {
+    if (erro || participantes.length === 0) {
       setSorteado(null);
       return;
     }
@@ -299,6 +319,9 @@ function ModalPromocao({
       } else {
         setAviso("Não foi possível registrar o ganhador. Tente de novo.");
       }
+    } catch {
+      // Sem conexao: o registro nao aconteceu, e a tela diz isso.
+      setAviso("Não foi possível registrar o ganhador. Tente de novo.");
     } finally {
       setConfirmando(false);
     }
@@ -320,8 +343,9 @@ function ModalPromocao({
               {label}
             </h3>
             <p className="text-xs text-texto-rotulo">
-              {participantes.length}{" "}
-              {participantes.length === 1 ? "participante" : "participantes"}
+              {carregando || erro
+                ? "\u00a0"
+                : `${participantes.length} ${participantes.length === 1 ? "participante" : "participantes"}`}
             </p>
             {variacoes.length > 0 ? (
               <p className="mt-0.5 text-[11px] text-texto-rotulo">
@@ -344,7 +368,7 @@ function ModalPromocao({
             <button
               type="button"
               onClick={sortear}
-              disabled={carregando || participantes.length === 0}
+              disabled={carregando || erro || participantes.length === 0}
               className="botao-primario disabled:cursor-not-allowed"
             >
               {sorteado ? "Sortear novamente" : "Sortear"}
@@ -381,7 +405,7 @@ function ModalPromocao({
                 <button
                   type="button"
                   onClick={confirmar}
-                  disabled={confirmando}
+                  disabled={confirmando || erro}
                   className="botao bg-verde text-white hover:opacity-90 disabled:opacity-50"
                 >
                   {confirmando ? "Confirmando..." : "Confirmar ganhador"}
@@ -402,9 +426,17 @@ function ModalPromocao({
         {/* Ganhadores confirmados */}
         <div className="border-b border-borda-divisor px-6 py-4">
           <p className="mb-2 text-[11px] uppercase tracking-wide text-texto-rotulo">
-            Ganhadores confirmados ({ganhadores.length})
+            Ganhadores confirmados
+            {carregando || erro ? "" : ` (${ganhadores.length})`}
           </p>
-          {ganhadores.length === 0 ? (
+          {carregando ? (
+            <p className="text-sm text-texto-rotulo">Carregando ganhadores...</p>
+          ) : erro ? (
+            <p role="alert" className="text-sm text-ambar">
+              Não foi possível carregar os ganhadores. Não confirme ninguém até
+              a lista aparecer.
+            </p>
+          ) : ganhadores.length === 0 ? (
             <p className="text-sm text-texto-rotulo">
               Nenhum ganhador confirmado ainda.
             </p>
@@ -439,6 +471,13 @@ function ModalPromocao({
             <p className="py-8 text-center text-sm text-texto-rotulo">
               Carregando participantes...
             </p>
+          ) : erro ? (
+            <ErroCarregamento
+              compacto
+              texto="Não foi possível carregar esta promoção agora."
+              detalhe="Participantes e ganhadores não foram carregados. O sorteio fica desligado até a lista aparecer."
+              onTentar={() => void carregar()}
+            />
           ) : participantes.length === 0 ? (
             <p className="py-8 text-center text-sm text-texto-rotulo">
               Nenhum participante no período selecionado.

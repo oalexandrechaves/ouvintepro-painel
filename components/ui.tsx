@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { formatValue, somaSerie } from "@/lib/tipos";
-import type { DisplayMode, SerieItem } from "@/lib/tipos";
+import { formatValue } from "@/lib/tipos";
+import type { DisplayMode, Ranking, SerieItem } from "@/lib/tipos";
 
 // Pecas visuais do tema claro, reproduzindo o arquivo de referencia.
 
@@ -146,22 +146,28 @@ export function useEntradaAnimada(): boolean {
   return cheio;
 }
 
+// BARRAS E LISTARANKING RECEBEM O RANKING INTEIRO, COM O TOTAL, E NAO UMA LISTA.
+// A porcentagem e sobre `ranking.total`, o universo que o servidor contou. Nao
+// existe mais o recurso de somar os itens exibidos: foi ele que mostrou Grajaú
+// com 21,1% quando o real era 9,5%. Quem chamar sem o total nao compila.
+// `unidade` (plural: "bairros") tambem e obrigatoria: quando o ranking chega
+// cortado, o rodape diz "6 de 27 bairros" e o cliente entende que e parcial.
 export function Barras({
-  serie,
+  ranking,
+  unidade,
   mode,
-  total,
   vazio = "Sem dados neste período.",
   gradiente = "barra-h",
 }: {
-  serie: SerieItem[];
+  ranking: Ranking;
+  unidade: string;
   mode: DisplayMode;
-  total?: number;
   vazio?: string;
   gradiente?: string;
 }) {
   const cheio = useEntradaAnimada();
+  const serie = ranking.itens;
   if (!serie.length) return <EstadoVazio texto={vazio} />;
-  const soma = total ?? somaSerie(serie);
   const max = Math.max(1, ...serie.map((s) => s.valor));
   return (
     <div className="flex flex-col gap-[13px]">
@@ -172,7 +178,7 @@ export function Barras({
               {item.label}
             </span>
             <span className="shrink-0 font-mono text-xs text-texto-corpo">
-              {formatValue(item.valor, soma, mode)}
+              {formatValue(item.valor, ranking.total, mode)}
             </span>
           </div>
           <div className="h-[7px] overflow-hidden rounded bg-fundo-trilho">
@@ -188,23 +194,24 @@ export function Barras({
           </div>
         </div>
       ))}
+      <RodapeParcial ranking={ranking} unidade={unidade} />
     </div>
   );
 }
 
 export function ListaRanking({
-  itens,
+  ranking,
+  unidade,
   mode,
-  total,
   vazio = "Sem dados neste período.",
 }: {
-  itens: { label: string; valor: number; sub?: string | null }[];
+  ranking: Ranking<SerieItem & { sub?: string | null }>;
+  unidade: string;
   mode: DisplayMode;
-  total?: number;
   vazio?: string;
 }) {
+  const itens = ranking.itens;
   if (!itens.length) return <EstadoVazio texto={vazio} />;
-  const soma = total ?? itens.reduce((a, x) => a + x.valor, 0);
   return (
     <div className="flex flex-col">
       {itens.map((r, i) => (
@@ -226,10 +233,64 @@ export function ListaRanking({
             </span>
           </span>
           <span className="shrink-0 font-mono text-xs text-texto-corpo">
-            {formatValue(r.valor, soma, mode)}
+            {formatValue(r.valor, ranking.total, mode)}
           </span>
         </div>
       ))}
+      <RodapeParcial ranking={ranking} unidade={unidade} />
+    </div>
+  );
+}
+
+// "6 de 27 bairros": so aparece quando o ranking chegou cortado. As
+// porcentagens de um ranking cortado nao somam 100%, e isso esta certo; o
+// rodape explica antes de alguem perguntar.
+function RodapeParcial({
+  ranking,
+  unidade,
+}: {
+  ranking: Ranking<SerieItem>;
+  unidade: string;
+}) {
+  if (ranking.distintos <= ranking.itens.length) return null;
+  return (
+    <p className="mt-3 text-[11.5px] text-texto-rotulo">
+      {ranking.itens.length} de {ranking.distintos.toLocaleString("pt-BR")}{" "}
+      {unidade}
+    </p>
+  );
+}
+
+// FALHA APARECE COMO FALHA. Toda tela usa este bloco quando a carga falha, no
+// lugar do conteudo: nunca "nenhum", "vazio" ou o numero anterior. O botao tenta
+// de novo com os filtros que estao escolhidos.
+export function ErroCarregamento({
+  texto = "Não foi possível carregar os dados agora.",
+  detalhe,
+  onTentar,
+  compacto = false,
+}: {
+  texto?: string;
+  detalhe?: string;
+  onTentar: () => void;
+  compacto?: boolean;
+}) {
+  return (
+    <div
+      role="alert"
+      className={`flex flex-col items-center gap-3 text-center ${
+        compacto ? "py-8" : "cartao px-6 py-12"
+      }`}
+    >
+      <div className="text-[14px] font-medium text-texto-titulo">{texto}</div>
+      {detalhe ? (
+        <div className="max-w-[46ch] text-[12.5px] text-texto-corpo">
+          {detalhe}
+        </div>
+      ) : null}
+      <button type="button" onClick={onTentar} className="botao-secundario">
+        Tentar de novo
+      </button>
     </div>
   );
 }

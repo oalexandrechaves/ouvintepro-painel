@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { formatValue, somaSerie } from "@/lib/tipos";
-import type { DisplayMode, SeletorPeriodo, SerieItem } from "@/lib/tipos";
+import { formatValue } from "@/lib/tipos";
+import type { DisplayMode, Ranking, SeletorPeriodo } from "@/lib/tipos";
 import { rangeCustom, rangeDoPeriodo } from "@/lib/periodo";
+import { buscarJson } from "@/lib/buscar";
 import Cabecalho from "./Cabecalho";
 import FiltroPeriodo from "./FiltroPeriodo";
-import { Barras, Cartao, EsqueletoLista } from "./ui";
+import { Barras, Cartao, ErroCarregamento, EsqueletoLista } from "./ui";
 
 // OUVINTES: a tela interna da base. E o antigo "Explorar ouvintes", que vivia
 // dentro do dashboard e virou tela propria no redesign. Funcionalidade em uso
@@ -47,19 +48,18 @@ interface Mensagem {
 }
 
 interface Extra {
-  configurado: boolean;
   faixas: { id: number; label: string }[];
   zonasDisponiveis: string[];
-  musicasAmadas: SerieItem[];
-  musicasRejeitadas: SerieItem[];
-  artistasAmados: SerieItem[];
-  artistasRejeitados: SerieItem[];
-  zonas: SerieItem[];
-  bairrosPorZona: Record<string, SerieItem[]>;
-  bairrosGeral: SerieItem[];
-  radios: SerieItem[];
-  pedidosDiversos: SerieItem[];
-  funilAbandono: SerieItem[];
+  musicasAmadas: Ranking;
+  musicasRejeitadas: Ranking;
+  artistasAmados: Ranking;
+  artistasRejeitados: Ranking;
+  zonas: Ranking;
+  bairrosPorZona: Record<string, Ranking>;
+  bairrosGeral: Ranking;
+  radios: Ranking;
+  pedidosDiversos: Ranking;
+  funilAbandono: Ranking;
   ouvintes: OuvinteRow[];
   totalOuvintes: number;
 }
@@ -101,6 +101,8 @@ export default function Ouvintes() {
   const [faixa, setFaixa] = useState("todas");
   const [zona, setZona] = useState("todas");
   const [data, setData] = useState<Extra | null>(null);
+  const [erro, setErro] = useState(false);
+  const [tentativa, setTentativa] = useState(0);
   const [carregando, setCarregando] = useState(true);
   const [atualizadoEm, setAtualizadoEm] = useState<string | null>(null);
   const [zonaAberta, setZonaAberta] = useState<string | null>(null);
@@ -115,9 +117,9 @@ export default function Ouvintes() {
   useEffect(() => {
     let ativo = true;
     setCarregando(true);
+    setErro(false);
     const qs = new URLSearchParams({ faixa, zona, de, ate }).toString();
-    fetch(`/api/painel?${qs}`, { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
+    buscarJson<Extra>(`/api/painel?${qs}`)
       .then((d) => {
         if (ativo) {
           setData(d);
@@ -125,7 +127,11 @@ export default function Ouvintes() {
         }
       })
       .catch(() => {
-        if (ativo) setData(null);
+        // Falha tira os dados da tela e mostra o erro com "Tentar de novo".
+        if (ativo) {
+          setData(null);
+          setErro(true);
+        }
       })
       .finally(() => {
         if (ativo) setCarregando(false);
@@ -133,7 +139,7 @@ export default function Ouvintes() {
     return () => {
       ativo = false;
     };
-  }, [faixa, zona, de, ate]);
+  }, [faixa, zona, de, ate, tentativa]);
 
   const faixasOpts = useMemo(
     () => [
@@ -156,9 +162,9 @@ export default function Ouvintes() {
     ];
   }, [data?.zonasDisponiveis, zona]);
 
-  const bairrosDaZona = zonaAberta
-    ? (data?.bairrosPorZona?.[zonaAberta] ?? [])
-    : [];
+  const bairrosDaZona: Ranking | null = zonaAberta
+    ? (data?.bairrosPorZona?.[zonaAberta] ?? null)
+    : null;
 
   return (
     <>
@@ -208,34 +214,50 @@ export default function Ouvintes() {
               </div>
             ))}
           </div>
-        ) : !data?.configurado ? (
-          <div className="cartao p-8 text-center text-sm text-texto-corpo">
-            Não foi possível carregar os dados agora. Tente de novo em
-            instantes.
-          </div>
+        ) : erro || !data ? (
+          <ErroCarregamento
+            detalhe="A lista e os rankings deste período não foram carregados."
+            onTentar={() => setTentativa((t) => t + 1)}
+          />
         ) : (
           <div
             className={`flex flex-col gap-[18px] transition-opacity ${carregando ? "opacity-60" : ""}`}
           >
             <div className="grid grid-cols-1 gap-[18px] lg:grid-cols-2">
               <Cartao titulo="Músicas preferidas">
-                <Barras serie={data.musicasAmadas} mode={mode} />
+                <Barras
+                  ranking={data.musicasAmadas}
+                  unidade="músicas"
+                  mode={mode}
+                />
               </Cartao>
               <Cartao titulo="Músicas rejeitadas">
-                <Barras serie={data.musicasRejeitadas} mode={mode} />
+                <Barras
+                  ranking={data.musicasRejeitadas}
+                  unidade="músicas"
+                  mode={mode}
+                />
               </Cartao>
               <Cartao titulo="Artistas preferidos">
-                <Barras serie={data.artistasAmados} mode={mode} />
+                <Barras
+                  ranking={data.artistasAmados}
+                  unidade="artistas"
+                  mode={mode}
+                />
               </Cartao>
               <Cartao titulo="Artistas rejeitados">
-                <Barras serie={data.artistasRejeitados} mode={mode} />
+                <Barras
+                  ranking={data.artistasRejeitados}
+                  unidade="artistas"
+                  mode={mode}
+                />
               </Cartao>
             </div>
 
             <div className="grid grid-cols-1 gap-[18px] lg:grid-cols-3">
               <Cartao titulo="Zonas (toque para ver bairros)">
                 <ZonasClicaveis
-                  serie={data.zonas}
+                  ranking={data.zonas}
                   mode={mode}
                   aberta={zonaAberta}
                   onSelect={(z) => setZonaAberta((a) => (a === z ? null : z))}
@@ -247,7 +269,17 @@ export default function Ouvintes() {
                 }
               >
                 {zonaAberta ? (
-                  <Barras serie={bairrosDaZona} mode={mode} />
+                  bairrosDaZona ? (
+                    <Barras
+                      ranking={bairrosDaZona}
+                      unidade="bairros"
+                      mode={mode}
+                    />
+                  ) : (
+                    <p className="text-[13px] text-texto-rotulo">
+                      Sem bairros informados nesta zona.
+                    </p>
+                  )
                 ) : (
                   <p className="text-[13px] text-texto-rotulo">
                     Toque numa zona para ver os bairros dela.
@@ -255,20 +287,29 @@ export default function Ouvintes() {
                 )}
               </Cartao>
               <Cartao titulo="Bairros que mais participam">
-                <Barras serie={data.bairrosGeral} mode={mode} />
+                <Barras
+                  ranking={data.bairrosGeral}
+                  unidade="bairros"
+                  mode={mode}
+                />
               </Cartao>
             </div>
 
             <div className="grid grid-cols-1 gap-[18px] lg:grid-cols-3">
               <Cartao titulo="Rádios que também ouvem">
-                <Barras serie={data.radios} mode={mode} />
+                <Barras ranking={data.radios} unidade="rádios" mode={mode} />
               </Cartao>
               <Cartao titulo="Pedidos (abraço, beijo, alô...)">
-                <Barras serie={data.pedidosDiversos} mode={mode} />
+                <Barras
+                  ranking={data.pedidosDiversos}
+                  unidade="tipos"
+                  mode={mode}
+                />
               </Cartao>
               <Cartao titulo="Funil de abandono (cadastros incompletos)">
                 <Barras
-                  serie={data.funilAbandono}
+                  ranking={data.funilAbandono}
+                  unidade="etapas"
                   mode="numero"
                   gradiente="barra-alerta"
                 />
@@ -336,17 +377,20 @@ export default function Ouvintes() {
 }
 
 function ZonasClicaveis({
-  serie,
+  ranking,
   mode,
   aberta,
   onSelect,
 }: {
-  serie: SerieItem[];
+  ranking: Ranking;
   mode: DisplayMode;
   aberta: string | null;
   onSelect: (z: string) => void;
 }) {
-  const total = somaSerie(serie);
+  // Porcentagem sobre o total real (cadastros completos do periodo), nao sobre
+  // a soma das zonas exibidas.
+  const serie = ranking.itens;
+  const total = ranking.total;
   const max = Math.max(1, ...serie.map((s) => s.valor));
   if (serie.length === 0) {
     return <p className="text-sm text-texto-rotulo">Sem dados ainda.</p>;
@@ -377,6 +421,11 @@ function ZonasClicaveis({
           </div>
         </button>
       ))}
+      {ranking.distintos > serie.length ? (
+        <p className="text-[11.5px] text-texto-rotulo">
+          {serie.length} de {ranking.distintos} zonas
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -421,24 +470,30 @@ function LinhaOuvinte({ o, onOpen }: { o: OuvinteRow; onOpen: () => void }) {
 
 function ModalOuvinte({ o, onClose }: { o: OuvinteRow; onClose: () => void }) {
   const [mensagens, setMensagens] = useState<Mensagem[] | null>(null);
-  const [carregando, setCarregando] = useState(false);
+  const [carregando, setCarregando] = useState(true);
+  const [erro, setErro] = useState(false);
+  const [tentativa, setTentativa] = useState(0);
 
   // Carrega as mensagens SOB DEMANDA (so ao abrir), sempre por ouvinte_id.
   // Sempre consulta a API: o campo temConversa vindo do painel pode ser um
   // falso-negativo (ouvintes com varias conversas), entao a fonte da verdade
-  // e sempre a resposta de /api/conversa.
+  // e sempre a resposta de /api/conversa. Falha NAO vira "Sem conversa
+  // registrada": aparece como erro, com "Tentar de novo".
   useEffect(() => {
     let ativo = true;
     setCarregando(true);
-    fetch(`/api/conversa?ouvinte=${encodeURIComponent(o.id)}`, {
-      cache: "no-store",
-    })
-      .then((r) => (r.ok ? r.json() : { mensagens: [] }))
+    setErro(false);
+    buscarJson<{ mensagens: Mensagem[] }>(
+      `/api/conversa?ouvinte=${encodeURIComponent(o.id)}`,
+    )
       .then((d) => {
-        if (ativo) setMensagens((d?.mensagens ?? []) as Mensagem[]);
+        if (ativo) setMensagens(d.mensagens ?? []);
       })
       .catch(() => {
-        if (ativo) setMensagens([]);
+        if (ativo) {
+          setMensagens(null);
+          setErro(true);
+        }
       })
       .finally(() => {
         if (ativo) setCarregando(false);
@@ -446,7 +501,7 @@ function ModalOuvinte({ o, onClose }: { o: OuvinteRow; onClose: () => void }) {
     return () => {
       ativo = false;
     };
-  }, [o.id]);
+  }, [o.id, tentativa]);
 
   // Fecha com Esc.
   useEffect(() => {
@@ -515,10 +570,16 @@ function ModalOuvinte({ o, onClose }: { o: OuvinteRow; onClose: () => void }) {
 
         {/* Historico da conversa */}
         <div className="flex-1 overflow-y-auto bg-fundo-claro px-4 py-4">
-          {carregando || mensagens === null ? (
+          {carregando ? (
             <p className="py-8 text-center text-sm text-texto-rotulo">
               Carregando conversa...
             </p>
+          ) : erro || mensagens === null ? (
+            <ErroCarregamento
+              compacto
+              texto="Não foi possível carregar a conversa agora."
+              onTentar={() => setTentativa((t) => t + 1)}
+            />
           ) : mensagens.length === 0 ? (
             <p className="py-8 text-center text-sm text-texto-rotulo">
               Sem conversa registrada.
