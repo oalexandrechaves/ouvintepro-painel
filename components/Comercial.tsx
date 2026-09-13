@@ -36,6 +36,7 @@ const FILTROS_VAZIOS: AudienciaFiltros = {
   programa: null,
   comPedido: false,
   comPromocao: false,
+  genero: null,
   // INTERRUPTOR DE DEMONSTRACAO: ARTEFATO DESTA INSTANCIA. Este painel e a peca
   // de venda, e aqui quase toda a base e demonstracao. A instancia de cada radio
   // nasce vazia e so recebe dado real da operacao dela; la nao existe linha
@@ -150,6 +151,7 @@ export default function Comercial({ inicial }: { inicial: Dados | null }) {
     if (f.faixa) p.set("faixa", String(f.faixa));
     if (f.estilo) p.set("estilo", f.estilo);
     if (f.programa) p.set("programa", f.programa);
+    if (f.genero) p.set("genero", f.genero);
     if (f.comPedido) p.set("comPedido", "1");
     if (f.comPromocao) p.set("comPromocao", "1");
     if (!f.incluirDemo) p.set("incluirDemo", "0");
@@ -246,6 +248,7 @@ export default function Comercial({ inicial }: { inicial: Dados | null }) {
     filtros.faixa,
     filtros.estilo,
     filtros.programa,
+    filtros.genero,
     filtros.comPedido || null,
     filtros.comPromocao || null,
   ].filter(Boolean).length;
@@ -315,6 +318,25 @@ export default function Comercial({ inicial }: { inicial: Dados | null }) {
               valor={filtros.programa ?? null}
               opcoes={lista(opcoes.programas)}
               onChange={(v) => set("programa", v)}
+            />
+            <Select
+              label="Gênero (estimado)"
+              valor={filtros.genero ?? null}
+              opcoes={[
+                { valor: "feminino", rotulo: "Feminino" },
+                { valor: "masculino", rotulo: "Masculino" },
+              ]}
+              onChange={(v) =>
+                set(
+                  "genero",
+                  v === "feminino" || v === "masculino" ? v : null,
+                )
+              }
+              todos="Ambos"
+            />
+            <NotaGenero
+              dados={erro ? null : dados}
+              filtroAtivo={Boolean(vistos.genero)}
             />
           </div>
 
@@ -645,6 +667,48 @@ export default function Comercial({ inicial }: { inicial: Dados | null }) {
         />
       ) : null}
     </>
+  );
+}
+
+// ESTIMATIVA, E A TELA DIZ ISSO COM TODAS AS LETRAS. O bot nao pergunta genero:
+// a classificacao sai do primeiro nome, com a frequencia de cada nome por sexo no
+// Censo 2010 do IBGE. Nome ambiguo ou fora da tabela nao e empurrado para um
+// lado; a nota mostra quantos sao, e que ficam de fora com o filtro ativo.
+// Com a demonstracao incluida a cobertura parece quase total, porque os nomes do
+// seed foram escolhidos a dedo: a ressalva aparece sempre que houver demo.
+function NotaGenero({
+  dados,
+  filtroAtivo,
+}: {
+  dados: Dados | null;
+  filtroAtivo: boolean;
+}) {
+  if (!dados) return null;
+  const g = dados.genero;
+  const naoClassificados = g.ambiguo + g.naoEncontrado;
+  return (
+    <div className="flex min-w-0 flex-col justify-end gap-1 text-[12px] leading-relaxed text-texto-corpo sm:col-span-2 lg:col-span-2">
+      <p>
+        <span className="font-medium text-texto-titulo">
+          Estimado pelo primeiro nome, não declarado.
+        </span>{" "}
+        Neste recorte: {numeroBr(g.feminino)} feminino,{" "}
+        {numeroBr(g.masculino)} masculino e{" "}
+        <span className="font-medium text-texto-titulo">
+          {numeroBr(naoClassificados)} sem classificação
+        </span>{" "}
+        ({numeroBr(g.ambiguo)} com nome ambíguo, {numeroBr(g.naoEncontrado)}{" "}
+        fora da tabela do IBGE)
+        {filtroAtivo ? ", que ficam fora do recorte com o filtro ativo." : "."}
+      </p>
+      {dados.demoNoTotal > 0 ? (
+        <p className="text-texto-rotulo">
+          Com a demonstração incluída a classificação parece quase completa: os
+          nomes de demonstração foram escolhidos a dedo. O número que vale é o
+          da base real.
+        </p>
+      ) : null}
+    </div>
   );
 }
 
