@@ -1153,9 +1153,17 @@ export async function registrarGanhador(input: {
 // continuar identicas entre si.
 // ============================================================================
 
+// GENERO ESTIMADO, NUNCA DECLARADO. Sai de public.genero_estimado(ouvintes), que
+// classifica pelo primeiro nome com a frequencia do Censo 2010 do IBGE (cortes de
+// 90% e 10%). Ambiguo e nao encontrado nunca entram num dos lados.
+export type GeneroEstimado = "feminino" | "masculino" | "ambiguo" | "nao_encontrado";
+export type FiltroGenero = "feminino" | "masculino";
+
 export interface AudienciaFiltros {
   cidade?: string | null;
   bairro?: string | null;
+  // Nulo e "ambos": ninguem sai do recorte por causa do genero.
+  genero?: FiltroGenero | null;
   zona?: string | null;
   faixa?: number | null;
   estilo?: string | null;
@@ -1201,6 +1209,15 @@ export interface Audiencia {
   distFaixa: Ranking;
   distEstilo: Ranking;
   distPrograma: Ranking;
+  // Como o recorte se divide por genero ESTIMADO, contado com todos os outros
+  // filtros e ignorando o proprio filtro de genero: assim a tela mostra quantos
+  // ficam sem classificacao mesmo quando o filtro esta em "feminino".
+  genero: {
+    feminino: number;
+    masculino: number;
+    ambiguo: number;
+    naoEncontrado: number;
+  };
   lista: AudienciaItem[];
   listaTruncadaEm: number;
   opcoes: AudienciaOpcoes;
@@ -1266,6 +1283,7 @@ type OuvinteAud = {
   estilo_musical: string | null;
   programa_locutor: string | null;
   consentimento_texto: string | null;
+  genero_estimado: GeneroEstimado;
   radios_concorrentes:
     { nome_radio: string | null; nome_canonico: string | null }[] | null;
 };
@@ -1309,7 +1327,7 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
           sb
             .from("ouvintes")
             .select(
-              "id, nome, telefone, bairro, zona, cidade, numero, faixa_etaria, estilo_musical, programa_locutor, consentimento_texto, radios_concorrentes(nome_radio, nome_canonico)",
+              "id, nome, telefone, bairro, zona, cidade, numero, faixa_etaria, estilo_musical, programa_locutor, consentimento_texto, genero_estimado, radios_concorrentes(nome_radio, nome_canonico)",
             )
             .not("consentimento_em", "is", null)
             .order("id")
@@ -1366,7 +1384,14 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
     // lista e ninguem conseguiria trocar de bairro sem limpar tudo.
     // O interruptor de demonstracao vale para todas as listas: com a demo
     // desligada, bairro que so existe no seed nao aparece e nao devolve zero.
-    type Dim = "cidade" | "bairro" | "zona" | "faixa" | "estilo" | "programa";
+    type Dim =
+      | "cidade"
+      | "bairro"
+      | "zona"
+      | "faixa"
+      | "estilo"
+      | "programa"
+      | "genero";
     const passa = (o: OuvinteAud, ignorar?: Dim): boolean => {
       if (!f.incluirDemo && ehDemo(o)) return false;
       if (ignorar !== "cidade" && f.cidade && o.cidade !== f.cidade)
@@ -1386,6 +1411,10 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
         return false;
       if (f.comPedido && !comPedido.has(o.id)) return false;
       if (f.comPromocao && !comPromo.has(o.id)) return false;
+      // Com o filtro de genero ativo, ambiguo e nao encontrado ficam de fora do
+      // recorte. A tela mostra quantos sao, para ninguem achar que sumiram.
+      if (ignorar !== "genero" && f.genero && o.genero_estimado !== f.genero)
+        return false;
       return true;
     };
     const ordenar = (s: Set<string>) =>
@@ -1406,6 +1435,15 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
     );
 
     const filtrados = ouvintes.filter((o) => passa(o));
+
+    const genero = { feminino: 0, masculino: 0, ambiguo: 0, naoEncontrado: 0 };
+    for (const o of ouvintes) {
+      if (!passa(o, "genero")) continue;
+      if (o.genero_estimado === "feminino") genero.feminino += 1;
+      else if (o.genero_estimado === "masculino") genero.masculino += 1;
+      else if (o.genero_estimado === "ambiguo") genero.ambiguo += 1;
+      else genero.naoEncontrado += 1;
+    }
 
     const mFaixa = new Map<string, number>();
     const mEstilo = new Map<string, number>();
@@ -1470,6 +1508,7 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
       distFaixa,
       distEstilo: ordenarSerie(mEstilo, 8, filtrados.length),
       distPrograma: ordenarSerie(mPrograma, 6, filtrados.length),
+      genero,
       lista,
       listaTruncadaEm: AUDIENCIA_LISTA_MAX,
       opcoes: {

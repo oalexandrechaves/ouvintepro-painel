@@ -25,6 +25,11 @@ export async function GET(req: NextRequest) {
     faixa: Number.isFinite(faixaBruta) && faixaBruta > 0 ? faixaBruta : null,
     estilo: texto(p.get("estilo")),
     programa: texto(p.get("programa")),
+    // So "feminino" ou "masculino" filtram; qualquer outro valor e "ambos".
+    genero:
+      p.get("genero") === "feminino" || p.get("genero") === "masculino"
+        ? (p.get("genero") as "feminino" | "masculino")
+        : null,
     comPedido: p.get("comPedido") === "1",
     comPromocao: p.get("comPromocao") === "1",
     // Demo LIGADO por padrao: esta instancia e a peca de venda e existe para
