@@ -1271,6 +1271,40 @@ async function carregarTodos<T>(
   return out;
 }
 
+// PAGINACAO POR ID (keyset), SO PARA A LEITURA DE OUVINTES DO COMERCIAL.
+// Com .range() o PostgREST pede OFFSET, e o Postgres calcula as colunas do select
+// tambem nas linhas que pula. Enquanto o select era so coluna, pular 49 mil
+// linhas custava 0,06 s. Com genero_estimado (funcao por linha, PR B) a ultima
+// pagina passou a custar 2,4 s e a rota inteira 55 s, a 5 s do teto de 60 s
+// (medido em producao em 13/09/2026). Pedindo "id maior que o ultimo lido", cada
+// pagina le so as proprias 1000 linhas. O conjunto lido e o mesmo: mesma ordem
+// (id), mesmo filtro, e termina na primeira pagina incompleta.
+async function carregarTodosPorId<T extends { id: string }>(
+  monta: (
+    depoisDe: string | null,
+    bloco: number,
+  ) => PromiseLike<{ data: T[] | null; error?: unknown }>,
+  bloco = 1000,
+  tetoAbsoluto = 500_000,
+): Promise<T[]> {
+  const out: T[] = [];
+  let ultimo: string | null = null;
+  for (;;) {
+    const { data, error } = await monta(ultimo, bloco);
+    if (error) throw error;
+    const linhas = data ?? [];
+    if (out.length >= tetoAbsoluto && linhas.length > 0) {
+      throw new Error(
+        `carregarTodosPorId: mais de ${tetoAbsoluto} linhas; a lista estaria incompleta`,
+      );
+    }
+    out.push(...linhas);
+    if (linhas.length < bloco) break;
+    ultimo = linhas[linhas.length - 1].id;
+  }
+  return out;
+}
+
 type OuvinteAud = {
   id: string;
   nome: string | null;
@@ -1323,16 +1357,16 @@ export async function getAudiencia(f: AudienciaFiltros): Promise<Audiencia> {
     const [faixasResp, ouvintes, pedidosRows, promoRows] =
       await Promise.all([
         sb.from("faixas_etarias").select("id, label").order("id"),
-        carregarTodos<OuvinteAud>((de, ate) =>
-          sb
+        carregarTodosPorId<OuvinteAud>((depoisDe, bloco) => {
+          let q = sb
             .from("ouvintes")
             .select(
               "id, nome, telefone, bairro, zona, cidade, numero, faixa_etaria, estilo_musical, programa_locutor, consentimento_texto, genero_estimado, radios_concorrentes(nome_radio, nome_canonico)",
             )
-            .not("consentimento_em", "is", null)
-            .order("id")
-            .range(de, ate),
-        ),
+            .not("consentimento_em", "is", null);
+          if (depoisDe) q = q.gt("id", depoisDe);
+          return q.order("id").limit(bloco);
+        }),
         carregarTodos<{ ouvinte_id: string }>((de, ate) =>
           sb
             .from("pedidos")
